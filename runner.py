@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -85,7 +86,17 @@ ERROR_TYPE_SHIFT_TIMEOUT = "shift_timeout"
 ERROR_TYPE_CODEX_EXIT = "codex_exit"
 
 REVIEW_MIN_EVIDENCE_ITEMS = 2
+REVIEW_MIN_SPEC_TRACE_ITEMS = 3
+REVIEW_MIN_ARCH_SUMMARY_ITEMS = 3
+REVIEW_MAX_ARCH_SUMMARY_ITEMS = 8
 REVIEW_MET_VALUES = {"yes", "no", "partial"}
+REVIEW_ARCHITECTURE_CHECKS = [
+    "right abstractions introduced",
+    "responsibilities split cleanly",
+    "failure modes handled and observable",
+    "state consistent or idempotent",
+    "matches project conventions",
+]
 
 
 def _now_iso() -> str:
@@ -183,7 +194,7 @@ def _atomic_write_yaml(path: Path, data: dict[str, Any]) -> None:
             handle,
             sort_keys=False,
             default_flow_style=False,
-            allow_unicode=False,
+            allow_unicode=True,
         )
         handle.flush()
         os.fsync(handle.fileno())
@@ -484,7 +495,33 @@ def _read_log_tail(path: Path, max_chars: int = 4000) -> str:
     return content[-max_chars:]
 
 
-def _validate_review_data(review_data: dict[str, Any], phase: dict[str, Any]) -> tuple[bool, str]:
+def _normalize_text(value: str) -> str:
+    return " ".join(value.split()).strip().lower()
+
+
+def _validate_string_list(
+    value: Any,
+    field_name: str,
+    min_items: int = 1,
+    max_items: Optional[int] = None,
+) -> tuple[bool, str]:
+    if not isinstance(value, list) or len(value) < min_items:
+        return False, f"{field_name} must be a list with at least {min_items} items"
+    if max_items is not None and len(value) > max_items:
+        return False, f"{field_name} must have no more than {max_items} items"
+    if any(not isinstance(item, str) or not item.strip() for item in value):
+        return False, f"{field_name} must contain non-empty strings"
+    return True, ""
+
+
+def _validate_review_data(
+    review_data: dict[str, Any],
+    phase: dict[str, Any],
+    changed_files: Optional[list[str]] = None,
+    prd_markers: Optional[list[str]] = None,
+    prd_truncated: bool = False,
+    prd_has_content: bool = True,
+) -> tuple[bool, str]:
     if not isinstance(review_data, dict):
         return False, "Review output is not a JSON object"
 
@@ -498,16 +535,46 @@ def _validate_review_data(review_data: dict[str, Any], phase: dict[str, Any]) ->
     blocking = review_data.get("blocking_issues")
     if not isinstance(blocking, list):
         return False, "blocking_issues must be a list"
+    if not prd_has_content and not blocking:
+        return False, "blocking_issues must include PRD access failure"
 
     files_reviewed = review_data.get("files_reviewed")
     if not isinstance(files_reviewed, list) or not files_reviewed:
         return False, "files_reviewed must be a non-empty list"
     if any(not isinstance(item, str) or not item.strip() for item in files_reviewed):
         return False, "files_reviewed must contain non-empty strings"
+    files_reviewed_set = {item.strip() for item in files_reviewed if item.strip()}
+
+    expected_files = [path.strip() for path in (changed_files or []) if str(path).strip()]
+    expected_set = {path for path in expected_files if path}
+    review_changed_files = review_data.get("changed_files")
+    if expected_files or review_changed_files is not None:
+        if not isinstance(review_changed_files, list):
+            return False, "changed_files must be a list"
+        review_changed_set = {
+            str(path).strip() for path in review_changed_files if str(path).strip()
+        }
+        if review_changed_set != expected_set:
+            return False, "changed_files must match coordinator list"
+        if not files_reviewed_set.issubset(expected_set):
+            return False, "files_reviewed must be a subset of changed_files"
 
     spec_summary = review_data.get("spec_summary")
-    if not isinstance(spec_summary, list) or not spec_summary:
-        return False, "spec_summary must be a non-empty list"
+    valid, error = _validate_string_list(spec_summary, "spec_summary")
+    if not valid:
+        return False, error
+
+    prd_markers = prd_markers or []
+    markers_normalized = [_normalize_text(marker) for marker in prd_markers if marker]
+    if markers_normalized:
+        summary_text = " ".join(_normalize_text(item) for item in spec_summary)
+        marker_hits = sum(1 for marker in markers_normalized if marker in summary_text)
+        if marker_hits == 0:
+            return False, "spec_summary must reference PRD section headers or IDs"
+        if prd_truncated:
+            required_hits = min(2, len(markers_normalized))
+            if marker_hits < required_hits:
+                return False, "spec_summary must cite multiple PRD sections when truncated"
 
     evidence = review_data.get("evidence")
     if not isinstance(evidence, list) or len(evidence) < REVIEW_MIN_EVIDENCE_ITEMS:
@@ -515,15 +582,135 @@ def _validate_review_data(review_data: dict[str, Any], phase: dict[str, Any]) ->
     if any(not isinstance(item, str) or not item.strip() for item in evidence):
         return False, "evidence must contain non-empty strings"
 
+    design_assessment = review_data.get("design_assessment")
+    if not isinstance(design_assessment, dict):
+        return False, "design_assessment must be an object"
+
+    valid, error = _validate_string_list(
+        design_assessment.get("architecture_summary"),
+        "design_assessment.architecture_summary",
+        min_items=REVIEW_MIN_ARCH_SUMMARY_ITEMS,
+        max_items=REVIEW_MAX_ARCH_SUMMARY_ITEMS,
+    )
+    if not valid:
+        return False, error
+
+    for field in [
+        "key_components",
+        "data_flow",
+        "invariants",
+        "edge_cases",
+        "security_privacy",
+        "performance_scalability",
+    ]:
+        valid, error = _validate_string_list(
+            design_assessment.get(field),
+            f"design_assessment.{field}",
+        )
+        if not valid:
+            return False, error
+
+    architecture_checklist = review_data.get("architecture_checklist")
+    if not isinstance(architecture_checklist, list) or not architecture_checklist:
+        return False, "architecture_checklist must be a non-empty list"
+    expected_checks = {_normalize_text(item) for item in REVIEW_ARCHITECTURE_CHECKS}
+    observed_checks: set[str] = set()
+    for index, item in enumerate(architecture_checklist):
+        if not isinstance(item, dict):
+            return False, f"architecture_checklist[{index}] must be an object"
+        missing_fields = []
+        check_value = _normalize_text(str(item.get("check", "")))
+        met = str(item.get("met", "")).strip().lower()
+        item_evidence = str(item.get("evidence", "")).strip()
+        files = item.get("files")
+        if not check_value:
+            missing_fields.append("check")
+        if met not in REVIEW_MET_VALUES:
+            missing_fields.append("met")
+        if not item_evidence:
+            missing_fields.append("evidence")
+        if not isinstance(files, list) or not files or any(
+            not isinstance(path, str) or not path.strip() for path in files
+        ):
+            missing_fields.append("files")
+        if missing_fields:
+            return False, f"architecture_checklist[{index}] missing or invalid: {', '.join(missing_fields)}"
+        observed_checks.add(check_value)
+    if not expected_checks.issubset(observed_checks):
+        return False, "architecture_checklist missing required checks"
+
+    spec_traceability = review_data.get("spec_traceability")
+    if not isinstance(spec_traceability, list) or not spec_traceability:
+        return False, "spec_traceability must be a non-empty list"
+    spec_trace_min = 1
+    acceptance = phase.get("acceptance_criteria") or []
+    if (changed_files and len(changed_files) > 1) or (
+        isinstance(acceptance, list) and len(acceptance) > 1
+    ):
+        spec_trace_min = REVIEW_MIN_SPEC_TRACE_ITEMS
+    if markers_normalized and len(markers_normalized) < spec_trace_min:
+        spec_trace_min = len(markers_normalized)
+    if len(spec_traceability) < spec_trace_min:
+        return False, f"spec_traceability must include at least {spec_trace_min} items"
+    trace_has_marker = False
+    for index, item in enumerate(spec_traceability):
+        if not isinstance(item, dict):
+            return False, f"spec_traceability[{index}] must be an object"
+        missing_fields = []
+        requirement_raw = str(item.get("requirement", "")).strip()
+        requirement_norm = _normalize_text(requirement_raw)
+        item_evidence = str(item.get("implementation_evidence", "")).strip()
+        files = item.get("files")
+        if not requirement_raw:
+            missing_fields.append("requirement")
+        if not item_evidence:
+            missing_fields.append("implementation_evidence")
+        if not isinstance(files, list) or not files or any(
+            not isinstance(path, str) or not path.strip() for path in files
+        ):
+            missing_fields.append("files")
+        if missing_fields:
+            return False, f"spec_traceability[{index}] missing or invalid: {', '.join(missing_fields)}"
+        if markers_normalized and any(marker in requirement_norm for marker in markers_normalized):
+            trace_has_marker = True
+    if markers_normalized and not trace_has_marker:
+        return False, "spec_traceability must reference PRD sections or IDs"
+
+    logic_risks = review_data.get("logic_risks")
+    if not isinstance(logic_risks, list) or not logic_risks:
+        return False, "logic_risks must be a non-empty list"
+    for index, item in enumerate(logic_risks):
+        if not isinstance(item, dict):
+            return False, f"logic_risks[{index}] must be an object"
+        missing_fields = []
+        risk = str(item.get("risk", "")).strip()
+        impact = str(item.get("impact", "")).strip()
+        mitigation = str(item.get("mitigation", "")).strip()
+        files = item.get("evidence_files")
+        if not risk:
+            missing_fields.append("risk")
+        if not impact:
+            missing_fields.append("impact")
+        if not mitigation:
+            missing_fields.append("mitigation")
+        if not isinstance(files, list) or not files or any(
+            not isinstance(path, str) or not path.strip() for path in files
+        ):
+            missing_fields.append("evidence_files")
+        if missing_fields:
+            return False, f"logic_risks[{index}] missing or invalid: {', '.join(missing_fields)}"
+
     checklist = review_data.get("acceptance_criteria_checklist")
     if not isinstance(checklist, list) or not checklist:
         return False, "acceptance_criteria_checklist must be a non-empty list"
 
-    missing_fields = []
-    for item in checklist:
+    checklist_criteria = []
+    for index, item in enumerate(checklist):
         if not isinstance(item, dict):
-            return False, "acceptance_criteria_checklist items must be objects"
-        criterion = str(item.get("criterion", "")).strip()
+            return False, f"checklist[{index}] must be an object"
+        missing_fields = []
+        criterion_raw = str(item.get("criterion", "")).strip()
+        criterion = _normalize_text(criterion_raw)
         met = str(item.get("met", "")).strip().lower()
         item_evidence = str(item.get("evidence", "")).strip()
         files = item.get("files")
@@ -537,21 +724,23 @@ def _validate_review_data(review_data: dict[str, Any], phase: dict[str, Any]) ->
             not isinstance(path, str) or not path.strip() for path in files
         ):
             missing_fields.append("files")
-    if missing_fields:
-        return False, "acceptance_criteria_checklist items missing required fields"
+        if missing_fields:
+            return False, f"checklist[{index}] missing or invalid: {', '.join(missing_fields)}"
+        checklist_criteria.append(criterion)
 
-    acceptance = phase.get("acceptance_criteria") or []
     if isinstance(acceptance, list) and acceptance:
-        if len(checklist) < len(acceptance):
-            return False, "acceptance_criteria_checklist does not cover all criteria"
-        checklist_criteria = [str(item.get("criterion", "")).lower() for item in checklist]
-        missing = [
-            criterion
+        normalized_acceptance = {
+            _normalize_text(str(criterion))
             for criterion in acceptance
-            if str(criterion).lower() not in " ".join(checklist_criteria)
-        ]
+            if str(criterion).strip()
+        }
+        checklist_set = {criterion for criterion in checklist_criteria if criterion}
+        missing = [criterion for criterion in normalized_acceptance if criterion not in checklist_set]
         if missing:
             return False, "acceptance_criteria_checklist missing criteria entries"
+    else:
+        if "(none provided)" not in checklist_criteria:
+            return False, 'acceptance_criteria_checklist must include "(none provided)"'
 
     return True, ""
 
@@ -677,13 +866,57 @@ def _read_text_for_prompt(path: Path, max_chars: int = 20000) -> tuple[str, bool
     return content[:max_chars], True
 
 
+def _extract_prd_markers(prd_text: str, max_items: int = 20) -> list[str]:
+    markers: list[str] = []
+    seen: set[str] = set()
+    id_pattern = re.compile(r"\b[A-Z]{2,10}-\d+\b")
+    req_pattern = re.compile(r"\bREQ(?:UIREMENT)?\s*\d+\b", re.IGNORECASE)
+
+    for line in prd_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            header = stripped.lstrip("#").strip()
+            normalized = _normalize_text(header)
+            if header and normalized not in seen:
+                markers.append(header)
+                seen.add(normalized)
+                if len(markers) >= max_items:
+                    return markers
+        for match in id_pattern.findall(line):
+            normalized = _normalize_text(match)
+            if normalized not in seen:
+                markers.append(match)
+                seen.add(normalized)
+                if len(markers) >= max_items:
+                    return markers
+        for match in req_pattern.findall(line):
+            normalized = _normalize_text(match)
+            if normalized not in seen:
+                markers.append(match)
+                seen.add(normalized)
+                if len(markers) >= max_items:
+                    return markers
+
+    return markers
+
+
 def _build_review_prompt(
     phase: dict[str, Any],
     review_path: Path,
     prd_path: Path,
+    prd_text: str,
+    prd_truncated: bool,
+    prd_markers: Optional[list[str]],
     user_prompt: Optional[str],
     progress_path: Optional[Path] = None,
     run_id: Optional[str] = None,
+    changed_files: Optional[list[str]] = None,
+    diff_text: str = "",
+    diff_truncated: bool = False,
+    diff_stat: str = "",
+    diff_stat_truncated: bool = False,
+    status_text: str = "",
+    status_truncated: bool = False,
 ) -> str:
     acceptance = phase.get("acceptance_criteria") or []
     acceptance_block = "\n".join(f"- {item}" for item in acceptance) if acceptance else "- (none)"
@@ -696,12 +929,27 @@ def _build_review_prompt(
             f"  Required fields: run_id={run_id}, task_id, phase, actions, claims, "
             "next_steps, blocking_issues, heartbeat.\n"
         )
-    prd_text, prd_truncated = _read_text_for_prompt(prd_path)
     prd_notice = ""
     if prd_truncated:
         prd_notice = (
             "\nNOTE: PRD content truncated. Open the PRD file to read the full spec.\n"
         )
+    prd_markers = prd_markers or []
+    markers_block = "\n".join(f"- {item}" for item in prd_markers) if prd_markers else "- (none found)"
+    changed_files = changed_files or []
+    changed_block = "\n".join(f"- {path}" for path in changed_files) if changed_files else "- (none)"
+    diff_notice = ""
+    if diff_truncated:
+        diff_notice = "\nNOTE: Diff truncated. Open git diff for full context.\n"
+    diff_block = diff_text if diff_text else "(no diff output; open listed files directly)"
+    diff_stat_notice = ""
+    if diff_stat_truncated:
+        diff_stat_notice = "\nNOTE: Diffstat truncated.\n"
+    diff_stat_block = diff_stat if diff_stat else "(no diffstat output)"
+    status_notice = ""
+    if status_truncated:
+        status_notice = "\nNOTE: Status truncated.\n"
+    status_block = status_text if status_text else "(clean)"
     return f"""Perform a code review for the phase below and write JSON to {review_path}.
 
 Phase: {phase.get("name") or phase.get("id")}
@@ -709,15 +957,56 @@ PRD: {prd_path}
 PRD content (read first):
 {prd_text}
 {prd_notice}
+PRD sections/IDs (for reference in spec_summary):
+{markers_block}
 Acceptance criteria:
 {acceptance_block}
 {user_block}
 {progress_block}
 
+Git status (from coordinator):
+{status_block}
+{status_notice}
+
+Changed files (from coordinator):
+{changed_block}
+
+Diffstat (from coordinator):
+{diff_stat_block}
+{diff_stat_notice}
+
+Diff (from coordinator):
+{diff_block}
+{diff_notice}
+
 Review output schema:
 {{
   "phase_id": "{phase.get('id')}",
   "spec_summary": ["bullets restating PRD requirements relevant to this phase"],
+  "spec_traceability": [
+    {{
+      "requirement": "PRD section/ID and requirement text",
+      "implementation_evidence": "specific evidence from code or diff",
+      "files": ["path/to/file.ext"]
+    }}
+  ],
+  "design_assessment": {{
+    "architecture_summary": ["3-8 bullets describing solution structure"],
+    "key_components": ["components/modules touched and their roles"],
+    "data_flow": ["input -> transform -> output flow bullets"],
+    "invariants": ["properties that must hold true"],
+    "edge_cases": ["non-trivial cases and handling"],
+    "security_privacy": ["concerns or (none)"],
+    "performance_scalability": ["concerns or (none)"]
+  }},
+  "architecture_checklist": [
+    {{
+      "check": "right abstractions introduced",
+      "met": "yes|no|partial",
+      "evidence": "specific evidence from code or diff",
+      "files": ["path/to/file.ext"]
+    }}
+  ],
   "acceptance_criteria_checklist": [
     {{
       "criterion": "exact acceptance criterion text",
@@ -729,20 +1018,41 @@ Review output schema:
   "summary": "Short summary",
   "blocking_issues": ["list of blockers"],
   "non_blocking": ["nice-to-have improvements"],
+  "changed_files": ["exact list from coordinator"],
   "files_reviewed": ["list of paths"],
   "evidence": ["at least two concrete observations with file/diff references"],
+  "logic_risks": [
+    {{
+      "risk": "risk statement or (none found)",
+      "impact": "impact if risk occurs",
+      "mitigation": "mitigation or follow-up",
+      "evidence_files": ["path/to/file.ext"]
+    }}
+  ],
   "recommendations": ["actionable fixes"]
 }}
 
 Review instructions:
 - Read the PRD content and restate the relevant requirements in spec_summary.
-- Run: git diff --name-only AND git diff. Base your review on these changes.
+- Reference PRD section headers/IDs in spec_summary where available.
+- Base your review on the provided changed files, diffstat, and diff (do not invent files).
+- Copy the coordinator-provided changed_files list exactly into changed_files.
+- Populate spec_traceability for PRD requirements, not just acceptance criteria.
+- Complete design_assessment and architecture_checklist from the code and diff.
+- If you cannot describe architecture/data flow/invariants from code, add a blocking_issue.
 - For each acceptance criterion, fill acceptance_criteria_checklist with met + evidence.
 - If acceptance criteria are empty, include one checklist item with criterion "(none provided)".
 - Provide at least {REVIEW_MIN_EVIDENCE_ITEMS} concrete evidence items tied to files/diff.
 - If README updates are missing or spec requirements are unmet, add blocking_issues.
 - Do not treat passing tests as sufficient evidence of spec compliance.
-- If you cannot access the PRD text or git diff, add a blocking_issue explaining why.
+- If you cannot access the PRD text or diff, add a blocking_issue explaining why.
+
+Architecture checklist (use these exact check labels):
+- right abstractions introduced
+- responsibilities split cleanly
+- failure modes handled and observable
+- state consistent or idempotent
+- matches project conventions
 """
 
 
@@ -950,10 +1260,143 @@ def _git_has_changes(project_dir: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+def _git_changed_files(project_dir: Path) -> list[str]:
+    changed: set[str] = set()
+    commands = [
+        ["git", "diff", "--name-only"],
+        ["git", "diff", "--name-only", "--staged"],
+        ["git", "ls-files", "--others", "--exclude-standard"],
+    ]
+    for command in commands:
+        result = subprocess.run(
+            command,
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            continue
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line:
+                changed.add(line)
+    return sorted(changed)
+
+
+def _git_diff_text(project_dir: Path, max_chars: int = 20000) -> tuple[str, bool]:
+    sections: list[str] = []
+    commands = [
+        ("UNSTAGED DIFF", ["git", "diff"]),
+        ("STAGED DIFF", ["git", "diff", "--staged"]),
+    ]
+    for label, command in commands:
+        result = subprocess.run(
+            command,
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            continue
+        content = result.stdout.strip()
+        if content:
+            sections.append(f"{label}:\n{content}")
+    diff_text = "\n\n".join(sections).strip()
+    if not diff_text:
+        return "", False
+    if len(diff_text) <= max_chars:
+        return diff_text, False
+    return diff_text[:max_chars], True
+
+
+def _git_diff_stat(project_dir: Path, max_chars: int = 4000) -> tuple[str, bool]:
+    sections: list[str] = []
+    commands = [
+        ("UNSTAGED DIFFSTAT", ["git", "diff", "--stat"]),
+        ("STAGED DIFFSTAT", ["git", "diff", "--stat", "--staged"]),
+    ]
+    for label, command in commands:
+        result = subprocess.run(
+            command,
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            continue
+        content = result.stdout.strip()
+        if content:
+            sections.append(f"{label}:\n{content}")
+    diff_stat = "\n\n".join(sections).strip()
+    if not diff_stat:
+        return "", False
+    if len(diff_stat) <= max_chars:
+        return diff_stat, False
+    return diff_stat[:max_chars], True
+
+
+def _git_status_porcelain(project_dir: Path, max_chars: int = 2000) -> tuple[str, bool]:
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=project_dir,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return "", False
+    content = result.stdout.strip()
+    if not content:
+        return "", False
+    if len(content) <= max_chars:
+        return content, False
+    return content[:max_chars], True
+
+
 def _git_commit_and_push(project_dir: Path, branch: str, message: str) -> None:
     subprocess.run(["git", "add", "-A"], cwd=project_dir, check=True)
     subprocess.run(["git", "commit", "-m", message], cwd=project_dir, check=True)
     subprocess.run(["git", "push", "-u", "origin", branch], cwd=project_dir, check=True)
+
+
+def _has_implementation_evidence(task: dict[str, Any], runs_dir: Path, project_dir: Path) -> bool:
+    if _git_has_changes(project_dir):
+        return True
+    run_id = task.get("last_run_id")
+    if not run_id:
+        return False
+    manifest_path = runs_dir / str(run_id) / "manifest.json"
+    manifest = _load_data(manifest_path, {})
+    if manifest.get("exit_code") == 0:
+        return True
+    return False
+
+
+def _active_run_is_stale(
+    run_state: dict[str, Any],
+    runs_dir: Path,
+    heartbeat_grace_seconds: int,
+    shift_minutes: int,
+) -> bool:
+    if run_state.get("status") != "running":
+        return False
+    run_id = run_state.get("run_id")
+    if not run_id:
+        return True
+    progress_path = runs_dir / str(run_id) / "progress.json"
+    heartbeat = _heartbeat_from_progress(progress_path, expected_run_id=str(run_id))
+    now = datetime.now(timezone.utc)
+    if heartbeat:
+        age = (now - heartbeat).total_seconds()
+        return age > heartbeat_grace_seconds
+    updated_at = _parse_iso(run_state.get("updated_at"))
+    if updated_at:
+        age = (now - updated_at).total_seconds()
+        return age > max(heartbeat_grace_seconds, shift_minutes * 60)
+    return True
 
 
 def _phase_for_task(phases: list[dict[str, Any]], task: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -1041,6 +1484,27 @@ def run_feature_prd(
             queue["tasks"] = tasks
             plan["phases"] = phases
 
+            if run_state.get("status") == "running":
+                if not _active_run_is_stale(
+                    run_state,
+                    paths["runs"],
+                    heartbeat_grace_seconds,
+                    shift_minutes,
+                ):
+                    print("\nAnother run is already active. Exiting to avoid overlap.")
+                    return
+                run_state.update(
+                    {
+                        "status": "idle",
+                        "current_task_id": None,
+                        "current_phase_id": None,
+                        "run_id": None,
+                        "last_error": "Previous run marked stale; resuming",
+                        "updated_at": _now_iso(),
+                    }
+                )
+                _save_data(paths["run_state"], run_state)
+
             if not tasks:
                 tasks = [_build_plan_task()]
                 queue["tasks"] = tasks
@@ -1083,6 +1547,12 @@ def run_feature_prd(
                 else:
                     next_task["status"] = TASK_STATUS_IMPLEMENTING
                 task_status = next_task["status"]
+            if task_type != "plan" and task_status in {TASK_STATUS_TESTING, TASK_STATUS_REVIEW}:
+                if not _has_implementation_evidence(next_task, paths["runs"], project_dir):
+                    next_task["status"] = TASK_STATUS_IMPLEMENTING
+                    next_task["last_error"] = "No implementation evidence; rerunning implementation"
+                    next_task["last_error_type"] = "missing_implementation"
+                    task_status = next_task["status"]
             if task_type != "plan" and _git_has_changes(project_dir):
                 dirty_note = "Workspace has uncommitted changes; continue from them and do not reset."
                 context = next_task.get("context", []) or []
@@ -1154,6 +1624,23 @@ def run_feature_prd(
                 continue
 
             branch = phase.get("branch") or f"feature/{phase_id or task_id}"
+            current_branch = _git_current_branch(project_dir)
+            if _git_has_changes(project_dir) and current_branch and current_branch != branch:
+                print(
+                    f"\nDirty workspace on branch {current_branch}; expected {branch}. Blocking task."
+                )
+                with FileLock(lock_path):
+                    queue = _load_data(paths["task_queue"], {})
+                    tasks = _normalize_tasks(queue)
+                    target = _find_task(tasks, task_id)
+                    if target:
+                        target["status"] = TASK_STATUS_BLOCKED
+                        target["last_error"] = (
+                            f"Dirty workspace on branch {current_branch}; expected {branch}"
+                        )
+                        target["last_error_type"] = "dirty_branch_mismatch"
+                        _save_queue(paths["task_queue"], queue, tasks)
+                continue
             try:
                 _ensure_branch(project_dir, branch)
                 _append_event(
@@ -1448,6 +1935,26 @@ def run_feature_prd(
             _save_queue(paths["task_queue"], queue, tasks)
             _save_plan(paths["phase_plan"], plan, phases)
 
+        prd_text, prd_truncated = _read_text_for_prompt(prd_path)
+        prd_markers = _extract_prd_markers(prd_text)
+        changed_files = _git_changed_files(project_dir)
+        if not changed_files:
+            target["status"] = TASK_STATUS_IMPLEMENTING
+            target["last_error"] = "No changed files to review"
+            target["last_error_type"] = "review_no_changes"
+            target["context"] = target.get("context", []) + [
+                "No changed files detected; implement changes before review."
+            ]
+            _sync_phase_status(phase, target["status"])
+            _save_queue(paths["task_queue"], queue, tasks)
+            _save_plan(paths["phase_plan"], plan, phases)
+            print(f"\nNo changed files for phase {phase.get('id')}. Re-queueing task.")
+            continue
+
+        diff_text, diff_truncated = _git_diff_text(project_dir)
+        diff_stat, diff_stat_truncated = _git_diff_stat(project_dir)
+        status_text, status_truncated = _git_status_porcelain(project_dir)
+
         review_path = paths["artifacts"] / f"review_{phase.get('id')}.json"
         review_run_id = f"{run_id}-review"
         review_run_dir = paths["runs"] / review_run_id
@@ -1466,9 +1973,19 @@ def run_feature_prd(
             phase=phase,
             review_path=review_path,
             prd_path=prd_path,
+            prd_text=prd_text,
+            prd_truncated=prd_truncated,
+            prd_markers=prd_markers,
             user_prompt=user_prompt,
             progress_path=review_progress_path,
             run_id=review_run_id,
+            changed_files=changed_files,
+            diff_text=diff_text,
+            diff_truncated=diff_truncated,
+            diff_stat=diff_stat,
+            diff_stat_truncated=diff_stat_truncated,
+            status_text=status_text,
+            status_truncated=status_truncated,
         )
 
         review_result = _run_codex_worker(
@@ -1501,7 +2018,14 @@ def run_feature_prd(
             continue
 
         review_data = _load_data(review_path, {})
-        valid_review, review_issue = _validate_review_data(review_data, phase)
+        valid_review, review_issue = _validate_review_data(
+            review_data,
+            phase,
+            changed_files,
+            prd_markers=prd_markers,
+            prd_truncated=prd_truncated,
+            prd_has_content=bool(prd_text.strip()),
+        )
         if not valid_review:
             target["status"] = TASK_STATUS_REVIEW
             target["last_error"] = f"Review output invalid: {review_issue}"
@@ -1535,6 +2059,21 @@ def run_feature_prd(
             _save_queue(paths["task_queue"], queue, tasks)
             _save_plan(paths["phase_plan"], plan, phases)
             print(f"\nReview blockers found for phase {phase.get('id')}. Re-queueing task.")
+            continue
+
+        post_review_files = _git_changed_files(project_dir)
+        reviewed_files = review_data.get("changed_files") or []
+        if set(post_review_files) != set(reviewed_files):
+            target["status"] = TASK_STATUS_REVIEW
+            target["last_error"] = "Changes modified after review; re-run review"
+            target["last_error_type"] = "review_stale"
+            target["context"] = target.get("context", []) + [
+                "Changes differ from reviewed diff; re-run review."
+            ]
+            _sync_phase_status(phase, target["status"])
+            _save_plan(paths["phase_plan"], plan, phases)
+            _save_queue(paths["task_queue"], queue, tasks)
+            print(f"\nChanges updated after review for phase {phase.get('id')}. Re-queueing review.")
             continue
 
         target["status"] = TASK_STATUS_DONE

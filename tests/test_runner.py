@@ -61,6 +61,9 @@ class TestFeaturePrdRunner:
             phase={"id": "phase-1", "acceptance_criteria": ["AC1"]},
             review_path=Path("/tmp/review.json"),
             prd_path=Path("/tmp/prd.md"),
+            prd_text="## Requirements\nREQ-1: Do thing\n",
+            prd_truncated=False,
+            prd_markers=["Requirements", "REQ-1"],
             user_prompt=None,
         )
 
@@ -68,6 +71,14 @@ class TestFeaturePrdRunner:
         self.assert_true("acceptance criteria" in prompt.lower(), "Acceptance criteria included")
         self.assert_true("acceptance_criteria_checklist" in prompt, "Checklist schema included")
         self.assert_true("spec_summary" in prompt, "Spec summary required")
+        self.assert_true("changed_files" in prompt, "Changed files schema included")
+        self.assert_true("Diff (from coordinator)" in prompt, "Diff block included")
+        self.assert_true("Diffstat (from coordinator)" in prompt, "Diffstat block included")
+        self.assert_true("Git status (from coordinator)" in prompt, "Status block included")
+        self.assert_true("design_assessment" in prompt, "Design assessment required")
+        self.assert_true("architecture_checklist" in prompt, "Architecture checklist required")
+        self.assert_true("spec_traceability" in prompt, "Spec traceability required")
+        self.assert_true("logic_risks" in prompt, "Logic risks required")
         self.assert_true("Review instructions" in prompt, "Review instructions included")
 
     def test_plan_prompt_includes_resume_prompt(self) -> None:
