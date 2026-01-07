@@ -263,6 +263,25 @@ def _update_progress(progress_path: Path, updates: dict[str, Any]) -> None:
     _save_data(progress_path, current)
 
 
+def _ensure_gitignore(project_dir: Path) -> None:
+    gitignore_path = project_dir / ".gitignore"
+    ignore_entry = f"{STATE_DIR_NAME}/"
+    try:
+        if gitignore_path.exists():
+            contents = gitignore_path.read_text()
+            lines = {line.strip() for line in contents.splitlines() if line.strip()}
+            if STATE_DIR_NAME in lines or ignore_entry in lines:
+                return
+            if contents and not contents.endswith("\n"):
+                contents += "\n"
+            contents += ignore_entry + "\n"
+            gitignore_path.write_text(contents)
+        else:
+            gitignore_path.write_text(ignore_entry + "\n")
+    except OSError as exc:
+        print(f"Warning: unable to update .gitignore: {exc}")
+
+
 def _ensure_state_files(project_dir: Path, prd_path: Path) -> dict[str, Path]:
     state_dir = project_dir / STATE_DIR_NAME
     run_state_path = state_dir / RUN_STATE_FILE
@@ -2050,6 +2069,7 @@ def run_feature_prd(
 ) -> None:
     project_dir = project_dir.resolve()
     prd_path = prd_path.resolve()
+    _ensure_gitignore(project_dir)
     paths = _ensure_state_files(project_dir, prd_path)
 
     lock_path = paths["state_dir"] / LOCK_FILE
