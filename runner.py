@@ -88,6 +88,12 @@ TASK_RUN_CODEX_STATUSES = {
 ERROR_TYPE_HEARTBEAT_TIMEOUT = "heartbeat_timeout"
 ERROR_TYPE_SHIFT_TIMEOUT = "shift_timeout"
 ERROR_TYPE_CODEX_EXIT = "codex_exit"
+ERROR_TYPE_PLAN_MISSING = "plan_missing"
+AUTO_RESUME_ERROR_TYPES = {
+    ERROR_TYPE_HEARTBEAT_TIMEOUT,
+    ERROR_TYPE_SHIFT_TIMEOUT,
+    ERROR_TYPE_PLAN_MISSING,
+}
 
 REVIEW_MIN_EVIDENCE_ITEMS = 2
 REVIEW_MIN_SPEC_TRACE_ITEMS = 3
@@ -105,6 +111,8 @@ MAX_REVIEW_ATTEMPTS = 3
 MAX_NO_CHANGE_ATTEMPTS = 3
 MAX_IMPL_PLAN_ATTEMPTS = 3
 MIN_IMPL_PLAN_STEPS = 5
+MAX_NO_PROGRESS_ATTEMPTS = 2
+MAX_PLAN_STEPS_PER_RUN = 1
 IGNORED_REVIEW_PATH_PREFIXES = [
     ".prd_runner/",
     "__pycache__/",
@@ -406,10 +414,12 @@ def _normalize_tasks(queue: dict[str, Any]) -> list[dict[str, Any]]:
         task.setdefault("last_error_type", None)
         task.setdefault("review_attempts", 0)
         task.setdefault("no_change_attempts", 0)
+        task.setdefault("no_progress_attempts", 0)
         task.setdefault("plan_attempts", 0)
         task.setdefault("impl_plan_path", None)
         task.setdefault("impl_plan_hash", None)
         task.setdefault("impl_plan_run_id", None)
+        task.setdefault("next_plan_step_index", 0)
         task.setdefault("last_changed_files", [])
         task.setdefault("context", [])
         acceptance = task.get("acceptance_criteria", [])
@@ -477,8 +487,8 @@ def _select_next_task(tasks: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
     return None
 
 
-def _is_transient_error(error: Optional[str], error_type: Optional[str] = None) -> bool:
-    if error_type in {ERROR_TYPE_HEARTBEAT_TIMEOUT, ERROR_TYPE_SHIFT_TIMEOUT}:
+def _is_auto_resumable_error(error: Optional[str], error_type: Optional[str] = None) -> bool:
+    if error_type in AUTO_RESUME_ERROR_TYPES:
         return True
     if not error:
         return False
@@ -496,7 +506,7 @@ def _maybe_auto_resume_blocked(
             continue
         last_error = task.get("last_error")
         last_error_type = task.get("last_error_type")
-        if not _is_transient_error(last_error, last_error_type):
+        if not _is_auto_resumable_error(last_error, last_error_type):
             continue
         attempts = int(task.get("auto_resume_attempts", 0))
         if attempts >= max_auto_resumes:
@@ -515,6 +525,53 @@ def _maybe_auto_resume_blocked(
         queue["updated_at"] = _now_iso()
         queue["auto_resumed_at"] = _now_iso()
     return tasks, changed
+
+
+def _blocked_dependency_tasks(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    tasks_by_id = {task.get("id"): task for task in tasks if task.get("id")}
+    blocked: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        if task.get("status") != TASK_STATUS_TODO:
+            continue
+        for dep_id in task.get("deps", []) or []:
+            dep = tasks_by_id.get(dep_id)
+            if dep and dep.get("status") == TASK_STATUS_BLOCKED:
+                blocked[str(dep.get("id"))] = dep
+    return list(blocked.values())
+
+
+def _auto_resume_blocked_dependencies(
+    queue: dict[str, Any],
+    tasks: list[dict[str, Any]],
+    max_auto_resumes: int,
+) -> bool:
+    blocked_deps = _blocked_dependency_tasks(tasks)
+    if not blocked_deps:
+        return False
+    changed = False
+    for task in blocked_deps:
+        last_error = task.get("last_error")
+        last_error_type = task.get("last_error_type")
+        if task.get("type") != "plan" and not _is_auto_resumable_error(
+            last_error, last_error_type
+        ):
+            continue
+        attempts = int(task.get("auto_resume_attempts", 0))
+        if attempts >= max_auto_resumes:
+            continue
+        task["status"] = TASK_STATUS_TODO
+        task["attempts"] = 0
+        task["last_error"] = None
+        task["last_error_type"] = None
+        task["auto_resume_attempts"] = attempts + 1
+        task["last_updated_at"] = _now_iso()
+        changed = True
+
+    if changed:
+        queue["tasks"] = tasks
+        queue["updated_at"] = _now_iso()
+        queue["auto_resumed_at"] = _now_iso()
+    return changed
 
 
 def _read_log_tail(path: Path, max_chars: int = 4000) -> str:
@@ -573,6 +630,81 @@ def _render_json_for_prompt(data: dict[str, Any], max_chars: int = 20000) -> tup
     if len(text) <= max_chars:
         return text, False
     return text[:max_chars], True
+
+
+def _format_plan_steps_for_prompt(
+    steps: list[dict[str, Any]],
+    start_index: int,
+    total_steps: int,
+) -> str:
+    if not steps:
+        return "(no steps available)"
+    lines: list[str] = []
+    for offset, step in enumerate(steps):
+        step_number = start_index + offset + 1
+        step_id = str(step.get("id") or f"S{step_number}").strip()
+        title = str(step.get("title", "")).strip()
+        details = str(step.get("details", "")).strip()
+        files = step.get("files")
+        done_when = step.get("done_when")
+        lines.append(f"Step {step_number} of {total_steps}")
+        lines.append(f"- id: {step_id}")
+        if title:
+            lines.append(f"- title: {title}")
+        if details:
+            lines.append(f"- details: {details}")
+        if isinstance(files, list) and files:
+            lines.append("- files:")
+            for path in files:
+                path_value = str(path).strip()
+                if path_value:
+                    lines.append(f"  - {path_value}")
+        if isinstance(done_when, list) and done_when:
+            lines.append("- done_when:")
+            for item in done_when:
+                item_value = str(item).strip()
+                if item_value:
+                    lines.append(f"  - {item_value}")
+        lines.append("")
+    return "\n".join(lines).rstrip()
+
+
+def _allowed_files_for_steps(
+    steps: list[dict[str, Any]],
+    plan_data: dict[str, Any],
+    plan_path: Optional[Path] = None,
+) -> list[str]:
+    allowed: list[str] = []
+    seen: set[str] = set()
+
+    def _add(paths: Any) -> None:
+        if not isinstance(paths, list):
+            return
+        for path in paths:
+            path_value = str(path).strip()
+            if not path_value or path_value in seen:
+                continue
+            allowed.append(path_value)
+            seen.add(path_value)
+
+    for step in steps:
+        if isinstance(step, dict):
+            _add(step.get("files"))
+
+    if not allowed:
+        _add(plan_data.get("files_to_change"))
+        _add(plan_data.get("new_files"))
+
+    if plan_path:
+        plan_value = str(plan_path)
+        if plan_value not in seen:
+            allowed.append(plan_value)
+            seen.add(plan_value)
+
+    if "README.md" not in seen:
+        allowed.append("README.md")
+
+    return allowed
 
 
 def _is_docs_only_phase(phase: dict[str, Any]) -> bool:
@@ -1082,9 +1214,10 @@ def _build_phase_prompt(
     progress_path: Path,
     run_id: str,
     user_prompt: Optional[str],
-    impl_plan_text: str = "",
-    impl_plan_truncated: bool = False,
     impl_plan_path: Optional[Path] = None,
+    plan_steps_text: str = "",
+    allowed_files: Optional[list[str]] = None,
+    no_progress_attempts: int = 0,
 ) -> str:
     phase_name = phase.get("name") or phase.get("id")
     acceptance = phase.get("acceptance_criteria") or []
@@ -1095,10 +1228,15 @@ def _build_phase_prompt(
     context_block = "\n".join(f"- {item}" for item in context_items) if context_items else "- (none)"
 
     user_block = f"\nSpecial instructions:\n{user_prompt}\n" if user_prompt else ""
-    plan_notice = ""
-    if impl_plan_truncated:
-        plan_notice = "\nNOTE: Plan truncated. Open the plan file for full details.\n"
     plan_path_display = impl_plan_path or "(missing)"
+    allowed_files = allowed_files or []
+    allowed_block = "\n".join(f"- {path}" for path in allowed_files) if allowed_files else "- (none)"
+    no_progress_block = ""
+    if no_progress_attempts > 0:
+        no_progress_block = (
+            "\nNOTE: Previous run made no code changes. You must edit the allowed files "
+            "and complete the listed step(s) in this run.\n"
+        )
     return f"""You are a Codex CLI worker. Implement the phase described below.
 
 PRD: {prd_path}
@@ -1116,12 +1254,20 @@ Rules:
 - Do not commit or push; the coordinator will handle git.
 - If tests fail, fix them (the coordinator will also run tests).
 - Keep the project's README.md updated with changes in this phase (features, setup, usage).
-- Follow the implementation plan below. If you must deviate, update the plan file
-  with a non-empty "plan_deviations" list explaining why.
+- Follow the plan steps below. If you must deviate, update the plan file with a
+  non-empty "plan_deviations" list explaining why.
+- Do only the step(s) listed below. Do not continue to later steps.
+- Begin editing code immediately.
+- Do not scan the repository.
+- Read/edit only the allowed files.
 
-Implementation plan ({plan_path_display}):
-{impl_plan_text or "(missing)"}
-{plan_notice}
+Implementation plan file: {plan_path_display}
+Plan step(s) for this run:
+{plan_steps_text or "(missing)"}
+
+Allowed files to read/edit:
+{allowed_block}
+{no_progress_block}
 
 Progress contract (REQUIRED):
 - Append events to: {events_path}
@@ -1976,10 +2122,14 @@ def run_feature_prd(
             tasks, resumed = _maybe_auto_resume_blocked(queue, tasks, max_auto_resumes)
             if resumed:
                 _save_data(paths["task_queue"], queue)
-                print("Auto-resumed blocked tasks after transient failure")
+                print("Auto-resumed blocked tasks after auto-resumable failure")
 
             next_task = _select_next_task(tasks)
             if not next_task:
+                if _auto_resume_blocked_dependencies(queue, tasks, max_auto_resumes):
+                    _save_data(paths["task_queue"], queue)
+                    print("Auto-resumed blocked dependency tasks to resolve deadlock")
+                    continue
                 run_state.update(
                     {
                         "status": "idle",
@@ -2030,16 +2180,27 @@ def run_feature_prd(
                     prd_has_content=bool(prd_text.strip()),
                     expected_test_command=phase_test_command,
                 )
+                steps = plan_data.get("steps") if isinstance(plan_data, dict) else []
+                step_count = len(steps) if isinstance(steps, list) else 0
+                step_index = max(0, int(next_task.get("next_plan_step_index", 0)))
                 if task_status == TASK_STATUS_PLAN_IMPL and plan_valid:
                     next_task["status"] = TASK_STATUS_IMPLEMENTING
                     next_task["impl_plan_path"] = str(plan_path)
                     next_task["impl_plan_hash"] = _hash_json_data(plan_data)
+                    next_task["next_plan_step_index"] = 0
+                    next_task["no_progress_attempts"] = 0
                     task_status = next_task["status"]
                 if task_status in {TASK_STATUS_IMPLEMENTING, TASK_STATUS_TESTING, TASK_STATUS_REVIEW}:
                     if not plan_valid:
                         next_task["status"] = TASK_STATUS_PLAN_IMPL
                         next_task["last_error"] = f"Implementation plan invalid: {plan_issue}"
                         next_task["last_error_type"] = "impl_plan_invalid"
+                        task_status = next_task["status"]
+                    elif step_count and step_index >= step_count:
+                        next_task["status"] = (
+                            TASK_STATUS_TESTING if phase_test_command else TASK_STATUS_REVIEW
+                        )
+                        next_task["next_plan_step_index"] = step_count
                         task_status = next_task["status"]
                     elif not _has_implementation_evidence(next_task, paths["runs"], project_dir):
                         next_task["status"] = TASK_STATUS_IMPLEMENTING
@@ -2164,6 +2325,10 @@ def run_feature_prd(
 
         planning_impl = task_type != "plan" and task_status == TASK_STATUS_PLAN_IMPL
         run_codex = task_type == "plan" or task_status in TASK_RUN_CODEX_STATUSES
+        selected_steps: list[dict[str, Any]] = []
+        plan_steps_total = 0
+        plan_step_index = 0
+        advance_to_tests = True
 
         if run_codex:
             try:
@@ -2205,7 +2370,22 @@ def run_feature_prd(
                         raise ValueError("Phase not found for task")
                     plan_path = _impl_plan_path(paths["artifacts"], str(phase_id or task_id))
                     plan_data = _load_data(plan_path, {})
-                    plan_text, plan_truncated = _render_json_for_prompt(plan_data)
+                    steps_all = plan_data.get("steps") if isinstance(plan_data, dict) else []
+                    if not isinstance(steps_all, list):
+                        steps_all = []
+                    plan_steps_total = len(steps_all)
+                    plan_step_index = max(0, int(next_task.get("next_plan_step_index", 0)))
+                    if plan_steps_total:
+                        plan_step_index = min(plan_step_index, plan_steps_total - 1)
+                    selected_steps = steps_all[
+                        plan_step_index : plan_step_index + MAX_PLAN_STEPS_PER_RUN
+                    ]
+                    plan_steps_text = _format_plan_steps_for_prompt(
+                        selected_steps,
+                        plan_step_index,
+                        plan_steps_total,
+                    )
+                    allowed_files = _allowed_files_for_steps(selected_steps, plan_data, plan_path)
                     prompt = _build_phase_prompt(
                         prd_path=prd_path,
                         phase=phase,
@@ -2214,9 +2394,10 @@ def run_feature_prd(
                         progress_path=progress_path,
                         run_id=run_id,
                         user_prompt=user_prompt,
-                        impl_plan_text=plan_text,
-                        impl_plan_truncated=plan_truncated,
                         impl_plan_path=plan_path,
+                        plan_steps_text=plan_steps_text,
+                        allowed_files=allowed_files,
+                        no_progress_attempts=int(next_task.get("no_progress_attempts", 0)),
                     )
 
                 prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -2362,6 +2543,8 @@ def run_feature_prd(
                                 target["impl_plan_hash"] = plan_hash
                                 target["impl_plan_run_id"] = run_id
                                 target["plan_attempts"] = 0
+                                target["next_plan_step_index"] = 0
+                                target["no_progress_attempts"] = 0
                             else:
                                 target["status"] = TASK_STATUS_PLAN_IMPL
                                 target["last_error"] = (
@@ -2376,9 +2559,41 @@ def run_feature_prd(
                                     )
                                     target["last_error_type"] = "impl_plan_attempts_exhausted"
                         else:
-                            target["status"] = next_status or TASK_STATUS_REVIEW
-                            if changed_files_after_run is not None:
+                            if changed_files_after_run is None:
+                                target["status"] = next_status or TASK_STATUS_REVIEW
+                            elif not changed_files_after_run:
+                                attempts = _increment_task_counter(target, "no_progress_attempts")
+                                target["status"] = TASK_STATUS_IMPLEMENTING
+                                target["last_error"] = "No changes detected for plan step"
+                                target["last_error_type"] = "no_progress"
+                                target["context"] = target.get("context", []) + [
+                                    "No code edits detected; complete the assigned plan step."
+                                ]
+                                advance_to_tests = False
+                                if attempts >= MAX_NO_PROGRESS_ATTEMPTS:
+                                    target["status"] = TASK_STATUS_BLOCKED
+                                    target["last_error"] = (
+                                        f"No progress after {attempts} attempts; blocking task."
+                                    )
+                                    target["last_error_type"] = "no_progress_exhausted"
+                            else:
                                 target["last_changed_files"] = changed_files_after_run
+                                target["last_error"] = None
+                                target["last_error_type"] = None
+                                target["no_progress_attempts"] = 0
+                                next_index = plan_step_index + len(selected_steps)
+                                if plan_steps_total:
+                                    next_index = min(next_index, plan_steps_total)
+                                    target["next_plan_step_index"] = next_index
+                                    if next_index >= plan_steps_total:
+                                        target["status"] = next_status or TASK_STATUS_REVIEW
+                                        advance_to_tests = True
+                                    else:
+                                        target["status"] = TASK_STATUS_IMPLEMENTING
+                                        advance_to_tests = False
+                                else:
+                                    target["next_plan_step_index"] = next_index
+                                    target["status"] = next_status or TASK_STATUS_REVIEW
                     if task_type != "plan":
                         phase_entry = _phase_for_task(
                             phases, {"phase_id": phase_id or task_id, "id": task_id}
@@ -2441,7 +2656,7 @@ def run_feature_prd(
                     if plan_task:
                         plan_task["status"] = TASK_STATUS_BLOCKED
                         plan_task["last_error"] = "Phase plan not generated"
-                        plan_task["last_error_type"] = "plan_missing"
+                        plan_task["last_error_type"] = ERROR_TYPE_PLAN_MISSING
                     _save_queue(paths["task_queue"], queue, tasks)
                     _save_plan(paths["phase_plan"], plan, phases)
                     print(f"\nRun {run_id} complete, but phase plan was not generated.")
@@ -2449,6 +2664,13 @@ def run_feature_prd(
                     _save_queue(paths["task_queue"], queue, tasks)
                     _save_plan(paths["phase_plan"], plan, phases)
                     print(f"\nRun {run_id} complete. Phase plan created.")
+                continue
+            if task_type != "plan" and not planning_impl and not advance_to_tests:
+                if plan_steps_total:
+                    print(
+                        f"\nCompleted plan step {plan_step_index + 1}/{plan_steps_total}. "
+                        "Continuing to next step."
+                    )
                 continue
         else:
             with FileLock(lock_path):
