@@ -30,10 +30,11 @@ python -m feature_prd_runner.runner \
 1. Plans phases from the PRD and repository context.
 2. Creates one task per phase.
 3. For each phase:
+   - Generates a per-phase implementation plan (`impl_plan_<phase_id>.json`).
    - Checks out a branch for the phase.
-   - Runs Codex CLI to implement the phase.
+   - Runs Codex CLI to implement the phase, following the plan (plan deviations must be recorded).
    - Runs tests and fixes failures.
-   - Runs a review against PRD requirements and acceptance criteria.
+   - Runs a review against PRD requirements, acceptance criteria, and the plan using real diffs.
    - Commits and pushes when clean.
 
 Each step writes progress to durable files for easy resume.
@@ -45,8 +46,13 @@ All state lives in `.prd_runner/` inside the project directory:
 - `run_state.yaml`: current status, active task/phase, last error
 - `task_queue.yaml`: tasks derived from phases
 - `phase_plan.yaml`: planned phases
-- `artifacts/`: events, tests, reviews
-- `runs/`: per-run logs, prompts, and progress snapshots
+- `artifacts/`: events, tests, plans, reviews
+  - `impl_plan_<phase_id>.json`: implementation plan per phase
+  - `review_<phase_id>.json`: structured review output
+  - `tests_<phase_id>.log`: test logs
+- `runs/`: per-run logs, prompts, and progress snapshots (including review runs)
+
+The coordinator will refuse to commit if `.prd_runner/` is tracked or not ignored.
 
 ## Resume Prompts
 
@@ -58,3 +64,9 @@ python -m feature_prd_runner.runner --project-dir . --prd-file ./docs/feature_pr
 ```
 
 The prompt is applied once to the next run and then cleared.
+
+## Testing
+
+```bash
+python -m pytest
+```

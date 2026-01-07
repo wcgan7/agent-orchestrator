@@ -20,6 +20,7 @@ Optional:
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import os
@@ -104,7 +105,24 @@ MAX_REVIEW_ATTEMPTS = 3
 MAX_NO_CHANGE_ATTEMPTS = 3
 MAX_IMPL_PLAN_ATTEMPTS = 3
 MIN_IMPL_PLAN_STEPS = 5
-IGNORED_REVIEW_PATH_PREFIXES = [".prd_runner/"]
+IGNORED_REVIEW_PATH_PREFIXES = [
+    ".prd_runner/",
+    "__pycache__/",
+    ".pytest_cache/",
+    ".mypy_cache/",
+    ".ruff_cache/",
+    ".tox/",
+    ".venv/",
+    "venv/",
+    "dist/",
+    "build/",
+    ".eggs/",
+    "htmlcov/",
+    "*.egg-info/",
+    ".coverage",
+    "*.pyc",
+    "*.pyo",
+]
 
 
 def _now_iso() -> str:
@@ -391,6 +409,7 @@ def _normalize_tasks(queue: dict[str, Any]) -> list[dict[str, Any]]:
         task.setdefault("impl_plan_path", None)
         task.setdefault("impl_plan_hash", None)
         task.setdefault("impl_plan_run_id", None)
+        task.setdefault("last_changed_files", [])
         task.setdefault("context", [])
         acceptance = task.get("acceptance_criteria", [])
         if isinstance(acceptance, list):
@@ -511,6 +530,21 @@ def _read_log_tail(path: Path, max_chars: int = 4000) -> str:
 
 def _normalize_text(value: str) -> str:
     return " ".join(value.split()).strip().lower()
+
+
+def _validate_string_list(
+    value: Any,
+    field_name: str,
+    min_items: int = 1,
+    max_items: Optional[int] = None,
+) -> tuple[bool, str]:
+    if not isinstance(value, list) or len(value) < min_items:
+        return False, f"{field_name} must be a list with at least {min_items} items"
+    if max_items is not None and len(value) > max_items:
+        return False, f"{field_name} must have no more than {max_items} items"
+    if any(not isinstance(item, str) or not item.strip() for item in value):
+        return False, f"{field_name} must contain non-empty strings"
+    return True, ""
 
 
 def _increment_task_counter(task: dict[str, Any], field: str) -> int:
@@ -727,19 +761,6 @@ def _validate_impl_plan_data(
             return False, 'acceptance_mapping must include "(none provided)"'
 
     return True, ""
-def _validate_string_list(
-    value: Any,
-    field_name: str,
-    min_items: int = 1,
-    max_items: Optional[int] = None,
-) -> tuple[bool, str]:
-    if not isinstance(value, list) or len(value) < min_items:
-        return False, f"{field_name} must be a list with at least {min_items} items"
-    if max_items is not None and len(value) > max_items:
-        return False, f"{field_name} must have no more than {max_items} items"
-    if any(not isinstance(item, str) or not item.strip() for item in value):
-        return False, f"{field_name} must contain non-empty strings"
-    return True, ""
 
 
 def _validate_review_data(
@@ -891,6 +912,7 @@ def _validate_review_data(
         requirement_raw = str(item.get("requirement", "")).strip()
         requirement_norm = _normalize_text(requirement_raw)
         item_evidence = str(item.get("implementation_evidence", "")).strip()
+        evidence_norm = _normalize_text(item_evidence)
         files = item.get("files")
         if not requirement_raw:
             missing_fields.append("requirement")
@@ -904,7 +926,10 @@ def _validate_review_data(
             return False, f"spec_traceability[{index}] missing or invalid: {', '.join(missing_fields)}"
         if markers_normalized and any(marker in requirement_norm for marker in markers_normalized):
             trace_has_marker = True
-        if normalized_steps and any(step_id in requirement_norm for step_id in normalized_steps):
+        if normalized_steps and any(
+            step_id in requirement_norm or step_id in evidence_norm
+            for step_id in normalized_steps
+        ):
             trace_has_step = True
     if markers_normalized and not trace_has_marker:
         return False, "spec_traceability must reference PRD sections or IDs"
@@ -1624,6 +1649,25 @@ def _git_has_changes(project_dir: Path) -> bool:
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
+def _path_is_ignored(path: str, ignore_patterns: Optional[list[str]] = None) -> bool:
+    if not ignore_patterns:
+        return False
+    for pattern in ignore_patterns:
+        pattern = pattern.strip()
+        if not pattern:
+            continue
+        if any(char in pattern for char in "*?["):
+            if fnmatch.fnmatch(path, pattern):
+                return True
+            continue
+        normalized = pattern.rstrip("/")
+        if path == normalized:
+            return True
+        if path.startswith(pattern):
+            return True
+    return False
+
+
 def _git_changed_files(
     project_dir: Path,
     include_untracked: bool = True,
@@ -1650,7 +1694,7 @@ def _git_changed_files(
         for line in result.stdout.splitlines():
             line = line.strip()
             if line:
-                if any(line == prefix.rstrip("/") or line.startswith(prefix) for prefix in ignore_prefixes):
+                if _path_is_ignored(line, ignore_prefixes):
                     continue
                 changed.add(line)
     return sorted(changed)
@@ -1767,14 +1811,23 @@ def _git_commit_and_push(project_dir: Path, branch: str, message: str) -> None:
 
 
 def _has_implementation_evidence(task: dict[str, Any], runs_dir: Path, project_dir: Path) -> bool:
-    if _git_has_changes(project_dir):
+    tracked_changes = _git_changed_files(
+        project_dir,
+        include_untracked=False,
+        ignore_prefixes=IGNORED_REVIEW_PATH_PREFIXES,
+    )
+    if tracked_changes:
+        return True
+    recorded_files = task.get("last_changed_files")
+    if isinstance(recorded_files, list) and any(str(path).strip() for path in recorded_files):
         return True
     run_id = task.get("last_run_id")
     if not run_id:
         return False
     manifest_path = runs_dir / str(run_id) / "manifest.json"
     manifest = _load_data(manifest_path, {})
-    if manifest.get("exit_code") == 0:
+    manifest_files = manifest.get("changed_files")
+    if isinstance(manifest_files, list) and any(str(path).strip() for path in manifest_files):
         return True
     return False
 
@@ -2242,6 +2295,14 @@ def run_feature_prd(
                 )
                 next_status = TASK_STATUS_TESTING if phase_test_command else TASK_STATUS_REVIEW
 
+            changed_files_after_run = None
+            if task_type != "plan" and not planning_impl and not failure:
+                changed_files_after_run = _git_changed_files(
+                    project_dir,
+                    include_untracked=False,
+                    ignore_prefixes=IGNORED_REVIEW_PATH_PREFIXES,
+                )
+
             plan_valid = None
             plan_issue = None
             plan_hash = None
@@ -2309,6 +2370,8 @@ def run_feature_prd(
                                     target["last_error_type"] = "impl_plan_attempts_exhausted"
                         else:
                             target["status"] = next_status or TASK_STATUS_REVIEW
+                            if changed_files_after_run is not None:
+                                target["last_changed_files"] = changed_files_after_run
                     if task_type != "plan":
                         phase_entry = _phase_for_task(
                             phases, {"phase_id": phase_id or task_id, "id": task_id}
