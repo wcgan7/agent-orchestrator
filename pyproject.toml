@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "feature-prd-runner"
+version = "0.1.0"
+description = "Standalone helper module for long-running feature development driven by a PRD."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "PyYAML>=6.0",
+]
+
+[project.scripts]
+feature-prd-runner = "feature_prd_runner.runner:main"
+
+[tool.setuptools]
+packages = ["feature_prd_runner"]
+package-dir = { "feature_prd_runner" = "." }
