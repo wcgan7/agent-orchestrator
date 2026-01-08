@@ -4,6 +4,7 @@ Feature PRD Runner Tests
 ========================
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -66,3 +67,30 @@ def test_plan_prompt_includes_resume_prompt() -> None:
     )
 
     assert "Special instructions" in prompt
+
+
+def test_read_progress_blocking_issues(tmp_path: Path) -> None:
+    progress_path = tmp_path / "progress.json"
+    progress_path.write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "blocking_issues": ["Need secrets"],
+                "next_steps": ["Add secrets to env"],
+            }
+        )
+    )
+
+    issues, steps = runner._read_progress_blocking_issues(
+        progress_path, expected_run_id="run-1"
+    )
+
+    assert issues == ["Need secrets"]
+    assert steps == ["Add secrets to env"]
+
+    issues, steps = runner._read_progress_blocking_issues(
+        progress_path, expected_run_id="run-2"
+    )
+
+    assert issues == []
+    assert steps == []

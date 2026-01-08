@@ -22,6 +22,7 @@ python -m feature_prd_runner.runner \
   --project-dir . \
   --prd-file ./docs/feature_prd.md \
   --test-command "npm test" \
+  --no-stop-on-blocking-issues \
   --resume-prompt "Focus on error handling first"
 ```
 
@@ -32,12 +33,21 @@ python -m feature_prd_runner.runner \
 3. For each phase:
    - Generates a per-phase implementation plan (`impl_plan_<phase_id>.json`).
    - Checks out a branch for the phase.
-   - Runs Codex CLI to implement the phase, following the plan (plan deviations must be recorded).
+   - Runs Codex CLI one plan step at a time and only advances when changes are made.
+   - Re-queues or blocks the phase if a step run makes no edits repeatedly.
+   - Implements the phase following the plan (plan deviations must be recorded).
    - Runs tests and fixes failures.
    - Runs a review against PRD requirements, acceptance criteria, and the plan using real diffs.
    - Commits and pushes when clean.
 
 Each step writes progress to durable files for easy resume.
+
+Review-fix mode: if a review returns blocking issues, the runner temporarily runs a focused
+fix step based on the reviewer blockers/files, then resumes the prior plan step index.
+
+Blocking issues: if a run reports blocking issues that require human intervention, the
+runner stops and prints the issues plus proposed resolve steps. Disable this behavior
+with `--no-stop-on-blocking-issues`.
 
 ## State Files
 
