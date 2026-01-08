@@ -23,6 +23,7 @@ python -m feature_prd_runner.runner \
   --prd-file ./docs/feature_prd.md \
   --test-command "npm test" \
   --no-stop-on-blocking-issues \
+  --no-resume-blocked \
   --resume-prompt "Focus on error handling first"
 ```
 
@@ -48,6 +49,11 @@ fix step based on the reviewer blockers/files, then resumes the prior plan step 
 Blocking issues: if a run reports blocking issues that require human intervention, the
 runner stops and prints the issues plus proposed resolve steps. Disable this behavior
 with `--no-stop-on-blocking-issues`.
+
+Resume blocked tasks: by default, the runner will auto-resume the most recent blocked
+task on startup and replay the last step (plan, implement, review, etc.). Disable this
+behavior with `--no-resume-blocked`. Each task is capped at 10 auto-resumes to avoid
+infinite loops.
 
 ## State Files
 
