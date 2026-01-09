@@ -300,15 +300,6 @@ def run_worker_action(
         disallowed_files = disallowed
         error_detail = msg
         error_type = ERROR_TYPE_DISALLOWED_FILES
-        if mode == "implement":
-            return AllowlistViolation(
-                run_id=run_id,
-                step=step,
-                disallowed_paths=disallowed_files,
-                changed_files=post_run_changed,
-                introduced_changes=introduced,
-            )
-        failure = True
 
     manifest = {
         "run_id": run_id,
@@ -325,6 +316,17 @@ def run_worker_action(
         "removed_changes": removed,
     }
     _save_data(run_dir / "manifest.json", manifest)
+
+    if not ok and mode == "implement":
+        return AllowlistViolation(
+            run_id=run_id,
+            step=step,
+            disallowed_paths=disallowed_files,
+            changed_files=post_run_changed,
+            introduced_changes=introduced,
+        )
+    if not ok:
+        failure = True
 
     if failure:
         return WorkerFailed(

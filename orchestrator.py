@@ -28,6 +28,7 @@ try:
         MAX_NO_PROGRESS_ATTEMPTS,
         MAX_REVIEW_ATTEMPTS,
         MAX_TEST_FAIL_ATTEMPTS,
+        TASK_STATUS_BLOCKED,
     )
     from .fsm import reduce_task
     from .git_utils import _ensure_branch, _ensure_gitignore, _git_has_changes
@@ -84,6 +85,7 @@ except ImportError:  # pragma: no cover
         MAX_NO_PROGRESS_ATTEMPTS,
         MAX_REVIEW_ATTEMPTS,
         MAX_TEST_FAIL_ATTEMPTS,
+        TASK_STATUS_BLOCKED,
     )
     from fsm import reduce_task
     from git_utils import _ensure_branch, _ensure_gitignore, _git_has_changes
@@ -322,6 +324,7 @@ def run_feature_prd(
                         next_task["block_reason"] = "PLAN_MISSING"
                         next_task["last_error"] = "Phase not found for task"
                         next_task["last_error_type"] = ERROR_TYPE_PLAN_MISSING
+                        next_task["status"] = TASK_STATUS_BLOCKED
                         _record_blocked_intent(
                             next_task,
                             task_status=task_step,
@@ -352,50 +355,52 @@ def run_feature_prd(
                         _save_data(paths["run_state"], run_state)
                         blocked_tasks_snapshot = [dict(next_task)]
 
-                    branch = phase.get("branch") or next_task.get("branch") or f"feature/{phase_id or task_id}"
-                    next_task["branch"] = branch
-                    try:
-                        _ensure_branch(project_dir, branch)
-                        run_state["branch"] = branch
-                        run_state["updated_at"] = _now_iso()
-                        _save_data(paths["run_state"], run_state)
-                    except subprocess.CalledProcessError as exc:
-                        msg = f"Failed to checkout branch {branch}: {exc}"
-                        next_task["lifecycle"] = TaskLifecycle.WAITING_HUMAN.value
-                        next_task["block_reason"] = "GIT_CHECKOUT_FAILED"
-                        next_task["last_error"] = msg
-                        next_task["last_error_type"] = "git_checkout_failed"
-                        _record_blocked_intent(
-                            next_task,
-                            task_status=task_step,
-                            task_type=task_type,
-                            phase_id=phase_id or next_task.get("id"),
-                            branch=branch,
-                            test_command=next_task.get("test_command"),
-                            run_id=None,
-                            step=task_step,
-                            lifecycle=next_task["lifecycle"],
-                            prompt_mode=next_task.get("prompt_mode"),
-                        )
-                        _save_queue(paths["task_queue"], queue, tasks)
-                        run_state.update(
-                            {
-                                "status": "blocked",
-                                "current_task_id": None,
-                                "current_phase_id": None,
-                                "run_id": None,
-                                "branch": None,
-                                "last_error": msg,
-                                "updated_at": _now_iso(),
-                                "coordinator_pid": None,
-                                "worker_pid": None,
-                                "coordinator_started_at": None,
-                            }
-                        )
-                        _save_data(paths["run_state"], run_state)
-                        blocked_tasks_snapshot = [dict(next_task)]
+                    if phase and not blocked_tasks_snapshot:
+                        branch = phase.get("branch") or next_task.get("branch") or f"feature/{phase_id or task_id}"
+                        next_task["branch"] = branch
+                        try:
+                            _ensure_branch(project_dir, branch)
+                            run_state["branch"] = branch
+                            run_state["updated_at"] = _now_iso()
+                            _save_data(paths["run_state"], run_state)
+                        except subprocess.CalledProcessError as exc:
+                            msg = f"Failed to checkout branch {branch}: {exc}"
+                            next_task["lifecycle"] = TaskLifecycle.WAITING_HUMAN.value
+                            next_task["block_reason"] = "GIT_CHECKOUT_FAILED"
+                            next_task["last_error"] = msg
+                            next_task["last_error_type"] = "git_checkout_failed"
+                            next_task["status"] = TASK_STATUS_BLOCKED
+                            _record_blocked_intent(
+                                next_task,
+                                task_status=task_step,
+                                task_type=task_type,
+                                phase_id=phase_id or next_task.get("id"),
+                                branch=branch,
+                                test_command=next_task.get("test_command"),
+                                run_id=None,
+                                step=task_step,
+                                lifecycle=next_task["lifecycle"],
+                                prompt_mode=next_task.get("prompt_mode"),
+                            )
+                            _save_queue(paths["task_queue"], queue, tasks)
+                            run_state.update(
+                                {
+                                    "status": "blocked",
+                                    "current_task_id": None,
+                                    "current_phase_id": None,
+                                    "run_id": None,
+                                    "branch": None,
+                                    "last_error": msg,
+                                    "updated_at": _now_iso(),
+                                    "coordinator_pid": None,
+                                    "worker_pid": None,
+                                    "coordinator_started_at": None,
+                                }
+                            )
+                            _save_data(paths["run_state"], run_state)
+                            blocked_tasks_snapshot = [dict(next_task)]
 
-                if task_type != "plan" and _git_has_changes(project_dir):
+                if not blocked_tasks_snapshot and task_type != "plan" and _git_has_changes(project_dir):
                     dirty_note = (
                         "Workspace has uncommitted changes; continue from them and do not reset."
                     )
