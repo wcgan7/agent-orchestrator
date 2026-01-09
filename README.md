@@ -11,6 +11,12 @@ resume safely across restarts or interruptions.
 
 ## Quick Start
 
+The template lives in `example/AGENTS.md`; copy it into your project root as `AGENTS.md`:
+
+```bash
+cp ./example/AGENTS.md ./AGENTS.md
+```
+
 ```bash
 python -m feature_prd_runner.runner --project-dir . --prd-file ./docs/feature_prd.md
 ```

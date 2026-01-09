@@ -75,20 +75,20 @@ def test_read_progress_blocking_issues(tmp_path: Path) -> None:
         json.dumps(
             {
                 "run_id": "run-1",
-                "blocking_issues": ["Need secrets"],
-                "next_steps": ["Add secrets to env"],
+                "human_blocking_issues": ["Need secrets"],
+                "human_next_steps": ["Add secrets to env"],
             }
         )
     )
 
-    issues, steps = runner._read_progress_blocking_issues(
+    issues, steps = runner._read_progress_human_blockers(
         progress_path, expected_run_id="run-1"
     )
 
     assert issues == ["Need secrets"]
     assert steps == ["Add secrets to env"]
 
-    issues, steps = runner._read_progress_blocking_issues(
+    issues, steps = runner._read_progress_human_blockers(
         progress_path, expected_run_id="run-2"
     )
 

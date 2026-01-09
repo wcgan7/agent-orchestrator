@@ -1,7 +1,4 @@
-> TEMPLATE: Copy this file into the **working repository root** as `AGENTS.md`.
-> The runner repository copy is for reference only.
-
-## AGENTS.md
+# AGENTS.md
 
 ### Purpose
 
@@ -22,11 +19,11 @@ Agents must not override or bypass coordinator decisions.
 
 ## Terminology
 
-- **human_blocking_issues** (in `progress.json`):  
+- **human_blocking_issues** (in `progress.json`):
   Used only when work cannot proceed without a human decision. Stops the runner.
 
-- **issues[]** (in `review_*.json`):  
-  Code review findings with severity.  
+- **issues[]** (in `review_*.json`):
+  Code review findings with severity.
   `critical/high` loop back for fixes; `medium/low` may proceed.
 
 ---
