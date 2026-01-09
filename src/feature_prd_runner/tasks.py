@@ -9,7 +9,6 @@ from .constants import (
     ERROR_TYPE_HEARTBEAT_TIMEOUT,
     ERROR_TYPE_SHIFT_TIMEOUT,
     IGNORED_REVIEW_PATH_PREFIXES,
-    TASK_IN_PROGRESS_STATUSES,
     TASK_STATUS_BLOCKED,
     TASK_STATUS_DOING,
     TASK_STATUS_DONE,
@@ -345,7 +344,7 @@ def _select_next_task(tasks: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
 
     for _, task in sorted_tasks:
         lifecycle = task.get("lifecycle")
-        if lifecycle == TaskLifecycle.RUNNING.value or task.get("status") in TASK_IN_PROGRESS_STATUSES:
+        if lifecycle == TaskLifecycle.RUNNING.value:
             return task
 
     for _, task in sorted_tasks:
