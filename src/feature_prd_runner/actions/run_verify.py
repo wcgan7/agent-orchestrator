@@ -9,7 +9,7 @@ from ..git_utils import _path_is_allowed
 from ..io_utils import _save_data
 from ..logging_utils import summarize_pytest_failures
 from ..models import VerificationResult
-from ..signals import build_allowed_files, extract_failing_paths_from_pytest_log, extract_traceback_repo_paths
+from ..signals import build_allowed_files, extract_failing_paths_from_pytest_log, extract_failures_section, extract_traceback_repo_paths
 from ..tasks import _resolve_test_command, _tests_log_path
 from ..utils import _now_iso
 from ..worker import _capture_test_result_snapshot, _run_command
@@ -37,6 +37,15 @@ def run_verify_action(
         test_command,
         phase_id,
     )
+
+    # Add robust pytest flags if pytest is the test command
+    if test_command:
+        if test_command.strip().startswith("pytest") and "--tb=" not in test_command:
+            test_command += " --tb=long"
+        if test_command.strip().startswith("pytest") and "--disable-warnings" not in test_command:
+            test_command += " --disable-warnings"
+        if test_command.strip().startswith("pytest") and "-q" not in test_command.split():
+            test_command += " -q"
 
     if not test_command:
         logger.info("Running verification: no test command configured (phase={})", phase_id)
@@ -68,9 +77,18 @@ def run_verify_action(
         log_path=Path(result["log_path"]),
     )
     log_tail = snapshot.get("log_tail", "")
-    
-    failed_tests = extract_failing_paths_from_pytest_log(log_tail, project_dir)
-    trace_paths = extract_traceback_repo_paths(log_tail, project_dir)
+
+    # Read full log and extract failures section for robust path extraction
+    full_log_text = Path(result["log_path"]).read_text(errors="replace")
+    fail_text = extract_failures_section(full_log_text)
+
+    # Write failures excerpt to dedicated file
+    fail_path = run_dir / "pytest_failures.txt"
+    fail_path.write_text(fail_text)
+
+    # Use fail_text (not log_tail) for failure extraction
+    failed_tests = extract_failing_paths_from_pytest_log(fail_text, project_dir)
+    trace_paths = extract_traceback_repo_paths(fail_text, project_dir)
     failing_repo_paths = sorted(set(failed_tests) | set(trace_paths))
     EXCLUDE_PREFIXES = (
         ".git/", ".prd_runner/", ".venv/", "venv/", "__pycache__/",
@@ -152,6 +170,7 @@ def run_verify_action(
         "allowlist_used": allowed_files,
         "failing_repo_paths": failing_paths,
         "expansion_paths": expansion_paths,
+        "failures_excerpt_path": str(fail_path),
     }
     _save_data(run_dir / "verify_manifest.json", verify_manifest)
     return event

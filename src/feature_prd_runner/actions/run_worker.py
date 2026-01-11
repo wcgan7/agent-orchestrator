@@ -335,6 +335,7 @@ def run_worker_action(
         phase_test_command = None
         if phase:
             phase_test_command = phase.get("test_command") or task.get("test_command") or test_command
+        plan_expansion_request = task.get("plan_expansion_request") or []
         plan_valid, plan_issue = validate_plan(
             plan_data,
             phase or {"id": phase_id, "acceptance_criteria": []},
@@ -342,6 +343,7 @@ def run_worker_action(
             prd_truncated=prd_truncated,
             prd_has_content=bool(prd_text.strip()),
             expected_test_command=phase_test_command,
+            plan_expansion_request=plan_expansion_request if plan_expansion_request else None,
         )
         plan_hash = _hash_json_data(plan_data)
         return WorkerSucceeded(

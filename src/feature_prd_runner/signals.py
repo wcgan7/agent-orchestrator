@@ -133,22 +133,41 @@ def extract_failing_paths_from_pytest_log(log_text: str, project_dir: Path) -> l
 
     return sorted(out)
 
-_TRACE_PATH_RE = re.compile(r"(?m)^(?P<path>(?:src|tests)/[^\s:]+\.py):\d+:")
+# pytest frame: src/foo.py:123: in func
+_PYTEST_FRAME_RE = re.compile(r"(?m)^(?P<path>(?:src|tests)/[^\s:]+\.py):\d+:")
+
+# python traceback frame: File "src/foo.py", line 123, in func
+_TB_FILE_RE = re.compile(r'(?m)^File "(?P<path>(?:src|tests)/[^"]+\.py)", line \d+,')
+
+
+def extract_failures_section(full: str, max_chars: int = 60000) -> str:
+    """Extract the FAILURES section from pytest output, or return last chunk as fallback."""
+    if not full:
+        return ""
+    marker = "FAILURES"
+    idx = full.find(marker)
+    if idx == -1:
+        # fallback: last chunk
+        return full[-max_chars:]
+    return full[idx: idx + max_chars]
+
 
 def extract_traceback_repo_paths(log_text: str, project_dir: Path) -> list[str]:
+    """Extract repo file paths from both pytest frames and Python traceback frames."""
     if not log_text:
         return []
     root = project_dir.resolve()
     out: set[str] = set()
 
-    for m in _TRACE_PATH_RE.finditer(log_text):
-        rel = m.group("path").strip().lstrip("./")
-        p = (root / rel).resolve()
-        try:
-            p.relative_to(root)
-        except Exception:
-            continue
-        if p.is_file():
-            out.add(p.relative_to(root).as_posix())
+    for rx in (_PYTEST_FRAME_RE, _TB_FILE_RE):
+        for m in rx.finditer(log_text):
+            rel = m.group("path").strip().lstrip("./")
+            p = (root / rel).resolve()
+            try:
+                p.relative_to(root)
+            except Exception:
+                continue
+            if p.is_file():
+                out.add(p.relative_to(root).as_posix())
 
     return sorted(out)

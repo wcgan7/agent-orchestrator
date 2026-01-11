@@ -61,6 +61,7 @@ def _validate_impl_plan_data(
     prd_truncated: bool = False,
     prd_has_content: bool = True,
     expected_test_command: Optional[str] = None,
+    plan_expansion_request: Optional[list[str]] = None,
 ) -> tuple[bool, str]:
     if not isinstance(plan_data, dict):
         return False, "Implementation plan is not a JSON object"
@@ -94,6 +95,28 @@ def _validate_impl_plan_data(
         return False, "files_to_change must be non-empty for non-docs phases"
     if any(not isinstance(path, str) or not path.strip() for path in files_to_change):
         return False, "files_to_change must contain non-empty strings"
+
+    # Enforce expansion request: each requested path must be covered by files_to_change or new_files
+    if plan_expansion_request:
+        new_files = plan_data.get("new_files") or []
+        if not isinstance(new_files, list):
+            new_files = []
+        # Build set of all covered paths (normalized)
+        covered_paths = set()
+        for path in files_to_change:
+            if isinstance(path, str) and path.strip():
+                covered_paths.add(path.strip().lstrip("./"))
+        for path in new_files:
+            if isinstance(path, str) and path.strip():
+                covered_paths.add(path.strip().lstrip("./"))
+        # Check that each expansion request is covered
+        missing = []
+        for requested in plan_expansion_request:
+            normalized = requested.strip().lstrip("./")
+            if normalized and normalized not in covered_paths:
+                missing.append(normalized)
+        if missing:
+            return False, f"Plan must include expansion paths in files_to_change or new_files: {', '.join(missing[:5])}"
 
     return True, ""
 
