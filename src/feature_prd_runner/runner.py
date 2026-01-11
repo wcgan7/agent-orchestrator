@@ -10,7 +10,6 @@ and committing changes using a step-based FSM.
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -37,18 +36,23 @@ __all__ = [
     "_read_progress_human_blockers",
 ]
 
-LOG_LEVEL = os.environ.get("RUNNER_LOG_LEVEL", "INFO")
-logger.remove()
-logger.add(
-    sys.stderr,
-    level=LOG_LEVEL,
-    format=(
-        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
-        "<level>{level: <8}</level> | "
-        "<cyan>{module}</cyan>:<cyan>{line}</cyan>\n"
-        "{message}"
-    ),
-)
+def _configure_logging(level: str = "INFO") -> None:
+    """Configure loguru logger with the specified level."""
+    logger.remove()
+    logger.add(
+        sys.stderr,
+        level=level.upper(),
+        format=(
+            "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
+            "<level>{level: <8}</level> | "
+            "<cyan>{module}</cyan>:<cyan>{line}</cyan>\n"
+            "{message}"
+        ),
+    )
+
+
+# Initialize with default level; will be reconfigured in main() based on CLI args
+_configure_logging()
 
 
 def parse_args() -> argparse.Namespace:
@@ -139,11 +143,19 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Special instructions to inject on resume (applies to next agent run only)",
     )
+    parser.add_argument(
+        "--log-level",
+        type=str,
+        choices=["debug", "info", "warning", "error", "critical"],
+        default="info",
+        help="Set logging level (default: info)",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    _configure_logging(args.log_level)
     run_feature_prd(
         project_dir=args.project_dir,
         prd_path=args.prd_file,
