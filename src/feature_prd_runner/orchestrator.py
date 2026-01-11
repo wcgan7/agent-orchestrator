@@ -41,6 +41,7 @@ from .io_utils import (
     _save_data,
     _update_progress,
 )
+from .signals import build_allowed_files
 from .logging_utils import pretty, summarize_event
 from .models import (
     AllowlistViolation,
@@ -149,14 +150,69 @@ def run_feature_prd(
             event.__class__.__name__,
             getattr(event, "run_id", None),
         )
+
+        # Content-level observability for WorkerSucceeded
+        if isinstance(event, WorkerSucceeded):
+            event_step = getattr(event, "step", None)
+
+            # 1) On PLAN_IMPL success: log plan summary
+            if event_step == TaskStep.PLAN_IMPL:
+                if getattr(event, "plan_valid", False):
+                    plan_path = Path(getattr(event, "impl_plan_path", "") or "")
+                    if plan_path and plan_path.exists():
+                        plan = _load_data(plan_path, {})
+                        files = plan.get("files_to_change") or []
+                        new_files = plan.get("new_files") or []
+                        spec = plan.get("spec_summary") or []
+                        logger.info(
+                            "Plan accepted: path={} files_to_change={} new_files={}",
+                            str(plan_path),
+                            len(files),
+                            len(new_files),
+                        )
+                        logger.info("Plan allowlist sample: {}", (files + new_files)[:8])
+                        if spec:
+                            logger.debug("Plan spec_summary sample:\n- {}", "\n- ".join(str(s) for s in spec[:3]))
+                else:
+                    # Plan invalid warning
+                    logger.warning("Plan invalid: {}", getattr(event, "plan_issue", "unknown"))
+
+            # 3) After IMPLEMENT finishes: log introduced changes
+            if event_step == TaskStep.IMPLEMENT:
+                manifest_path = run_dir / "manifest.json"
+                if manifest_path.exists():
+                    manifest = _load_data(manifest_path, {})
+                    intro = manifest.get("introduced_changes") or []
+                    logger.info("Introduced changes: {} files (sample={})", len(intro), intro[:8])
+                    disallowed = manifest.get("disallowed_files") or []
+                    if disallowed:
+                        logger.warning("Disallowed changes: {}", disallowed)
+
+        # 4) VERIFY failure with expansion request at INFO level
         if isinstance(event, VerificationResult):
-            logger.debug(
-                "VERIFY result: passed={} needs_expansion={} expansion_paths={}",
+            logger.info(
+                "VERIFY result: passed={} needs_expansion={}",
                 event.passed,
                 event.needs_allowlist_expansion,
-                event.failing_paths,
             )
-            logger.info("Verify manifest: {}", run_dir / "verify_manifest.json")
+            if event.needs_allowlist_expansion:
+                logger.info("Verify requested allowlist expansion: {}", event.failing_paths)
+            elif not event.passed:
+                # Log verify manifest for debugging test failures
+                verify_manifest_path = run_dir / "verify_manifest.json"
+                if verify_manifest_path.exists():
+                    vm = _load_data(verify_manifest_path, {})
+                    failed_tests = vm.get("failed_test_files") or []
+                    trace_files = vm.get("trace_files") or []
+                    suspects = vm.get("suspect_source_files") or []
+                    if failed_tests:
+                        logger.info("Failed test files: {}", failed_tests[:5])
+                    if trace_files:
+                        logger.info("Trace files: {}", trace_files[:5])
+                    if suspects:
+                        logger.info("Suspect source files: {}", suspects[:5])
+            logger.debug("Verify manifest: {}", run_dir / "verify_manifest.json")
+
         if isinstance(event, AllowlistViolation):
             logger.warning(
                 "Allowlist violation detected: {}",
@@ -168,17 +224,24 @@ def run_feature_prd(
                 event.repo_dirty,
             )
         if isinstance(event, WorkerFailed):
+            event_step = getattr(event, "step", None)
             logger.warning(
                 "WorkerFailed: step={} type={} detail={}",
-                getattr(event, "step", None),
+                event_step,
                 event.error_type,
                 (event.error_detail[:240] + "…") if len(event.error_detail) > 240 else event.error_detail,
             )
-            logger.info("Artifacts: run_dir={}", str(run_dir))  # requires run_dir in scope OR pass it in
+            logger.info("Artifacts: run_dir={}", str(run_dir))
             logger.info("Codex logs: stdout={} stderr={}", run_dir / "stdout.log", run_dir / "stderr.log")
             manifest = run_dir / "manifest.json"
             if manifest.exists():
                 logger.info("Manifest: {}", manifest)
+                # Also log introduced changes on failure for debugging
+                if event_step == TaskStep.IMPLEMENT:
+                    m = _load_data(manifest, {})
+                    intro = m.get("introduced_changes") or []
+                    if intro:
+                        logger.info("Introduced changes before failure: {} files (sample={})", len(intro), intro[:8])
 
     while True:
         if max_iterations and iteration >= max_iterations:
@@ -563,6 +626,11 @@ def run_feature_prd(
                 task=next_task,
                 plan_path=plan_path,
             )
+            # 2) On IMPLEMENT start: log the allowlist being enforced
+            if step_enum == TaskStep.IMPLEMENT and plan_path.exists():
+                plan_for_allowlist = _load_data(plan_path, {})
+                allowlist = build_allowed_files(plan_for_allowlist)
+                logger.info("Implement allowlist: {} files (sample={})", len(allowlist), allowlist[:8])
             event = run_worker_action(
                 step=step_enum,
                 task=next_task,
