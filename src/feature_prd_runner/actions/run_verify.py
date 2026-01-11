@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from loguru import logger
+
 from ..git_utils import _path_is_allowed
 from ..io_utils import _save_data
 from ..models import VerificationResult
@@ -28,6 +30,12 @@ def run_verify_action(
     phase_id = str(phase.get("id") if phase else task.get("phase_id") or task.get("id"))
     test_command = _resolve_test_command(phase, task, default_test_command)
     allowed_files = build_allowed_files(plan_data)
+
+    logger.info(
+        "Running verification: command={} phase={}",
+        test_command,
+        phase_id,
+    )
 
     if not test_command:
         return VerificationResult(
@@ -65,6 +73,16 @@ def run_verify_action(
     repo_paths = [p for p in repo_paths if not p.startswith(EXCLUDE_PREFIXES)]
     failing_paths = sorted(repo_paths)
 
+    logger.debug(
+        "Verify parsed failing paths: {}",
+        failing_paths,
+    )
+
+    logger.debug(
+        "Verify allowlist_used={}",
+        allowed_files,
+    )
+
     meaningful_allowlist = [p for p in allowed_files if p and p != "README.md"]
     if not meaningful_allowlist:
         outside = []
@@ -79,6 +97,18 @@ def run_verify_action(
     passed = result["exit_code"] == 0 and not timed_out
     error_type = "test_timeout" if timed_out else None
     
+    if needs_expansion:
+        logger.info(
+            "Verification requires allowlist expansion: {}",
+            expansion_paths,
+        )
+    elif not passed:
+        logger.info(
+            "Verification failed; retrying IMPLEMENT (fix tests)",
+        )
+    else:
+        logger.info("Verification passed")
+
     event = VerificationResult(
         run_id=run_id,
         passed=passed,

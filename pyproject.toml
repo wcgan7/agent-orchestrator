@@ -9,6 +9,7 @@ description = "Standalone helper module for long-running feature development dri
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
+  "loguru",
   "PyYAML>=6.0",
 ]
 

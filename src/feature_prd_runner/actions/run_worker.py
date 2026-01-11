@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from loguru import logger
+
 from ..constants import (
     ERROR_TYPE_CODEX_EXIT,
     ERROR_TYPE_DISALLOWED_FILES,
@@ -213,17 +215,27 @@ def run_worker_action(
             review_blocker_files=task.get("review_blocker_files"),
         )
 
+    timeout_seconds = shift_minutes * 60
+    logger.info(
+        "Starting Codex worker (timeout={}s)",
+        timeout_seconds,
+    )
     run_result = _run_codex_worker(
         command=codex_command,
         prompt=prompt,
         project_dir=project_dir,
         run_dir=run_dir,
-        timeout_seconds=shift_minutes * 60,
+        timeout_seconds=timeout_seconds,
         heartbeat_seconds=heartbeat_seconds,
         heartbeat_grace_seconds=heartbeat_grace_seconds,
         progress_path=progress_path,
         expected_run_id=run_id,
         on_spawn=on_spawn,
+    )
+    logger.debug(
+        "Codex command={} prompt_path={}",
+        run_result.get("command"),
+        run_result.get("prompt_path"),
     )
 
     stdout_tail = _read_log_tail(Path(run_result["stdout_path"]))
