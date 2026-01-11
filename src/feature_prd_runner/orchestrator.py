@@ -102,20 +102,19 @@ def run_feature_prd(
     lock_path = paths["state_dir"] / LOCK_FILE
     iteration = 0
 
-    print("\n" + "=" * 70)
-    print("  FEATURE PRD RUNNER (FSM)")
-    print("=" * 70)
-    print(f"\nProject directory: {project_dir}")
-    print(f"PRD file: {prd_path}")
-    print(f"Codex command: {codex_command}")
-    print(f"Shift length: {shift_minutes} minutes")
-    print(f"Heartbeat: {heartbeat_seconds}s (grace {heartbeat_grace_seconds}s)")
-    print(f"Max attempts per task: {max_attempts}")
-    print(f"Max auto-resumes: {max_auto_resumes}")
-    print(f"Stop on blocking issues: {stop_on_blocking_issues}")
+    logger.info("=" * 70)
+    logger.info("FEATURE PRD RUNNER (FSM)")
+    logger.info("=" * 70)
+    logger.info("Project directory: {}", project_dir)
+    logger.info("PRD file: {}", prd_path)
+    logger.info("Codex command: {}", codex_command)
+    logger.info("Shift length: {} minutes", shift_minutes)
+    logger.info("Heartbeat: {}s (grace {}s)", heartbeat_seconds, heartbeat_grace_seconds)
+    logger.info("Max attempts per task: {}", max_attempts)
+    logger.info("Max auto-resumes: {}", max_auto_resumes)
+    logger.info("Stop on blocking issues: {}", stop_on_blocking_issues)
     if test_command:
-        print(f"Test command: {test_command}")
-    print()
+        logger.info("Test command: {}", test_command)
 
     user_prompt = resume_prompt
 
@@ -169,7 +168,7 @@ def run_feature_prd(
 
     while True:
         if max_iterations and iteration >= max_iterations:
-            print(f"\nReached max iterations ({max_iterations})")
+            logger.info("Reached max iterations ({})", max_iterations)
             _finalize_run_state(paths, lock_path, status="idle", last_error="Reached max iterations")
             break
 
@@ -201,7 +200,7 @@ def run_feature_prd(
                     heartbeat_grace_seconds,
                     shift_minutes,
                 ):
-                    print("\nAnother run is already active. Exiting to avoid overlap.")
+                    logger.info("Another run is already active. Exiting to avoid overlap.")
                     return
                 run_state.update(
                     {
@@ -233,7 +232,7 @@ def run_feature_prd(
             tasks, resumed = _maybe_auto_resume_blocked(queue, tasks, max_auto_resumes)
             if resumed:
                 _save_data(paths["task_queue"], queue)
-                print("Auto-resumed blocked tasks after auto-resumable failure")
+                logger.info("Auto-resumed blocked tasks after auto-resumable failure")
 
             if resume_blocked:
                 tasks, manually_resumed = _maybe_resume_blocked_last_intent(
@@ -258,7 +257,7 @@ def run_feature_prd(
                     )
                     _save_data(paths["run_state"], run_state)
                     _save_data(paths["task_queue"], queue)
-                    print("Resumed most recent blocked task to replay last step")
+                    logger.info("Resumed most recent blocked task to replay last step")
 
             if stop_on_blocking_issues and not manually_resumed:
                 blocked_tasks = _blocking_tasks(tasks)
@@ -283,7 +282,7 @@ def run_feature_prd(
                 if not next_task:
                     if _auto_resume_blocked_dependencies(queue, tasks, max_auto_resumes):
                         _save_data(paths["task_queue"], queue)
-                        print("Auto-resumed blocked dependency tasks to resolve deadlock")
+                        logger.info("Auto-resumed blocked dependency tasks to resolve deadlock")
                         continue
                     run_state.update(
                         {
@@ -302,11 +301,11 @@ def run_feature_prd(
                     _save_data(paths["task_queue"], queue)
                     summary = _task_summary(tasks)
                     logger.info(
-                        "\nNo runnable tasks. Queue summary: "
-                        f"{summary[TaskLifecycle.READY.value]} ready, "
-                        f"{summary[TaskLifecycle.RUNNING.value]} running, "
-                        f"{summary[TaskLifecycle.DONE.value]} done, "
-                        f"{summary[TaskLifecycle.WAITING_HUMAN.value]} waiting_human"
+                        "No runnable tasks. Queue summary: {} ready, {} running, {} done, {} waiting_human",
+                        summary[TaskLifecycle.READY.value],
+                        summary[TaskLifecycle.RUNNING.value],
+                        summary[TaskLifecycle.DONE.value],
+                        summary[TaskLifecycle.WAITING_HUMAN.value],
                     )
                     break
 
@@ -726,7 +725,10 @@ def run_feature_prd(
 
 
                     if not task_state.step:
-                        print(f"[BUG] task_state.step is None after reduce_task for task {task_id}")
+                        logger.error(
+                            "Task {} missing step after reduce_task",
+                            task_id,
+                        )
 
                     updated = task_state.to_dict()
                     target.clear()
@@ -775,9 +777,9 @@ def run_feature_prd(
             _report_blocking_tasks(blocked_snapshot, paths, stopping=False)
 
         if plan_created:
-            print(f"\nRun {run_id} complete. Phase plan created.")
+            logger.info("Run {} complete. Phase plan created.", run_id)
             continue
 
         time.sleep(1)
 
-    print("\nDone!")
+    logger.info("Done!")

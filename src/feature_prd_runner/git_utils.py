@@ -3,6 +3,8 @@ from __future__ import annotations
 import fnmatch
 import subprocess
 from pathlib import Path
+
+from loguru import logger
 from typing import Optional
 
 from .constants import IGNORED_REVIEW_PATH_PREFIXES, STATE_DIR_NAME
@@ -45,7 +47,7 @@ def _ensure_gitignore(project_dir: Path, only_if_clean: bool = False) -> None:
     try:
         _append_ignore_entry(gitignore_path, ignore_entry)
     except OSError as exc:
-        print(f"Warning: unable to update .gitignore: {exc}")
+        logger.warning("Unable to update .gitignore: {}", exc)
 
 
 def _git_current_branch(project_dir: Path) -> Optional[str]:

@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Optional
 
+from loguru import logger
+
 from .models import PromptMode, TaskLifecycle, TaskStep
 from .constants import (
     AUTO_RESUME_ERROR_TYPES,
@@ -528,7 +530,7 @@ def _maybe_resume_blocked_last_intent(
         if int(task.get("manual_resume_attempts", 0)) < max_manual_resumes
     ]
     if not candidates:
-        print(
+        logger.info(
             "Blocked tasks found, but manual resume attempts exhausted; skipping auto-resume."
         )
         return tasks, False
@@ -628,17 +630,17 @@ def _report_blocking_tasks(
     if not blocked_tasks:
         return
     status_note = "Stopping runner." if stopping else "Continuing runner."
-    print(f"\nBlocking issues detected; human intervention required. {status_note}")
+    logger.warning("Blocking issues detected; human intervention required. {}", status_note)
     for task in blocked_tasks:
         task_id = task.get("id") or "(unknown)"
         error_type = task.get("last_error_type") or "unknown"
         last_error = task.get("last_error") or "Blocking issue reported"
-        print(f"\nTask {task_id} blocked ({error_type}): {last_error}")
+        logger.warning("Task {} blocked ({}): {}", task_id, error_type, last_error)
         issues = _coerce_string_list(task.get("human_blocking_issues"))
         if issues:
-            print("Reported blocking issues:")
+            logger.warning("Reported blocking issues:")
             for issue in issues:
-                print(f"- {issue}")
+                logger.warning("- {}", issue)
 
 
 def _read_progress_human_blockers(
