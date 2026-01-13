@@ -11,6 +11,7 @@ from .models import (
     NoIntroducedChanges,
     ProgressHumanBlockers,
     PromptMode,
+    ResumePromptResult,
     ReviewResult,
     TaskLifecycle,
     TaskState,
@@ -220,7 +221,7 @@ def reduce_task(task: TaskState, event: Any, *, caps: dict[str, int]) -> TaskSta
             task.last_error = "Review blockers found"
             task.last_error_type = "review_blockers"
             task.review_blockers = [
-                f"{issue.get('severity','').upper()}: {issue.get('summary','')}"
+                f"{issue.get('severity','').upper()}: {issue.get('summary') or issue.get('text') or ''}"
                 for issue in event.issues
                 if isinstance(issue, dict)
             ]
@@ -255,6 +256,21 @@ def reduce_task(task: TaskState, event: Any, *, caps: dict[str, int]) -> TaskSta
 
         error = event.error or "Commit or push failed"
         _set_waiting(task, "GIT_PUSH_FAILED", "git_push_failed", error)
+        return task
+
+    if isinstance(event, ResumePromptResult):
+        _record_run_id(task, event.run_id)
+        if event.succeeded:
+            # Resume prompt succeeded - continue with normal flow
+            task.last_error = None
+            task.last_error_type = None
+            _clear_blocking(task)
+            _set_ready(task)
+            return task
+
+        # Resume prompt failed
+        error = event.error_detail or "Resume prompt failed"
+        _set_waiting(task, "RESUME_PROMPT_FAILED", "resume_prompt_failed", error)
         return task
 
     return task

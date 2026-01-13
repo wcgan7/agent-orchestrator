@@ -12,7 +12,7 @@ from loguru import logger
 
 from .actions.run_commit import run_commit_action
 from .actions.run_verify import run_verify_action
-from .actions.run_worker import run_worker_action
+from .actions.run_worker import run_resume_prompt_action, run_worker_action
 from .constants import (
     DEFAULT_HEARTBEAT_GRACE_SECONDS,
     DEFAULT_HEARTBEAT_SECONDS,
@@ -47,6 +47,7 @@ from .models import (
     AllowlistViolation,
     NoIntroducedChanges,
     ProgressHumanBlockers,
+    ResumePromptResult,
     TaskLifecycle,
     TaskState,
     TaskStep,
@@ -80,6 +81,26 @@ from .tasks import (
 from .utils import _now_iso
 
 
+def _step_suffix(task_type: str, task_step: str) -> str:
+    """Return a suffix for the run folder based on task type and step."""
+    if task_type == "plan":
+        return "-plan"
+    step_str = task_step.value if isinstance(task_step, TaskStep) else str(task_step or "")
+    if step_str == TaskStep.RESUME_PROMPT.value:
+        return "-resume_prompt"
+    elif step_str == TaskStep.PLAN_IMPL.value:
+        return "-plan_impl"
+    elif step_str == TaskStep.IMPLEMENT.value:
+        return "-implement"
+    elif step_str == TaskStep.VERIFY.value:
+        return "-verify"
+    elif step_str == TaskStep.REVIEW.value:
+        return "-review"
+    elif step_str == TaskStep.COMMIT.value:
+        return "-commit"
+    return ""
+
+
 def run_feature_prd(
     project_dir: Path,
     prd_path: Path,
@@ -91,9 +112,10 @@ def run_feature_prd(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     max_auto_resumes: int = DEFAULT_MAX_AUTO_RESUMES,
     test_command: Optional[str] = None,
-    resume_prompt: Optional[str] = None,
+    custom_prompt: Optional[str] = None,
     stop_on_blocking_issues: bool = DEFAULT_STOP_ON_BLOCKING_ISSUES,
     resume_blocked: bool = True,
+    simple_review: bool = False,
 ) -> None:
     _require_yaml()
     project_dir = project_dir.resolve()
@@ -117,8 +139,114 @@ def run_feature_prd(
     logger.info("Stop on blocking issues: {}", stop_on_blocking_issues)
     if test_command:
         logger.info("Test command: {}", test_command)
+    if custom_prompt:
+        logger.info("Custom prompt provided (will run as standalone step)")
 
-    user_prompt = resume_prompt
+    # Handle custom_prompt as a standalone step before the main loop
+    if custom_prompt:
+        custom_run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        custom_run_id = f"{custom_run_id}-{uuid.uuid4().hex[:8]}-custom_prompt"
+        custom_run_dir = paths["runs"] / custom_run_id
+        custom_run_dir.mkdir(parents=True, exist_ok=True)
+        custom_progress_path = custom_run_dir / "progress.json"
+
+        logger.info("=" * 70)
+        logger.info("RUNNING CUSTOM PROMPT (standalone)")
+        logger.info("=" * 70)
+        logger.info("Run ID: {}", custom_run_id)
+
+        _update_progress(
+            custom_progress_path,
+            {
+                "run_id": custom_run_id,
+                "task_id": "custom_prompt",
+                "phase": "custom_prompt",
+                "human_blocking_issues": [],
+                "human_next_steps": [],
+            },
+        )
+
+        with FileLock(lock_path):
+            run_state = _load_data(paths["run_state"], {})
+            run_state.update(
+                {
+                    "status": "running",
+                    "current_task_id": "custom_prompt",
+                    "current_phase_id": None,
+                    "run_id": custom_run_id,
+                    "last_run_id": custom_run_id,
+                    "updated_at": _now_iso(),
+                    "coordinator_pid": os.getpid(),
+                    "worker_pid": None,
+                    "coordinator_started_at": _now_iso(),
+                    "last_heartbeat": _now_iso(),
+                }
+            )
+            _save_data(paths["run_state"], run_state)
+
+        def _on_custom_worker_spawn(pid: int) -> None:
+            try:
+                with FileLock(lock_path):
+                    rs = _load_data(paths["run_state"], {})
+                    if rs.get("status") == "running" and rs.get("run_id") == custom_run_id:
+                        rs["worker_pid"] = pid
+                        rs["last_heartbeat"] = _now_iso()
+                        rs["updated_at"] = _now_iso()
+                        _save_data(paths["run_state"], rs)
+            except Exception:
+                pass
+
+        custom_event = run_resume_prompt_action(
+            user_prompt=custom_prompt,
+            project_dir=project_dir,
+            run_dir=custom_run_dir,
+            run_id=custom_run_id,
+            codex_command=codex_command,
+            progress_path=custom_progress_path,
+            heartbeat_seconds=heartbeat_seconds,
+            heartbeat_grace_seconds=heartbeat_grace_seconds,
+            shift_minutes=shift_minutes,
+            on_spawn=_on_custom_worker_spawn,
+        )
+
+        _append_event(paths["events"], custom_event.to_dict())
+
+        # Check if custom prompt succeeded
+        if isinstance(custom_event, ResumePromptResult) and custom_event.succeeded:
+            logger.info("Custom prompt completed successfully, continuing with implementation cycle")
+            _finalize_run_state(paths, lock_path, status="idle", last_error=None)
+            # Continue to the main loop - don't pass custom_prompt to tasks
+        elif isinstance(custom_event, ProgressHumanBlockers):
+            logger.error("Custom prompt blocked: {}", "; ".join(custom_event.issues))
+            _finalize_run_state(
+                paths,
+                lock_path,
+                status="blocked",
+                last_error=f"Custom prompt blocked: {'; '.join(custom_event.issues)}",
+            )
+            return
+        elif isinstance(custom_event, WorkerFailed):
+            logger.error("Custom prompt failed: {}", custom_event.error_detail)
+            _finalize_run_state(
+                paths,
+                lock_path,
+                status="blocked",
+                last_error=f"Custom prompt failed: {custom_event.error_detail}",
+            )
+            return
+        else:
+            # Unexpected event type - treat as failure
+            logger.error("Custom prompt returned unexpected event: {}", type(custom_event).__name__)
+            _finalize_run_state(
+                paths,
+                lock_path,
+                status="blocked",
+                last_error=f"Custom prompt unexpected result: {type(custom_event).__name__}",
+            )
+            return
+
+    # user_prompt is no longer used since custom_prompt is handled separately
+    user_prompt = None
 
     def _log_task_start(
         *,
@@ -512,6 +640,9 @@ def run_feature_prd(
                 if not blocked_tasks_snapshot:
                     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
                     run_id = f"{run_id}-{uuid.uuid4().hex[:8]}"
+                    # Append step suffix for easier debugging
+                    step_suffix = _step_suffix(task_type, task_step)
+                    run_id = f"{run_id}{step_suffix}"
 
                     run_state.update(
                         {
@@ -614,6 +745,7 @@ def run_feature_prd(
                 shift_minutes=shift_minutes,
                 test_command=test_command,
                 on_spawn=_on_worker_spawn,
+                simple_review=simple_review,
             )
 
         elif step_enum in {TaskStep.PLAN_IMPL, TaskStep.IMPLEMENT, TaskStep.REVIEW}:
@@ -651,6 +783,7 @@ def run_feature_prd(
                 shift_minutes=shift_minutes,
                 test_command=test_command,
                 on_spawn=_on_worker_spawn,
+                simple_review=simple_review,
             )
 
         elif step_enum == TaskStep.VERIFY:

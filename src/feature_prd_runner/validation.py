@@ -190,3 +190,37 @@ def _validate_review_data(
         return False, f"evidence must include at least {REVIEW_MIN_EVIDENCE_ITEMS} items"
 
     return True, ""
+
+
+SIMPLE_REVIEW_SEVERITIES = {"high", "medium", "low"}
+
+
+def _validate_simple_review_data(
+    review_data: dict[str, Any],
+) -> tuple[bool, str]:
+    """Validate simplified review data with minimal schema."""
+    if not isinstance(review_data, dict):
+        return False, "Review output is not a JSON object"
+
+    # Check mergeable field
+    if "mergeable" not in review_data:
+        return False, "mergeable field is required"
+    if not isinstance(review_data["mergeable"], bool):
+        return False, "mergeable must be a boolean"
+
+    # Check issues field
+    issues = review_data.get("issues")
+    if not isinstance(issues, list):
+        return False, "issues must be a list"
+
+    for i, item in enumerate(issues):
+        if not isinstance(item, dict):
+            return False, f"issues[{i}] must be an object"
+        sev = str(item.get("severity", "")).strip().lower()
+        if sev not in SIMPLE_REVIEW_SEVERITIES:
+            return False, f"issues[{i}].severity must be one of: {sorted(SIMPLE_REVIEW_SEVERITIES)}"
+        text = item.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return False, f"issues[{i}].text must be a non-empty string"
+
+    return True, ""

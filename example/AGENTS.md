@@ -85,7 +85,7 @@ Human blockers **stop the runner**.
 ### Repo modification policy by mode
 
 - PLAN / PLAN_IMPL / REVIEW: do not modify repository files outside `.prd_runner/`
-- IMPLEMENT: modify only files listed in the implementation plan allowlist
+- IMPLEMENT: modify only files listed in the implementation plan allowlist (runner artifacts under `.prd_runner/`, like `progress.json` and `artifacts/events.ndjson`, are always allowed for progress reporting)
 
 ---
 

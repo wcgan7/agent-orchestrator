@@ -14,6 +14,7 @@ class TaskLifecycle(str, Enum):
 
 
 class TaskStep(str, Enum):
+    RESUME_PROMPT = "resume_prompt"
     PLAN_IMPL = "plan_impl"
     IMPLEMENT = "implement"
     VERIFY = "verify"
@@ -320,3 +321,12 @@ class CommitResult(Event):
     repo_clean: bool
 
     event_type: str = field(init=False, default="commit_result")
+
+
+@dataclass
+class ResumePromptResult(Event):
+    run_id: str
+    succeeded: bool
+    error_detail: Optional[str] = None
+
+    event_type: str = field(init=False, default="resume_prompt_result")

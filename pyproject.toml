@@ -13,6 +13,12 @@ dependencies = [
   "PyYAML>=6.0",
 ]
 
+[project.optional-dependencies]
+test = [
+  "pytest>=7",
+  "tomli>=2; python_version < '3.11'",
+]
+
 [project.scripts]
 feature-prd-runner = "feature_prd_runner.runner:main"
 

@@ -5,7 +5,7 @@ import subprocess
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -31,6 +31,19 @@ def _stream_pipe(pipe: Any, file_path: Path, label: str, to_stderr: bool, quiet:
         pipe.close()
     except Exception:
         pass
+
+
+def _latest_mtime(paths: list[Path]) -> Optional[datetime]:
+    latest: Optional[datetime] = None
+    for path in paths:
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        stamp = datetime.fromtimestamp(mtime, tz=timezone.utc)
+        if latest is None or stamp > latest:
+            latest = stamp
+    return latest
 
 
 def _run_codex_worker(
@@ -114,11 +127,9 @@ def _run_codex_worker(
                 pass
 
     poll_interval = max(5, min(heartbeat_seconds // 2, 30))
+    heartbeat_tolerance = timedelta(seconds=poll_interval)
 
     while True:
-        if process.poll() is not None:
-            break
-
         elapsed = time.monotonic() - start_time
         if elapsed > timeout_seconds:
             timed_out = True
@@ -130,13 +141,21 @@ def _run_codex_worker(
             break
 
         heartbeat = _heartbeat_from_progress(progress_path, expected_run_id)
-        now = datetime.now(timezone.utc)
-        if heartbeat and heartbeat >= start_wall:
+        if heartbeat and heartbeat >= (start_wall - heartbeat_tolerance):
             last_heartbeat = heartbeat
-            age = (now - heartbeat).total_seconds()
-        else:
-            age = (now - start_wall).total_seconds()
 
+        # Treat new stdout/stderr output as liveness even if progress heartbeats
+        # are delayed or skipped by the worker.
+        log_activity = _latest_mtime([stdout_path, stderr_path])
+
+        now = datetime.now(timezone.utc)
+        last_activity = start_wall
+        if last_heartbeat and last_heartbeat > last_activity:
+            last_activity = last_heartbeat
+        if log_activity and log_activity >= (start_wall - heartbeat_tolerance) and log_activity > last_activity:
+            last_activity = log_activity
+
+        age = (now - last_activity).total_seconds()
         if age > heartbeat_grace_seconds:
             no_heartbeat = True
             process.terminate()
@@ -146,7 +165,11 @@ def _run_codex_worker(
                 process.kill()
             break
 
-        time.sleep(poll_interval)
+        try:
+            process.wait(timeout=poll_interval)
+            break
+        except subprocess.TimeoutExpired:
+            continue
 
     exit_code = process.poll()
     if exit_code is None:

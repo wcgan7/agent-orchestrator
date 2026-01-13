@@ -27,6 +27,7 @@ from ..models import (
     AllowlistViolation,
     NoIntroducedChanges,
     ProgressHumanBlockers,
+    ResumePromptResult,
     ReviewResult,
     TaskStep,
     WorkerFailed,
@@ -36,7 +37,9 @@ from ..prompts import (
     _build_impl_plan_prompt,
     _build_phase_prompt,
     _build_plan_prompt,
+    _build_resume_prompt,
     _build_review_prompt,
+    _build_simple_review_prompt,
     _extract_prd_markers,
 )
 from ..signals import build_allowed_files
@@ -48,6 +51,97 @@ from .load_plan import load_plan
 from .load_review import load_review
 from .validate_plan import validate_plan
 from .validate_review import validate_review
+import shutil
+
+
+def run_resume_prompt_action(
+    *,
+    user_prompt: str,
+    project_dir: Path,
+    run_dir: Path,
+    run_id: str,
+    codex_command: str,
+    progress_path: Path,
+    heartbeat_seconds: int,
+    heartbeat_grace_seconds: int,
+    shift_minutes: int,
+    on_spawn: Optional[Callable[[int], None]] = None,
+) -> ResumePromptResult | ProgressHumanBlockers | WorkerFailed:
+    """Run a standalone resume prompt and return success/failure result."""
+    prompt = _build_resume_prompt(
+        user_prompt=user_prompt,
+        progress_path=progress_path,
+        run_id=run_id,
+        heartbeat_seconds=heartbeat_seconds,
+    )
+
+    timeout_seconds = shift_minutes * 60
+    logger.info(
+        "Starting resume prompt Codex worker (timeout={}s)",
+        timeout_seconds,
+    )
+    run_result = _run_codex_worker(
+        command=codex_command,
+        prompt=prompt,
+        project_dir=project_dir,
+        run_dir=run_dir,
+        timeout_seconds=timeout_seconds,
+        heartbeat_seconds=heartbeat_seconds,
+        heartbeat_grace_seconds=heartbeat_grace_seconds,
+        progress_path=progress_path,
+        expected_run_id=run_id,
+        on_spawn=on_spawn,
+    )
+
+    stdout_tail = _read_log_tail(Path(run_result["stdout_path"]))
+    stderr_tail = _read_log_tail(Path(run_result["stderr_path"]))
+
+    # Check for human blocking issues in progress file
+    human_blocking, human_next_steps = _read_progress_human_blockers(
+        progress_path,
+        expected_run_id=run_id,
+    )
+    if human_blocking:
+        # Agent reported it couldn't complete the instructions
+        return ProgressHumanBlockers(
+            run_id=run_id,
+            issues=human_blocking,
+            next_steps=human_next_steps,
+        )
+
+    # Check for worker failures
+    failure, error_type, error_detail = _classify_worker_failure(
+        run_result=run_result,
+        stdout_tail=stdout_tail,
+        stderr_tail=stderr_tail,
+    )
+
+    if failure:
+        return WorkerFailed(
+            step=TaskStep.RESUME_PROMPT,
+            run_id=run_id,
+            error_type=error_type or "worker_failed",
+            error_detail=error_detail or "Resume prompt worker failed",
+            stderr_tail=stderr_tail,
+            timed_out=bool(run_result.get("timed_out")),
+            no_heartbeat=bool(run_result.get("no_heartbeat")),
+        )
+
+    # Success - agent completed the instructions without blocking issues
+    return ResumePromptResult(
+        run_id=run_id,
+        succeeded=True,
+    )
+
+
+def _copy_artifact_to_run_dir(artifact_path: Path, run_dir: Path) -> None:
+    """Copy an artifact file to the run directory for easier debugging."""
+    if artifact_path.exists():
+        dest = run_dir / artifact_path.name
+        try:
+            shutil.copy2(artifact_path, dest)
+        except Exception:
+            pass  # Non-critical; silently ignore copy failures
 
 
 
@@ -97,6 +191,7 @@ def run_worker_action(
     shift_minutes: int,
     test_command: Optional[str],
     on_spawn: Optional[Callable[[int], None]] = None,
+    simple_review: bool = False,
 ) -> Any:
     pre_run_changed = _snapshot_repo_changes(project_dir)
     repo_dirty = bool(pre_run_changed)
@@ -158,7 +253,8 @@ def run_worker_action(
             ignore_prefixes=IGNORED_REVIEW_PATH_PREFIXES,
         )
         tests_snapshot = task.get("last_verification") if isinstance(task, dict) else None
-        prompt = _build_review_prompt(
+        prompt_builder = _build_simple_review_prompt if simple_review else _build_review_prompt
+        prompt = prompt_builder(
             phase=phase,
             review_path=review_path,
             prd_path=prd_path,
@@ -276,7 +372,11 @@ def run_worker_action(
         "mode": mode,
         "start_time": run_result["start_time"],
         "end_time": run_result["end_time"],
+        "runtime_seconds": run_result.get("runtime_seconds"),
         "exit_code": run_result["exit_code"],
+        "timed_out": bool(run_result.get("timed_out")),
+        "no_heartbeat": bool(run_result.get("no_heartbeat")),
+        "last_heartbeat": run_result.get("last_heartbeat"),
         "changed_files": post_run_changed,
         "disallowed_files": disallowed_files,
         "pre_run_snapshot": pre_run_changed,
@@ -321,6 +421,7 @@ def run_worker_action(
 
     if step == TaskStep.PLAN_IMPL:
         plan_path = _impl_plan_path(artifacts_dir, str(phase_id))
+        _copy_artifact_to_run_dir(plan_path, run_dir)
         plan_data = load_plan(plan_path)
         if not plan_data:
             return WorkerSucceeded(
@@ -360,6 +461,7 @@ def run_worker_action(
 
     if step == TaskStep.REVIEW:
         review_path = _review_output_path(artifacts_dir, str(phase_id))
+        _copy_artifact_to_run_dir(review_path, run_dir)
         review_data = load_review(review_path)
         changed_files = _git_changed_files(
             project_dir,
@@ -373,6 +475,7 @@ def run_worker_action(
             prd_markers=prd_markers,
             prd_truncated=prd_truncated,
             prd_has_content=bool(prd_text.strip()),
+            simple_review=simple_review,
         )
         if not valid_review:
             return ReviewResult(
@@ -385,17 +488,33 @@ def run_worker_action(
                 review_issue=review_issue,
             )
         issues = review_data.get("issues") or []
-        blocking = [
-            it
-            for it in issues
-            if isinstance(it, dict)
-            and str(it.get("severity", "")).strip().lower() in {"critical", "high"}
-        ]
-        blocker_files = _extract_review_blocker_files(review_data)
+        if simple_review:
+            # Simple review: "high" severity issues are blocking, mergeable=false also blocks
+            blocking = [
+                it
+                for it in issues
+                if isinstance(it, dict)
+                and str(it.get("severity", "")).strip().lower() == "high"
+            ]
+            # If mergeable is explicitly false, treat as blocking
+            if not review_data.get("mergeable", True):
+                blocking_severities_present = True
+            else:
+                blocking_severities_present = bool(blocking)
+            blocker_files = []  # Simple review doesn't track files
+        else:
+            blocking = [
+                it
+                for it in issues
+                if isinstance(it, dict)
+                and str(it.get("severity", "")).strip().lower() in {"critical", "high"}
+            ]
+            blocking_severities_present = bool(blocking)
+            blocker_files = _extract_review_blocker_files(review_data)
         return ReviewResult(
             run_id=run_id,
             valid=True,
-            blocking_severities_present=bool(blocking),
+            blocking_severities_present=blocking_severities_present,
             issues=blocking,
             files=blocker_files,
             review_path=str(review_path),

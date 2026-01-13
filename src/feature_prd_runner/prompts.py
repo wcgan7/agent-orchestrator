@@ -7,6 +7,36 @@ from .constants import REVIEW_MIN_EVIDENCE_ITEMS
 from .utils import _normalize_text
 
 
+def _build_resume_prompt(
+    user_prompt: str,
+    progress_path: Path,
+    run_id: str,
+    heartbeat_seconds: Optional[int] = None,
+) -> str:
+    """Build a standalone resume prompt that the agent must complete successfully."""
+    heartbeat_block = ""
+    if heartbeat_seconds:
+        heartbeat_block = f"  Update heartbeat at least every {heartbeat_seconds} seconds.\n"
+    return f"""You have been given the following instructions to complete:
+
+{user_prompt}
+
+Follow these instructions carefully. When you are done:
+1. If you successfully completed the instructions, write a progress file indicating success.
+2. If you cannot complete the instructions (e.g., need clarification, blocked by an issue),
+   write a progress file with human_blocking_issues explaining what is blocking you.
+
+Progress contract (REQUIRED):
+- Write snapshot to: {progress_path}
+  Required fields: run_id={run_id}, task_id="resume_prompt", phase="resume_prompt",
+  actions (list of actions you took), claims (what you accomplished),
+  next_steps, human_blocking_issues (if blocked), human_next_steps, heartbeat.
+{heartbeat_block}
+IMPORTANT: If you successfully complete the instructions, human_blocking_issues MUST be empty.
+If you are blocked and cannot complete the instructions, human_blocking_issues MUST contain the blocking reason(s).
+"""
+
+
 def _build_plan_prompt(
     prd_path: Path,
     phase_plan_path: Path,
@@ -191,6 +221,10 @@ Rules:
 - Work on the ENTIRE phase scope. Implement all necessary changes.
 - Allowed files to read/edit:
 {allowed_block}
+
+Runner artifact files (ALWAYS allowed to edit for progress reporting; not part of the phase allowlist):
+- {events_path}
+- {progress_path}
 {no_progress_block}
 
 Do not run the full test suite. The coordinator runs tests. If you run any tests, run only a fast, targeted subset (≤60s).
@@ -519,4 +553,145 @@ Review instructions:
   - Exit code 0 => tests passed (do not raise issues just for lack of proof).
   - Non-zero exit => include at least one high/critical issue describing the failure and files involved.
 - If tests passed (coordinator verified), assume logic works but check for code quality and specs.
+"""
+
+
+def _build_simple_review_prompt(
+    phase: dict[str, Any],
+    review_path: Path,
+    prd_path: Path,
+    prd_text: str,
+    prd_truncated: bool,
+    prd_markers: Optional[list[str]],
+    user_prompt: Optional[str],
+    progress_path: Optional[Path] = None,
+    run_id: Optional[str] = None,
+    changed_files: Optional[list[str]] = None,
+    diff_text: str = "",
+    diff_truncated: bool = False,
+    diff_stat: str = "",
+    diff_stat_truncated: bool = False,
+    status_text: str = "",
+    status_truncated: bool = False,
+    impl_plan_text: str = "",
+    impl_plan_truncated: bool = False,
+    heartbeat_seconds: Optional[int] = None,
+    tests_snapshot: Optional[dict[str, Any]] = None,
+) -> str:
+    """Build a simplified review prompt with minimal output schema."""
+    acceptance = phase.get("acceptance_criteria") or []
+    acceptance_block = "\n".join(f"- {item}" for item in acceptance) if acceptance else "- (none)"
+    user_block = f"\nSpecial instructions:\n{user_prompt}\n" if user_prompt else ""
+    progress_block = ""
+    if progress_path and run_id:
+        heartbeat_block = ""
+        if heartbeat_seconds:
+            heartbeat_block = f"  Update heartbeat at least every {heartbeat_seconds} seconds.\n"
+        progress_block = (
+            "\nProgress contract (REQUIRED):\n"
+            f"- Write snapshot to: {progress_path}\n"
+            f"  Required fields: run_id={run_id}, task_id, phase, actions, claims, "
+            "next_steps, human_blocking_issues, human_next_steps, heartbeat.\n"
+            f"{heartbeat_block}"
+        )
+
+    prd_notice = ""
+    if prd_truncated:
+        prd_notice = (
+            "\nNOTE: PRD content truncated. Open the PRD file to read the full spec.\n"
+        )
+    prd_markers = prd_markers or []
+    markers_block = "\n".join(f"- {item}" for item in prd_markers) if prd_markers else "- (none found)"
+
+    changed_files = changed_files or []
+    changed_block = "\n".join(f"- {path}" for path in changed_files) if changed_files else "- (none)"
+
+    diff_notice = ""
+    if diff_truncated:
+        diff_notice = "\nNOTE: Diff truncated. Open git diff for full context.\n"
+
+    diff_stat_notice = ""
+    if diff_stat_truncated:
+        diff_stat_notice = "\nNOTE: Diffstat truncated.\n"
+    diff_stat_block = diff_stat if diff_stat else "(no diffstat output)"
+
+    status_notice = ""
+    if status_truncated:
+        status_notice = "\nNOTE: Status truncated.\n"
+    status_block = status_text if status_text else "(clean)"
+
+    plan_notice = ""
+    if impl_plan_truncated:
+        plan_notice = "\nNOTE: Implementation plan truncated. Open the plan file for full details.\n"
+
+    tests_block = "(no coordinator test run recorded)"
+    if isinstance(tests_snapshot, dict):
+        cmd = str(tests_snapshot.get("command") or "").strip() or "(unknown)"
+        exit_code = tests_snapshot.get("exit_code")
+        log_path = str(tests_snapshot.get("log_path") or "").strip() or "(unknown)"
+        tail = str(tests_snapshot.get("log_tail") or "").strip()
+        captured_at = str(tests_snapshot.get("captured_at") or "").strip()
+        timestamp_block = f"Captured at: {captured_at}\n" if captured_at else ""
+        tests_block = (
+            f"Command: {cmd}\n"
+            f"Exit code: {exit_code}\n"
+            f"Log: {log_path}\n"
+            f"{timestamp_block}"
+            f"Recent output:\n{tail if tail else '(empty)'}"
+        )
+
+    return f"""Perform a thorough code review for the phase below and write JSON to {review_path}.
+
+Follow all repository rules in AGENTS.md.
+
+Phase: {phase.get("name") or phase.get("id")}
+PRD: {prd_path}
+PRD content (read first):
+{prd_text}
+{prd_notice}
+PRD sections/IDs (for reference):
+{markers_block}
+
+Acceptance criteria:
+{acceptance_block}
+{user_block}
+{progress_block}
+
+Git status (from coordinator):
+{status_block}
+{status_notice}
+
+Changed files (from coordinator):
+{changed_block}
+
+Diffstat (from coordinator):
+{diff_stat_block}
+{diff_stat_notice}
+
+Diff (from coordinator):
+{diff_text}
+{diff_notice}
+
+Coordinator test results:
+{tests_block}
+
+Implementation plan (from coordinator):
+{impl_plan_text or "(missing)"}
+{plan_notice}
+
+Review output schema (STRICT - only these fields):
+{{
+  "mergeable": true,
+  "issues": [
+    {{"severity": "high|medium|low", "text": "Description of the issue"}}
+  ]
+}}
+
+Review instructions:
+- Set "mergeable" to true if the implementation is ready to merge (tests pass, no critical issues).
+- Set "mergeable" to false if there are blocking issues that must be fixed before merging.
+- List issues with severity "high" for blockers, "medium" for should-fix, "low" for nice-to-have.
+- If tests failed (non-zero exit code in coordinator test results), set mergeable=false and include a high severity issue.
+- Focus on correctness, spec compliance, and critical code quality issues.
+- Keep issue text concise but actionable.
 """

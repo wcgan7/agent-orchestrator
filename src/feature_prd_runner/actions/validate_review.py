@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from ..validation import _validate_review_data
+from ..validation import _validate_review_data, _validate_simple_review_data
 
 
 def validate_review(
@@ -13,7 +13,10 @@ def validate_review(
     prd_markers: Optional[list[str]] = None,
     prd_truncated: bool = False,
     prd_has_content: bool = True,
+    simple_review: bool = False,
 ) -> tuple[bool, str]:
+    if simple_review:
+        return _validate_simple_review_data(review_data)
     return _validate_review_data(
         review_data,
         phase,

@@ -88,5 +88,6 @@ The prompt is applied once to the next run and then cleared.
 ## Testing
 
 ```bash
+python -m pip install -e ".[test]"
 python -m pytest
 ```

@@ -138,10 +138,14 @@ def parse_args() -> argparse.Namespace:
         help="Resume the most recent blocked task automatically (default: True)",
     )
     parser.add_argument(
-        "--resume-prompt",
+        "--custom-prompt",
         type=str,
         default=None,
-        help="Special instructions to inject on resume (applies to next agent run only)",
+        help=(
+            "Standalone prompt to execute before continuing implementation. "
+            "The agent must complete the instructions successfully; if blocked, "
+            "requires human intervention before continuing."
+        ),
     )
     parser.add_argument(
         "--log-level",
@@ -149,6 +153,12 @@ def parse_args() -> argparse.Namespace:
         choices=["debug", "info", "warning", "error", "critical"],
         default="info",
         help="Set logging level (default: info)",
+    )
+    parser.add_argument(
+        "--simple-review",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="Use simplified review output schema (mergeable + issues only, default: True)",
     )
     return parser.parse_args()
 
@@ -167,9 +177,10 @@ def main() -> None:
         max_attempts=args.max_task_attempts,
         max_auto_resumes=args.max_auto_resumes,
         test_command=args.test_command,
-        resume_prompt=args.resume_prompt,
+        custom_prompt=args.custom_prompt,
         stop_on_blocking_issues=args.stop_on_blocking_issues,
         resume_blocked=args.resume_blocked,
+        simple_review=args.simple_review,
     )
 
 
