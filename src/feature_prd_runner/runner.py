@@ -376,6 +376,104 @@ def _build_resume_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_retry_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Feature PRD Runner - retry a task by id (clear errors and re-run current step)",
+    )
+    parser.add_argument(
+        "task_id",
+        type=str,
+        help="Task id to retry (e.g., phase-1)",
+    )
+    parser.add_argument(
+        "--project-dir",
+        type=Path,
+        default=Path("."),
+        help="Project directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Retry even if another run appears active",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON result",
+    )
+    return parser
+
+
+def _build_rerun_step_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Feature PRD Runner - rerun a specific step for a task (update .prd_runner state)",
+    )
+    parser.add_argument(
+        "task_id",
+        type=str,
+        help="Task id (e.g., phase-1)",
+    )
+    parser.add_argument(
+        "--step",
+        required=True,
+        type=str,
+        choices=["plan_impl", "implement", "verify", "review", "commit"],
+        help="Step to rerun",
+    )
+    parser.add_argument(
+        "--project-dir",
+        type=Path,
+        default=Path("."),
+        help="Project directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Rerun even if another run appears active",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON result",
+    )
+    return parser
+
+
+def _build_skip_step_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Feature PRD Runner - skip a step for a task (advance to the next step)",
+    )
+    parser.add_argument(
+        "task_id",
+        type=str,
+        help="Task id (e.g., phase-1)",
+    )
+    parser.add_argument(
+        "--step",
+        type=str,
+        default=None,
+        choices=["plan_impl", "implement", "verify", "review", "commit"],
+        help="Step to skip (default: task's current step/blocked intent)",
+    )
+    parser.add_argument(
+        "--project-dir",
+        type=Path,
+        default=Path("."),
+        help="Project directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Skip even if another run appears active, or if task is not at --step",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON result",
+    )
+    return parser
+
+
 def _status_command(project_dir: Path, *, as_json: bool = False) -> int:
     project_dir = project_dir.resolve()
     state_dir = project_dir / STATE_DIR_NAME
@@ -675,6 +773,373 @@ def _resume_command(
         sys.stdout.write(json.dumps({"ok": True, "task_id": task_id, "resumed_step": restore_step}) + "\n")
     else:
         sys.stdout.write(f"Resumed {task_id} at step={restore_step}\n")
+    return 0
+
+
+def _append_task_context(task: dict, note: str) -> None:
+    context = task.get("context", [])
+    if not isinstance(context, list):
+        context = [str(context)]
+    note = str(note).strip()
+    if note and note not in context:
+        context.append(note)
+    task["context"] = context
+
+
+def _control_plane_run_active_guard(
+    run_state: dict,
+    runs_dir: Path,
+    *,
+    force: bool,
+) -> str | None:
+    if run_state.get("status") != "running":
+        return None
+    stale = _active_run_is_stale(
+        run_state,
+        runs_dir,
+        heartbeat_grace_seconds=DEFAULT_HEARTBEAT_GRACE_SECONDS,
+        shift_minutes=DEFAULT_SHIFT_MINUTES,
+    )
+    if stale or force:
+        return None
+    return "Another run appears active; refusing to modify state without --force"
+
+
+def _retry_command(
+    project_dir: Path,
+    task_id: str,
+    *,
+    force: bool,
+    as_json: bool = False,
+) -> int:
+    project_dir = project_dir.resolve()
+    state_dir = project_dir / STATE_DIR_NAME
+    if not state_dir.exists():
+        msg = f"No state directory found at {state_dir}"
+        if as_json:
+            import json
+            sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+        else:
+            sys.stdout.write(msg + "\n")
+        return 2
+
+    lock_path = state_dir / LOCK_FILE
+    run_state_path = state_dir / "run_state.yaml"
+    task_queue_path = state_dir / "task_queue.yaml"
+    runs_dir = state_dir / "runs"
+
+    with FileLock(lock_path):
+        run_state, run_state_err = _load_data_with_error(run_state_path, {})
+        if run_state_err:
+            msg = f"Unable to read run_state.yaml: {run_state_err}"
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+
+        active_msg = _control_plane_run_active_guard(run_state, runs_dir, force=force)
+        if active_msg:
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": active_msg}) + "\n")
+            else:
+                sys.stdout.write(active_msg + "\n")
+            return 2
+
+        queue, queue_err = _load_data_with_error(task_queue_path, {})
+        if queue_err:
+            msg = f"Unable to read task_queue.yaml: {queue_err}"
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+
+        tasks = _normalize_tasks(queue)
+        target = _find_task(tasks, task_id)
+        if not target:
+            msg = f"Task not found: {task_id}"
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+
+        intent = target.get("blocked_intent") or {}
+        restore_step = str(target.get("step") or intent.get("step") or "plan_impl")
+        restore_pm = target.get("prompt_mode")
+        if restore_pm is None:
+            pm = intent.get("prompt_mode")
+            restore_pm = str(pm).strip() if isinstance(pm, str) and pm.strip() else None
+
+        target["lifecycle"] = "ready"
+        target["step"] = restore_step
+        target["status"] = restore_step
+        target["prompt_mode"] = restore_pm
+        target["last_error"] = None
+        target["last_error_type"] = None
+        target["block_reason"] = None
+        target["human_blocking_issues"] = []
+        target["human_next_steps"] = []
+        target["last_updated_at"] = _now_iso()
+        target["manual_resume_attempts"] = int(target.get("manual_resume_attempts", 0)) + 1
+        _append_task_context(target, f"Manual retry requested (step={restore_step}).")
+
+        queue["tasks"] = tasks
+        queue["updated_at"] = target["last_updated_at"]
+        _save_data(task_queue_path, queue)
+
+    if as_json:
+        import json
+        sys.stdout.write(json.dumps({"ok": True, "task_id": task_id, "step": restore_step}) + "\n")
+    else:
+        sys.stdout.write(f"Retry queued for {task_id} at step={restore_step}\n")
+    return 0
+
+
+def _rerun_step_command(
+    project_dir: Path,
+    task_id: str,
+    *,
+    step: str,
+    force: bool,
+    as_json: bool = False,
+) -> int:
+    project_dir = project_dir.resolve()
+    state_dir = project_dir / STATE_DIR_NAME
+    if not state_dir.exists():
+        msg = f"No state directory found at {state_dir}"
+        if as_json:
+            import json
+            sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+        else:
+            sys.stdout.write(msg + "\n")
+        return 2
+
+    lock_path = state_dir / LOCK_FILE
+    run_state_path = state_dir / "run_state.yaml"
+    task_queue_path = state_dir / "task_queue.yaml"
+    runs_dir = state_dir / "runs"
+
+    with FileLock(lock_path):
+        run_state, run_state_err = _load_data_with_error(run_state_path, {})
+        if run_state_err:
+            msg = f"Unable to read run_state.yaml: {run_state_err}"
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+
+        active_msg = _control_plane_run_active_guard(run_state, runs_dir, force=force)
+        if active_msg:
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": active_msg}) + "\n")
+            else:
+                sys.stdout.write(active_msg + "\n")
+            return 2
+
+        queue, queue_err = _load_data_with_error(task_queue_path, {})
+        if queue_err:
+            msg = f"Unable to read task_queue.yaml: {queue_err}"
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+
+        tasks = _normalize_tasks(queue)
+        target = _find_task(tasks, task_id)
+        if not target:
+            msg = f"Task not found: {task_id}"
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+
+        step = str(step).strip()
+        target["lifecycle"] = "ready"
+        target["step"] = step
+        target["status"] = step
+        target["prompt_mode"] = None
+        target["last_error"] = None
+        target["last_error_type"] = None
+        target["block_reason"] = None
+        target["human_blocking_issues"] = []
+        target["human_next_steps"] = []
+        target["last_updated_at"] = _now_iso()
+        target["manual_resume_attempts"] = int(target.get("manual_resume_attempts", 0)) + 1
+        _append_task_context(target, f"Manual rerun requested (step={step}).")
+
+        queue["tasks"] = tasks
+        queue["updated_at"] = target["last_updated_at"]
+        _save_data(task_queue_path, queue)
+
+    if as_json:
+        import json
+        sys.stdout.write(json.dumps({"ok": True, "task_id": task_id, "step": step}) + "\n")
+    else:
+        sys.stdout.write(f"Rerun queued for {task_id} at step={step}\n")
+    return 0
+
+
+def _skip_step_next(step: str) -> tuple[str | None, str]:
+    step = str(step).strip()
+    order = ["plan_impl", "implement", "verify", "review", "commit"]
+    if step not in order:
+        return None, step
+    idx = order.index(step)
+    if idx >= len(order) - 1:
+        return None, step
+    return order[idx + 1], step
+
+
+def _skip_step_command(
+    project_dir: Path,
+    task_id: str,
+    *,
+    step: str | None,
+    force: bool,
+    as_json: bool = False,
+) -> int:
+    project_dir = project_dir.resolve()
+    state_dir = project_dir / STATE_DIR_NAME
+    if not state_dir.exists():
+        msg = f"No state directory found at {state_dir}"
+        if as_json:
+            import json
+            sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+        else:
+            sys.stdout.write(msg + "\n")
+        return 2
+
+    lock_path = state_dir / LOCK_FILE
+    run_state_path = state_dir / "run_state.yaml"
+    task_queue_path = state_dir / "task_queue.yaml"
+    runs_dir = state_dir / "runs"
+
+    with FileLock(lock_path):
+        run_state, run_state_err = _load_data_with_error(run_state_path, {})
+        if run_state_err:
+            msg = f"Unable to read run_state.yaml: {run_state_err}"
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+
+        active_msg = _control_plane_run_active_guard(run_state, runs_dir, force=force)
+        if active_msg:
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": active_msg}) + "\n")
+            else:
+                sys.stdout.write(active_msg + "\n")
+            return 2
+
+        queue, queue_err = _load_data_with_error(task_queue_path, {})
+        if queue_err:
+            msg = f"Unable to read task_queue.yaml: {queue_err}"
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+
+        tasks = _normalize_tasks(queue)
+        target = _find_task(tasks, task_id)
+        if not target:
+            msg = f"Task not found: {task_id}"
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+
+        intent = target.get("blocked_intent") or {}
+        requested_step = step
+        if not requested_step:
+            requested_step = str(intent.get("step") or target.get("step") or "plan_impl")
+        requested_step = str(requested_step).strip()
+
+        current_step = str(target.get("step") or "").strip()
+        if not force and current_step and current_step != requested_step:
+            msg = f"Task {task_id} is at step={current_step}; refusing to skip step={requested_step} without --force"
+            if as_json:
+                import json
+                sys.stdout.write(
+                    json.dumps(
+                        {
+                            "ok": False,
+                            "error": msg,
+                            "task_id": task_id,
+                            "current_step": current_step,
+                            "requested_step": requested_step,
+                        }
+                    )
+                    + "\n"
+                )
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+
+        next_step, normalized_step = _skip_step_next(requested_step)
+        if next_step is None:
+            target["lifecycle"] = "done"
+            target["step"] = "commit"
+            target["status"] = "done"
+            target["prompt_mode"] = None
+            _append_task_context(target, f"Manual skip requested (step={normalized_step}); marking done.")
+        else:
+            target["lifecycle"] = "ready"
+            target["step"] = next_step
+            target["status"] = next_step
+            target["prompt_mode"] = None
+            _append_task_context(target, f"Manual skip requested (step={normalized_step}); advancing to {next_step}.")
+
+        target["last_error"] = None
+        target["last_error_type"] = None
+        target["block_reason"] = None
+        target["human_blocking_issues"] = []
+        target["human_next_steps"] = []
+        target["last_updated_at"] = _now_iso()
+        target["manual_resume_attempts"] = int(target.get("manual_resume_attempts", 0)) + 1
+
+        queue["tasks"] = tasks
+        queue["updated_at"] = target["last_updated_at"]
+        _save_data(task_queue_path, queue)
+
+    if as_json:
+        import json
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "ok": True,
+                    "task_id": task_id,
+                    "skipped_step": normalized_step,
+                    "next_step": next_step,
+                    "marked_done": next_step is None,
+                }
+            )
+            + "\n"
+        )
+    else:
+        if next_step is None:
+            sys.stdout.write(f"Skipped {normalized_step} for {task_id}; marked done\n")
+        else:
+            sys.stdout.write(f"Skipped {normalized_step} for {task_id}; next step={next_step}\n")
     return 0
 
 
@@ -993,6 +1458,38 @@ def main(argv: list[str] | None = None) -> None:
             args = _build_resume_parser().parse_args(argv[1:])
             raise SystemExit(
                 _resume_command(
+                    args.project_dir,
+                    args.task_id,
+                    step=args.step,
+                    force=bool(args.force),
+                    as_json=bool(args.json),
+                )
+            )
+        if argv[0] == "retry":
+            args = _build_retry_parser().parse_args(argv[1:])
+            raise SystemExit(
+                _retry_command(
+                    args.project_dir,
+                    args.task_id,
+                    force=bool(args.force),
+                    as_json=bool(args.json),
+                )
+            )
+        if argv[0] == "rerun-step":
+            args = _build_rerun_step_parser().parse_args(argv[1:])
+            raise SystemExit(
+                _rerun_step_command(
+                    args.project_dir,
+                    args.task_id,
+                    step=args.step,
+                    force=bool(args.force),
+                    as_json=bool(args.json),
+                )
+            )
+        if argv[0] == "skip-step":
+            args = _build_skip_step_parser().parse_args(argv[1:])
+            raise SystemExit(
+                _skip_step_command(
                     args.project_dir,
                     args.task_id,
                     step=args.step,

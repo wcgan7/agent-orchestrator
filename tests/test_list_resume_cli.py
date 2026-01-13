@@ -133,3 +133,134 @@ def test_resume_does_not_overwrite_corrupted_task_queue(tmp_path, capsys) -> Non
 
     assert paths["task_queue"].read_text() == bad_yaml
     assert "Unable to read task_queue.yaml" in capsys.readouterr().out
+
+
+def test_retry_clears_errors_and_marks_ready(tmp_path) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=project_dir, check=True)
+
+    prd_path = project_dir / "prd.md"
+    prd_path.write_text("Spec\n")
+    paths = _ensure_state_files(project_dir, prd_path)
+
+    _save_data(
+        paths["task_queue"],
+        {
+            "updated_at": _now_iso(),
+            "tasks": [
+                {
+                    "id": "phase-1",
+                    "type": "implement",
+                    "phase_id": "phase-1",
+                    "status": "blocked",
+                    "lifecycle": "waiting_human",
+                    "step": "verify",
+                    "last_error_type": "tests_failed",
+                    "last_error": "pytest failed",
+                    "blocked_intent": {"step": "verify", "prompt_mode": "fix_tests"},
+                    "prompt_mode": None,
+                },
+            ],
+        },
+    )
+
+    try:
+        runner.main(["retry", "phase-1", "--project-dir", str(project_dir)])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    queue = _load_data(paths["task_queue"], {})
+    task = queue["tasks"][0]
+    assert task["lifecycle"] == "ready"
+    assert task["step"] == "verify"
+    assert task["status"] == "verify"
+    assert task["last_error"] is None
+    assert task["last_error_type"] is None
+    assert task["prompt_mode"] == "fix_tests"
+
+
+def test_rerun_step_sets_step_and_clears_prompt_mode(tmp_path) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=project_dir, check=True)
+
+    prd_path = project_dir / "prd.md"
+    prd_path.write_text("Spec\n")
+    paths = _ensure_state_files(project_dir, prd_path)
+
+    _save_data(
+        paths["task_queue"],
+        {
+            "updated_at": _now_iso(),
+            "tasks": [
+                {"id": "phase-1", "type": "implement", "phase_id": "phase-1", "status": "blocked", "lifecycle": "waiting_human", "step": "review", "prompt_mode": "address_review"},
+            ],
+        },
+    )
+
+    try:
+        runner.main(["rerun-step", "phase-1", "--project-dir", str(project_dir), "--step", "implement"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    queue = _load_data(paths["task_queue"], {})
+    task = queue["tasks"][0]
+    assert task["lifecycle"] == "ready"
+    assert task["step"] == "implement"
+    assert task["status"] == "implement"
+    assert task["prompt_mode"] is None
+
+
+def test_skip_step_advances_step(tmp_path) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=project_dir, check=True)
+
+    prd_path = project_dir / "prd.md"
+    prd_path.write_text("Spec\n")
+    paths = _ensure_state_files(project_dir, prd_path)
+
+    _save_data(
+        paths["task_queue"],
+        {
+            "updated_at": _now_iso(),
+            "tasks": [
+                {"id": "phase-1", "type": "implement", "phase_id": "phase-1", "status": "verify", "lifecycle": "ready", "step": "verify"},
+            ],
+        },
+    )
+
+    try:
+        runner.main(["skip-step", "phase-1", "--project-dir", str(project_dir), "--step", "verify"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    queue = _load_data(paths["task_queue"], {})
+    task = queue["tasks"][0]
+    assert task["lifecycle"] == "ready"
+    assert task["step"] == "review"
+    assert task["status"] == "review"
+
+
+def test_skip_step_requires_force_on_mismatch(tmp_path, capsys) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=project_dir, check=True)
+
+    prd_path = project_dir / "prd.md"
+    prd_path.write_text("Spec\n")
+    paths = _ensure_state_files(project_dir, prd_path)
+
+    _save_data(
+        paths["task_queue"],
+        {"updated_at": _now_iso(), "tasks": [{"id": "phase-1", "type": "implement", "phase_id": "phase-1", "status": "verify", "lifecycle": "ready", "step": "verify"}]},
+    )
+
+    try:
+        runner.main(["skip-step", "phase-1", "--project-dir", str(project_dir), "--step", "implement"])
+    except SystemExit as exc:
+        assert exc.code == 2
+
+    out = capsys.readouterr().out
+    assert "refusing to skip" in out.lower()

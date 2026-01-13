@@ -123,6 +123,14 @@ Resume a blocked task by id (optionally overriding the step):
 feature-prd-runner resume phase-1 --project-dir /path/to/your/project --step implement
 ```
 
+Other control-plane commands (these update `.prd_runner/task_queue.yaml`):
+
+```bash
+feature-prd-runner retry phase-1 --project-dir /path/to/your/project
+feature-prd-runner rerun-step phase-1 --project-dir /path/to/your/project --step verify
+feature-prd-runner skip-step phase-1 --project-dir /path/to/your/project --step verify
+```
+
 Each step writes progress to durable files for easy resume. Verification evidence is
 recorded and fed into review prompts to avoid “not evidenced” failures.
 
