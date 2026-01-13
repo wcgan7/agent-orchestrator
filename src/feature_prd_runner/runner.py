@@ -23,13 +23,15 @@ from .constants import (
     DEFAULT_MAX_AUTO_RESUMES,
     DEFAULT_SHIFT_MINUTES,
     DEFAULT_STOP_ON_BLOCKING_ISSUES,
+    LOCK_FILE,
     STATE_DIR_NAME,
 )
 from .orchestrator import run_feature_prd
 from .prompts import _build_phase_prompt, _build_plan_prompt, _build_review_prompt
-from .io_utils import _load_data, _load_data_with_error
+from .io_utils import FileLock, _load_data, _load_data_with_error, _save_data
 from .tasks import (
     _blocking_tasks,
+    _find_task,
     _normalize_phases,
     _normalize_tasks,
     _phase_for_task,
@@ -40,7 +42,7 @@ from .tasks import (
     _task_summary,
  )
 from .state import _active_run_is_stale
-from .utils import _hash_file
+from .utils import _hash_file, _now_iso
 from .validation import validate_phase_plan_schema, validate_task_queue_schema
 from .git_utils import _git_is_repo, _git_status_porcelain, _git_changed_files, _git_is_ignored, _git_tracked_paths
 
@@ -274,6 +276,74 @@ def _build_doctor_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_list_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Feature PRD Runner - list phases and tasks",
+    )
+    parser.add_argument(
+        "--project-dir",
+        type=Path,
+        default=Path("."),
+        help="Project directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON",
+    )
+    parser.add_argument(
+        "--tasks",
+        action="store_true",
+        help="Show tasks (default: show both phases and tasks)",
+    )
+    parser.add_argument(
+        "--phases",
+        action="store_true",
+        help="Show phases (default: show both phases and tasks)",
+    )
+    parser.add_argument(
+        "--blocked",
+        action="store_true",
+        help="Only show blocked tasks/phases",
+    )
+    return parser
+
+
+def _build_resume_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Feature PRD Runner - resume a task by id (update .prd_runner state)",
+    )
+    parser.add_argument(
+        "task_id",
+        type=str,
+        help="Task id to resume (e.g., phase-1)",
+    )
+    parser.add_argument(
+        "--project-dir",
+        type=Path,
+        default=Path("."),
+        help="Project directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--step",
+        type=str,
+        default=None,
+        choices=["plan_impl", "implement", "verify", "review", "commit"],
+        help="Step to resume at (default: task's current step/blocked intent)",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Resume even if task is not blocked",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Print machine-readable JSON result",
+    )
+    return parser
+
+
 def _status_command(project_dir: Path, *, as_json: bool = False) -> int:
     project_dir = project_dir.resolve()
     state_dir = project_dir / STATE_DIR_NAME
@@ -376,6 +446,204 @@ def _status_command(project_dir: Path, *, as_json: bool = False) -> int:
         sys.stdout.write(f"Last run id: {last_run_id}\n")
 
     return 2 if errors else 0
+
+
+def _load_state_for_control_plane(project_dir: Path) -> tuple[dict, dict, dict, list[str]]:
+    state_dir = project_dir / STATE_DIR_NAME
+    run_state_path = state_dir / "run_state.yaml"
+    task_queue_path = state_dir / "task_queue.yaml"
+    phase_plan_path = state_dir / "phase_plan.yaml"
+
+    run_state, run_state_err = _load_data_with_error(run_state_path, {})
+    queue, queue_err = _load_data_with_error(task_queue_path, {})
+    plan, plan_err = _load_data_with_error(phase_plan_path, {})
+    errors = [e for e in [run_state_err, queue_err, plan_err] if e]
+    return run_state, queue, plan, errors
+
+
+def _list_command(
+    project_dir: Path,
+    *,
+    show_tasks: bool,
+    show_phases: bool,
+    blocked_only: bool,
+    as_json: bool = False,
+) -> int:
+    project_dir = project_dir.resolve()
+    state_dir = project_dir / STATE_DIR_NAME
+    if not state_dir.exists():
+        if as_json:
+            import json
+            sys.stdout.write(json.dumps({"status": "missing_state_dir", "state_dir": str(state_dir)}) + "\n")
+        else:
+            sys.stdout.write(f"No state directory found at {state_dir}\n")
+        return 0
+
+    run_state, queue, plan, errors = _load_state_for_control_plane(project_dir)
+    tasks = _normalize_tasks(queue)
+    phases = _normalize_phases(plan)
+
+    if not show_tasks and not show_phases:
+        show_tasks = True
+        show_phases = True
+
+    if blocked_only:
+        tasks = _blocking_tasks(tasks)
+        phases = [p for p in phases if p.get("status") == "blocked"]
+
+    payload = {
+        "project_dir": str(project_dir),
+        "state_dir": str(state_dir),
+        "errors": errors,
+        "run_state": run_state,
+        "phases": phases if show_phases else None,
+        "tasks": tasks if show_tasks else None,
+    }
+
+    if as_json:
+        import json
+        sys.stdout.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        return 2 if errors else 0
+
+    if errors:
+        sys.stdout.write("State errors:\n")
+        for err in errors:
+            sys.stdout.write(f"- {err}\n")
+
+    if show_phases:
+        sys.stdout.write("Phases:\n")
+        for phase in phases:
+            sys.stdout.write(
+                f"- {phase.get('id')}: {phase.get('status') or 'todo'}"
+                f" ({phase.get('name') or ''})\n"
+            )
+    if show_tasks:
+        sys.stdout.write("Tasks:\n")
+        for task in tasks:
+            sys.stdout.write(
+                f"- {task.get('id')}: {task.get('lifecycle')}/{task.get('step')}"
+                f" status={task.get('status')} type={task.get('type')}\n"
+            )
+
+    return 2 if errors else 0
+
+
+def _resume_command(
+    project_dir: Path,
+    task_id: str,
+    *,
+    step: str | None,
+    force: bool,
+    as_json: bool = False,
+) -> int:
+    project_dir = project_dir.resolve()
+    state_dir = project_dir / STATE_DIR_NAME
+    if not state_dir.exists():
+        msg = f"No state directory found at {state_dir}"
+        if as_json:
+            import json
+            sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+        else:
+            sys.stdout.write(msg + "\n")
+        return 2
+
+    lock_path = state_dir / LOCK_FILE
+    run_state_path = state_dir / "run_state.yaml"
+    task_queue_path = state_dir / "task_queue.yaml"
+    runs_dir = state_dir / "runs"
+
+    with FileLock(lock_path):
+        run_state, run_state_err = _load_data_with_error(run_state_path, {})
+        if run_state_err:
+            msg = f"Unable to read run_state.yaml: {run_state_err}"
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+
+        if run_state.get("status") == "running":
+            stale = _active_run_is_stale(
+                run_state,
+                runs_dir,
+                heartbeat_grace_seconds=DEFAULT_HEARTBEAT_GRACE_SECONDS,
+                shift_minutes=DEFAULT_SHIFT_MINUTES,
+            )
+            if not stale and not force:
+                msg = "Another run appears active; refusing to resume without --force"
+                if as_json:
+                    import json
+                    sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+                else:
+                    sys.stdout.write(msg + "\n")
+                return 2
+
+        queue, queue_err = _load_data_with_error(task_queue_path, {})
+        if queue_err:
+            msg = f"Unable to read task_queue.yaml: {queue_err}"
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+        tasks = _normalize_tasks(queue)
+        target = _find_task(tasks, task_id)
+        if not target:
+            msg = f"Task not found: {task_id}"
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+
+        is_blocked = target.get("lifecycle") == "waiting_human" or target.get("status") == "blocked"
+        if not force and not is_blocked:
+            msg = f"Task {task_id} is not blocked; use --force to resume anyway"
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg, "task": target}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
+
+        restore_step = step
+        restore_prompt_mode = None
+        if not restore_step:
+            intent = target.get("blocked_intent") or {}
+            restore_step = intent.get("step") or target.get("step") or "plan_impl"
+            pm = intent.get("prompt_mode")
+            restore_prompt_mode = str(pm).strip() if isinstance(pm, str) and pm.strip() else None
+        restore_step = str(restore_step)
+
+        target["lifecycle"] = "ready"
+        target["step"] = restore_step
+        target["status"] = restore_step
+        if step:
+            target["prompt_mode"] = None
+        elif restore_prompt_mode is not None:
+            target["prompt_mode"] = restore_prompt_mode
+        target["last_error"] = None
+        target["last_error_type"] = None
+        target["block_reason"] = None
+        target["human_blocking_issues"] = []
+        target["human_next_steps"] = []
+        # Keep timestamps coherent; orchestrator also updates queue.updated_at.
+        target["last_updated_at"] = _now_iso()
+        target["manual_resume_attempts"] = int(target.get("manual_resume_attempts", 0)) + 1
+
+        queue["tasks"] = tasks
+        queue["updated_at"] = target["last_updated_at"]
+        _save_data(task_queue_path, queue)
+
+    if as_json:
+        import json
+        sys.stdout.write(json.dumps({"ok": True, "task_id": task_id, "resumed_step": restore_step}) + "\n")
+    else:
+        sys.stdout.write(f"Resumed {task_id} at step={restore_step}\n")
+    return 0
 
 
 def _dry_run_command(project_dir: Path, prd_path: Path | None, *, as_json: bool = False) -> int:
@@ -675,6 +943,28 @@ def main(argv: list[str] | None = None) -> None:
                     args.project_dir,
                     args.prd_file,
                     check_codex=bool(args.check_codex),
+                    as_json=bool(args.json),
+                )
+            )
+        if argv[0] == "list":
+            args = _build_list_parser().parse_args(argv[1:])
+            raise SystemExit(
+                _list_command(
+                    args.project_dir,
+                    show_tasks=bool(args.tasks),
+                    show_phases=bool(args.phases),
+                    blocked_only=bool(args.blocked),
+                    as_json=bool(args.json),
+                )
+            )
+        if argv[0] == "resume":
+            args = _build_resume_parser().parse_args(argv[1:])
+            raise SystemExit(
+                _resume_command(
+                    args.project_dir,
+                    args.task_id,
+                    step=args.step,
+                    force=bool(args.force),
                     as_json=bool(args.json),
                 )
             )

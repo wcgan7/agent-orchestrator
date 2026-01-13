@@ -103,6 +103,20 @@ For machine-readable output:
 feature-prd-runner doctor --project-dir /path/to/your/project --prd-file /path/to/your/project/docs/feature_prd.md --json
 ```
 
+## List and Resume
+
+List phases and tasks:
+
+```bash
+feature-prd-runner list --project-dir /path/to/your/project
+```
+
+Resume a blocked task by id (optionally overriding the step):
+
+```bash
+feature-prd-runner resume phase-1 --project-dir /path/to/your/project --step implement
+```
+
 Each step writes progress to durable files for easy resume. Verification evidence is
 recorded and fed into review prompts to avoid “not evidenced” failures.
 
