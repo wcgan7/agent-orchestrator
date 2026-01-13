@@ -171,6 +171,9 @@ def run_feature_prd(
     prd_path = prd_path.resolve()
 
     if reset_state:
+        # Ensure archived state (e.g., `.prd_runner.bak-...`) doesn't show up as untracked / get committed.
+        if _git_is_repo(project_dir):
+            _ensure_gitignore(project_dir, only_if_clean=True)
         try:
             _reset_state_dir(project_dir)
         except Exception as exc:

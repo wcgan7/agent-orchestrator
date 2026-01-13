@@ -32,3 +32,5 @@ htmlcov/
 .DS_Store
 
 .prd_runner/
+.prd_runner.bak-*/
+.prd_runner.bak-*

@@ -23,7 +23,9 @@ def _ignore_file_has_entry(path: Path, ignore_entry: str) -> bool:
         if line.strip() and not line.lstrip().startswith("#")
     }
     normalized_entry = ignore_entry.strip().rstrip("/")
-    return normalized_entry in lines or STATE_DIR_NAME in lines
+    if normalized_entry == STATE_DIR_NAME:
+        return STATE_DIR_NAME in lines
+    return normalized_entry in lines
 
 
 def _append_ignore_entry(path: Path, ignore_entry: str) -> None:
@@ -38,14 +40,19 @@ def _append_ignore_entry(path: Path, ignore_entry: str) -> None:
 
 
 def _ensure_gitignore(project_dir: Path, only_if_clean: bool = False) -> None:
-    ignore_entry = f"{STATE_DIR_NAME}/"
+    ignore_entries = [
+        f"{STATE_DIR_NAME}/",
+        f"{STATE_DIR_NAME}.bak-*/",
+        f"{STATE_DIR_NAME}.bak-*",
+    ]
     gitignore_path = project_dir / ".gitignore"
-    if _ignore_file_has_entry(gitignore_path, ignore_entry):
-        return
     if only_if_clean and _git_has_changes(project_dir):
         return
     try:
-        _append_ignore_entry(gitignore_path, ignore_entry)
+        for ignore_entry in ignore_entries:
+            if _ignore_file_has_entry(gitignore_path, ignore_entry):
+                continue
+            _append_ignore_entry(gitignore_path, ignore_entry)
     except OSError as exc:
         logger.warning("Unable to update .gitignore: {}", exc)
 
@@ -377,7 +384,12 @@ def _gitignore_change_is_prd_runner_only(project_dir: Path) -> bool:
         return False
     if any(line.startswith("-") for line in changes):
         return False
-    allowed = {".prd_runner", ".prd_runner/"}
+    allowed = {
+        STATE_DIR_NAME,
+        f"{STATE_DIR_NAME}/",
+        f"{STATE_DIR_NAME}.bak-*",
+        f"{STATE_DIR_NAME}.bak-*/",
+    }
     additions = [line[1:].strip() for line in changes if line.startswith("+")]
     if not additions:
         return False
@@ -409,6 +421,12 @@ def _git_commit(project_dir: Path, message: str) -> None:
         _ensure_gitignore(project_dir)
         if not _git_is_ignored(project_dir, ".prd_runner"):
             raise RuntimeError(".prd_runner is not ignored; add it to .gitignore before committing")
+    # Ensure reset-state backups are also kept out of git.
+    backup_probe = f"{STATE_DIR_NAME}.bak-ignore-probe"
+    if not _git_is_ignored(project_dir, backup_probe):
+        _ensure_gitignore(project_dir)
+        if not _git_is_ignored(project_dir, backup_probe):
+            raise RuntimeError(f"{STATE_DIR_NAME}.bak-* is not ignored; add it to .gitignore before committing")
     subprocess.run(["git", "add", "-A", "--", "."], cwd=project_dir, check=True)
     subprocess.run(["git", "commit", "-m", message], cwd=project_dir, check=True)
 
