@@ -81,6 +81,28 @@ For machine-readable output:
 feature-prd-runner status --project-dir /path/to/your/project --json
 ```
 
+## Dry Run
+
+Preview what the runner would do next without making any changes (no git changes, no `.prd_runner` writes, no Codex, no tests):
+
+```bash
+feature-prd-runner dry-run --project-dir /path/to/your/project --prd-file /path/to/your/project/docs/feature_prd.md
+```
+
+## Doctor
+
+Run read-only diagnostics (git + state + PRD consistency checks):
+
+```bash
+feature-prd-runner doctor --project-dir /path/to/your/project --prd-file /path/to/your/project/docs/feature_prd.md
+```
+
+For machine-readable output:
+
+```bash
+feature-prd-runner doctor --project-dir /path/to/your/project --prd-file /path/to/your/project/docs/feature_prd.md --json
+```
+
 Each step writes progress to durable files for easy resume. Verification evidence is
 recorded and fed into review prompts to avoid “not evidenced” failures.
 
