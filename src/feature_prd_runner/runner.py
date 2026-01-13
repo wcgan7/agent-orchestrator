@@ -786,6 +786,10 @@ def _append_task_context(task: dict, note: str) -> None:
     task["context"] = context
 
 
+_CONTROL_PLANE_STEP_ORDER = ["plan_impl", "implement", "verify", "review", "commit"]
+_CONTROL_PLANE_STEP_INDEX = {name: idx for idx, name in enumerate(_CONTROL_PLANE_STEP_ORDER)}
+
+
 def _control_plane_run_active_guard(
     run_state: dict,
     runs_dir: Path,
@@ -870,7 +874,18 @@ def _retry_command(
             return 2
 
         intent = target.get("blocked_intent") or {}
-        restore_step = str(target.get("step") or intent.get("step") or "plan_impl")
+        restore_step = str(target.get("step") or intent.get("step") or "plan_impl").strip()
+        if restore_step not in _CONTROL_PLANE_STEP_INDEX:
+            msg = (
+                f"Task {task_id} has unexpected step={restore_step!r}; "
+                "use `rerun-step --step {plan_impl,implement,verify,review,commit}` to set a valid step"
+            )
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
         restore_pm = target.get("prompt_mode")
         if restore_pm is None:
             pm = intent.get("prompt_mode")
@@ -994,13 +1009,12 @@ def _rerun_step_command(
 
 def _skip_step_next(step: str) -> tuple[str | None, str]:
     step = str(step).strip()
-    order = ["plan_impl", "implement", "verify", "review", "commit"]
-    if step not in order:
+    idx = _CONTROL_PLANE_STEP_INDEX.get(step)
+    if idx is None:
         return None, step
-    idx = order.index(step)
-    if idx >= len(order) - 1:
+    if idx >= len(_CONTROL_PLANE_STEP_ORDER) - 1:
         return None, step
-    return order[idx + 1], step
+    return _CONTROL_PLANE_STEP_ORDER[idx + 1], step
 
 
 def _skip_step_command(
@@ -1073,6 +1087,17 @@ def _skip_step_command(
         if not requested_step:
             requested_step = str(intent.get("step") or target.get("step") or "plan_impl")
         requested_step = str(requested_step).strip()
+        if requested_step not in _CONTROL_PLANE_STEP_INDEX:
+            msg = (
+                f"Task {task_id} has unexpected step={requested_step!r}; "
+                "pass `--step` explicitly to skip a valid step"
+            )
+            if as_json:
+                import json
+                sys.stdout.write(json.dumps({"ok": False, "error": msg}) + "\n")
+            else:
+                sys.stdout.write(msg + "\n")
+            return 2
 
         current_step = str(target.get("step") or "").strip()
         if not force and current_step and current_step != requested_step:

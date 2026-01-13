@@ -264,3 +264,38 @@ def test_skip_step_requires_force_on_mismatch(tmp_path, capsys) -> None:
 
     out = capsys.readouterr().out
     assert "refusing to skip" in out.lower()
+
+
+def test_skip_step_refuses_non_control_plane_step(tmp_path, capsys) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    subprocess.run(["git", "init"], cwd=project_dir, check=True)
+
+    prd_path = project_dir / "prd.md"
+    prd_path.write_text("Spec\n")
+    paths = _ensure_state_files(project_dir, prd_path)
+
+    _save_data(
+        paths["task_queue"],
+        {
+            "updated_at": _now_iso(),
+            "tasks": [
+                {
+                    "id": "phase-1",
+                    "type": "implement",
+                    "phase_id": "phase-1",
+                    "status": "blocked",
+                    "lifecycle": "waiting_human",
+                    "step": "resume_prompt",
+                }
+            ],
+        },
+    )
+
+    try:
+        runner.main(["skip-step", "phase-1", "--project-dir", str(project_dir)])
+    except SystemExit as exc:
+        assert exc.code == 2
+
+    out = capsys.readouterr().out
+    assert "unexpected step" in out.lower()
