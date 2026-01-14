@@ -82,6 +82,31 @@ Human blockers **stop the runner**.
 * Update `README.md` when behavior changes
 * Agents must not commit or push. Only the coordinator may commit/push after review passes.
 
+### Documentation, types, and linting standards (REQUIRED)
+
+When working in Python code, agents must keep the codebase self-documenting and compatible with auto-doc tooling
+(e.g., Sphinx).
+
+**Docstrings**
+
+- Use **Google-style** docstrings (strict).
+- Every `.py` file must start with a **module-level docstring** describing the module’s purpose.
+- Every **public** function and class must have a docstring that includes:
+  - Summary (one-line)
+  - Args (all parameters)
+  - Returns (return value)
+  - Raises (all meaningful exceptions that can be raised)
+
+**Type hinting**
+
+- Use Python 3.10+ type hint syntax.
+- All function arguments and return values must be annotated (public and internal).
+
+**Linting**
+
+- Prefer `ruff` for linting and docstring validation (pydocstyle `google` convention).
+- If a verify command is configured, keep `ruff check .` passing (and `mypy` strict if configured).
+
 ### Repo modification policy by mode
 
 - PLAN / PLAN_IMPL / REVIEW: do not modify repository files outside `.prd_runner/`
