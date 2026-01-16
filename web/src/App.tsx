@@ -7,6 +7,7 @@ import MetricsPanel from './components/MetricsPanel'
 import MetricsChart from './components/MetricsChart'
 import ControlPanel from './components/ControlPanel'
 import DependencyGraph from './components/DependencyGraph'
+import ProjectSelector from './components/ProjectSelector'
 
 interface ProjectStatus {
   project_dir: string
@@ -23,20 +24,30 @@ interface ProjectStatus {
   tasks_blocked: number
 }
 
+const STORAGE_KEY = 'feature-prd-runner-selected-project'
+
 function App() {
   const [status, setStatus] = useState<ProjectStatus | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [currentProject, setCurrentProject] = useState<string | null>(() => {
+    // Load from local storage on mount
+    return localStorage.getItem(STORAGE_KEY)
+  })
 
   useEffect(() => {
     fetchStatus()
     const interval = setInterval(fetchStatus, 5000) // Poll every 5 seconds
     return () => clearInterval(interval)
-  }, [])
+  }, [currentProject])
 
   const fetchStatus = async () => {
     try {
-      const response = await fetch('/api/status')
+      const url = currentProject
+        ? `/api/status?project_dir=${encodeURIComponent(currentProject)}`
+        : '/api/status'
+
+      const response = await fetch(url)
       if (!response.ok) {
         throw new Error(`HTTP error ${response.status}`)
       }
@@ -50,6 +61,12 @@ function App() {
     }
   }
 
+  const handleProjectChange = (projectPath: string) => {
+    setCurrentProject(projectPath)
+    localStorage.setItem(STORAGE_KEY, projectPath)
+    setLoading(true)
+  }
+
   if (loading) {
     return (
       <div className="app">
@@ -61,11 +78,20 @@ function App() {
   if (error) {
     return (
       <div className="app">
+        <header className="header">
+          <h1>Feature PRD Runner Dashboard</h1>
+          <ProjectSelector
+            currentProject={currentProject}
+            onProjectChange={handleProjectChange}
+          />
+        </header>
         <div className="error">
           <h2>Error</h2>
           <p>{error}</p>
           <p className="hint">
-            Make sure the backend server is running on port 8080
+            {currentProject
+              ? 'Make sure the selected project has a valid .prd_runner directory'
+              : 'Select a project or make sure the backend server is running on port 8080'}
           </p>
           <button onClick={fetchStatus}>Retry</button>
         </div>
@@ -77,8 +103,14 @@ function App() {
     <div className="app">
       <header className="header">
         <h1>Feature PRD Runner Dashboard</h1>
-        <div className="status-badge" data-status={status?.status}>
-          {status?.status || 'unknown'}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <ProjectSelector
+            currentProject={currentProject}
+            onProjectChange={handleProjectChange}
+          />
+          <div className="status-badge" data-status={status?.status}>
+            {status?.status || 'unknown'}
+          </div>
         </div>
       </header>
 

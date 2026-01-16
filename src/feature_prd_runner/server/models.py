@@ -106,6 +106,17 @@ class LogEntry(BaseModel):
     task_id: Optional[str] = None
 
 
+class ProjectInfo(BaseModel):
+    """Project information."""
+
+    name: str
+    path: str
+    status: str  # active, idle, error
+    last_run: Optional[str] = None
+    phases_total: int = 0
+    phases_completed: int = 0
+
+
 class ControlAction(BaseModel):
     """Control action request."""
 
@@ -113,6 +124,7 @@ class ControlAction(BaseModel):
     task_id: Optional[str] = None
     step: Optional[str] = None
     reason: Optional[str] = None
+    params: Optional[dict[str, Any]] = None
 
 
 class ControlResponse(BaseModel):

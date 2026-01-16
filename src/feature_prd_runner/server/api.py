@@ -18,6 +18,7 @@ from .models import (
     ControlAction,
     ControlResponse,
     PhaseInfo,
+    ProjectInfo,
     ProjectStatus,
     RunDetail,
     RunInfo,
@@ -88,6 +89,127 @@ def create_app(
             "version": "1.0.0",
             "status": "running",
         }
+
+    @app.get("/api/projects")
+    async def list_projects(
+        search_path: Optional[str] = Query(None, description="Path to search for projects"),
+    ) -> list[ProjectInfo]:
+        """List available projects with .prd_runner state.
+
+        Args:
+            search_path: Optional path to search for projects (defaults to common locations).
+
+        Returns:
+            List of discovered projects.
+        """
+        projects = []
+
+        # Default search paths
+        search_paths = []
+        if search_path:
+            search_paths.append(Path(search_path))
+        else:
+            # Search in common locations
+            home = Path.home()
+            search_paths.extend([
+                Path.cwd(),  # Current directory
+                home / "Documents",
+                home / "Projects",
+                home,
+            ])
+
+        # Scan for projects
+        for base_path in search_paths:
+            if not base_path.exists():
+                continue
+
+            try:
+                # Check if base path itself is a project
+                if (base_path / ".prd_runner").exists():
+                    project_info = _get_project_info(base_path)
+                    if project_info and project_info not in projects:
+                        projects.append(project_info)
+
+                # Search subdirectories (1 level deep)
+                for subdir in base_path.iterdir():
+                    if subdir.is_dir() and (subdir / ".prd_runner").exists():
+                        project_info = _get_project_info(subdir)
+                        if project_info and project_info not in projects:
+                            projects.append(project_info)
+
+            except Exception as e:
+                logger.warning(f"Error scanning {base_path}: {e}")
+                continue
+
+        # Remove duplicates based on path
+        seen_paths = set()
+        unique_projects = []
+        for proj in projects:
+            if proj.path not in seen_paths:
+                seen_paths.add(proj.path)
+                unique_projects.append(proj)
+
+        return unique_projects
+
+    def _get_project_info(project_path: Path) -> ProjectInfo | None:
+        """Get project information from a directory.
+
+        Args:
+            project_path: Path to project directory.
+
+        Returns:
+            ProjectInfo or None if project is invalid.
+        """
+        try:
+            state_dir = project_path / ".prd_runner"
+            if not state_dir.exists():
+                return None
+
+            # Load run state to get status
+            run_state_path = state_dir / "run_state.yaml"
+            run_state = _load_data(run_state_path, {})
+
+            # Load phase plan to get counts
+            phase_plan_path = state_dir / "phase_plan.yaml"
+            phase_plan = _load_data(phase_plan_path, {})
+            phases = phase_plan.get("phases", [])
+
+            # Count completed phases
+            task_queue_path = state_dir / "task_queue.yaml"
+            task_queue = _load_data(task_queue_path, {})
+            tasks = task_queue.get("tasks", [])
+
+            completed_phases = set()
+            for task in tasks:
+                if task.get("lifecycle") == "done" and task.get("phase_id"):
+                    completed_phases.add(task["phase_id"])
+
+            # Get last run
+            runs_dir = state_dir / "runs"
+            last_run = None
+            if runs_dir.exists():
+                run_dirs = [d for d in runs_dir.iterdir() if d.is_dir()]
+                if run_dirs:
+                    latest = max(run_dirs, key=lambda d: d.name)
+                    last_run = latest.name
+
+            # Determine status
+            status = run_state.get("status", "idle")
+            if status == "running":
+                status = "active"
+
+            return ProjectInfo(
+                name=project_path.name,
+                path=str(project_path.resolve()),
+                status=status,
+                last_run=last_run,
+                phases_total=len(phases),
+                phases_completed=len(completed_phases),
+            )
+
+        except Exception as e:
+            logger.warning(f"Error getting project info for {project_path}: {e}")
+            return None
 
     @app.get("/api/status")
     async def get_status(
