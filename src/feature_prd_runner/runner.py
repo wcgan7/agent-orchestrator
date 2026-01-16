@@ -31,6 +31,7 @@ from .io_utils import FileLock, _load_data, _load_data_with_error, _save_data
 from .custom_execution import execute_custom_prompt
 from .messaging import ApprovalResponse, MessageBus, Message
 from .approval_gates import ApprovalGateManager
+from .debug import ErrorAnalyzer
 from .tasks import (
     _blocking_tasks,
     _find_task,
@@ -870,6 +871,294 @@ def _steer_command(project_dir: Path, run_id: Optional[str], message: Optional[s
         # Send single message
         bus.send_guidance(message)
         sys.stdout.write(f"✓ Message sent to worker: {message}\n")
+
+    return 0
+
+
+def _build_explain_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Feature PRD Runner - explain why a task is blocked",
+    )
+    parser.add_argument(
+        "task_id",
+        type=str,
+        help="Task ID to explain",
+    )
+    parser.add_argument(
+        "--project-dir",
+        type=Path,
+        default=Path("."),
+        help="Project directory (default: current directory)",
+    )
+    return parser
+
+
+def _build_inspect_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Feature PRD Runner - inspect task state in detail",
+    )
+    parser.add_argument(
+        "task_id",
+        type=str,
+        help="Task ID to inspect",
+    )
+    parser.add_argument(
+        "--project-dir",
+        type=Path,
+        default=Path("."),
+        help="Project directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON",
+    )
+    return parser
+
+
+def _build_trace_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Feature PRD Runner - trace event history for a task",
+    )
+    parser.add_argument(
+        "task_id",
+        type=str,
+        help="Task ID to trace",
+    )
+    parser.add_argument(
+        "--project-dir",
+        type=Path,
+        default=Path("."),
+        help="Project directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output as JSON",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Maximum number of events to show (default: 50)",
+    )
+    return parser
+
+
+def _build_logs_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Feature PRD Runner - view detailed logs for a task",
+    )
+    parser.add_argument(
+        "task_id",
+        type=str,
+        help="Task ID",
+    )
+    parser.add_argument(
+        "--project-dir",
+        type=Path,
+        default=Path("."),
+        help="Project directory (default: current directory)",
+    )
+    parser.add_argument(
+        "--step",
+        type=str,
+        help="Specific step to show logs for",
+    )
+    parser.add_argument(
+        "--lines",
+        type=int,
+        default=100,
+        help="Number of lines to show (default: 100)",
+    )
+    parser.add_argument(
+        "--run-id",
+        type=str,
+        help="Specific run ID (auto-detect if not specified)",
+    )
+    return parser
+
+
+def _explain_command(project_dir: Path, task_id: str) -> int:
+    """Explain why a task is blocked."""
+    project_dir = project_dir.resolve()
+
+    analyzer = ErrorAnalyzer(project_dir)
+    explanation = analyzer.explain_blocking(task_id)
+
+    sys.stdout.write(explanation)
+    sys.stdout.write("\n")
+
+    return 0
+
+
+def _inspect_command(project_dir: Path, task_id: str, *, as_json: bool = False) -> int:
+    """Inspect task state in detail."""
+    project_dir = project_dir.resolve()
+
+    analyzer = ErrorAnalyzer(project_dir)
+    snapshot = analyzer.inspect_state(task_id)
+
+    if not snapshot:
+        sys.stdout.write(f"Task {task_id} not found\n")
+        return 1
+
+    if as_json:
+        import json
+        from dataclasses import asdict
+
+        sys.stdout.write(json.dumps(asdict(snapshot), indent=2) + "\n")
+    else:
+        formatted = analyzer.format_state_snapshot(snapshot)
+        sys.stdout.write(formatted)
+
+    return 0
+
+
+def _trace_command(
+    project_dir: Path,
+    task_id: str,
+    *,
+    as_json: bool = False,
+    limit: int = 50,
+) -> int:
+    """Trace event history for a task."""
+    project_dir = project_dir.resolve()
+
+    analyzer = ErrorAnalyzer(project_dir)
+    events = analyzer.trace_history(task_id)
+
+    if not events:
+        sys.stdout.write(f"No events found for task {task_id}\n")
+        return 0
+
+    # Limit events
+    if limit > 0:
+        events = events[-limit:]
+
+    if as_json:
+        import json
+
+        sys.stdout.write(json.dumps(events, indent=2) + "\n")
+    else:
+        sys.stdout.write(f"Event History for {task_id} (showing {len(events)} events):\n")
+        sys.stdout.write("=" * 80 + "\n\n")
+
+        for i, event in enumerate(events, 1):
+            event_type = event.get("event_type", "unknown")
+            timestamp = event.get("timestamp", "")
+            run_id = event.get("run_id", "")
+
+            sys.stdout.write(f"{i}. [{timestamp}] {event_type}\n")
+            if run_id:
+                sys.stdout.write(f"   Run ID: {run_id}\n")
+
+            # Show key details based on event type
+            if event_type == "worker_failed":
+                error = event.get("error_type", "")
+                detail = event.get("error_detail", "")
+                if error:
+                    sys.stdout.write(f"   Error: {error}\n")
+                if detail:
+                    detail_preview = detail[:100] + "..." if len(detail) > 100 else detail
+                    sys.stdout.write(f"   Detail: {detail_preview}\n")
+
+            elif event_type == "verification_result":
+                passed = event.get("passed", False)
+                status = "✓ PASSED" if passed else "✗ FAILED"
+                sys.stdout.write(f"   Status: {status}\n")
+
+            elif event_type == "task_blocked":
+                reason = event.get("block_reason", "")
+                if reason:
+                    sys.stdout.write(f"   Reason: {reason}\n")
+
+            sys.stdout.write("\n")
+
+    return 0
+
+
+def _logs_command(
+    project_dir: Path,
+    task_id: str,
+    step: Optional[str],
+    lines: int,
+    run_id: Optional[str],
+) -> int:
+    """View detailed logs for a task."""
+    project_dir = project_dir.resolve()
+    state_dir = project_dir / STATE_DIR_NAME
+
+    if not state_dir.exists():
+        sys.stdout.write("No .prd_runner state directory found\n")
+        return 1
+
+    # Auto-detect run_id if not specified
+    if not run_id:
+        # Find most recent run for this task
+        runs_dir = state_dir / "runs"
+        if not runs_dir.exists():
+            sys.stdout.write("No runs directory found\n")
+            return 1
+
+        # Look for runs matching this task
+        matching_runs = []
+        for run_dir in runs_dir.iterdir():
+            if run_dir.is_dir():
+                # Check if this run contains this task
+                progress_path = run_dir / "progress.json"
+                if progress_path.exists():
+                    progress = _load_data(progress_path, {})
+                    if progress.get("task_id") == task_id:
+                        matching_runs.append(run_dir.name)
+
+        if not matching_runs:
+            sys.stdout.write(f"No runs found for task {task_id}\n")
+            return 1
+
+        # Use most recent
+        run_id = sorted(matching_runs)[-1]
+
+    run_dir = state_dir / "runs" / run_id
+
+    if not run_dir.exists():
+        sys.stdout.write(f"Run directory not found: {run_dir}\n")
+        return 1
+
+    sys.stdout.write(f"Logs for task {task_id} (run: {run_id})\n")
+    sys.stdout.write("=" * 80 + "\n\n")
+
+    # Determine which logs to show
+    log_files = []
+
+    if step:
+        # Show logs for specific step
+        if step == "verify":
+            log_files.append(("Test Output", run_dir / "verify_output.txt"))
+            log_files.append(("Pytest Failures", run_dir / "pytest_failures.txt"))
+        else:
+            log_files.append(("stdout", run_dir / "stdout.log"))
+            log_files.append(("stderr", run_dir / "stderr.log"))
+    else:
+        # Show all available logs
+        log_files.append(("stdout", run_dir / "stdout.log"))
+        log_files.append(("stderr", run_dir / "stderr.log"))
+        log_files.append(("Test Output", run_dir / "verify_output.txt"))
+
+    for label, log_path in log_files:
+        if log_path.exists():
+            sys.stdout.write(f"--- {label} ---\n")
+            try:
+                content = log_path.read_text()
+                # Show last N lines
+                log_lines = content.splitlines()
+                if len(log_lines) > lines:
+                    sys.stdout.write(f"(showing last {lines} lines)\n\n")
+                    log_lines = log_lines[-lines:]
+                sys.stdout.write("\n".join(log_lines))
+                sys.stdout.write("\n\n")
+            except Exception as e:
+                sys.stdout.write(f"Error reading log: {e}\n\n")
 
     return 0
 
@@ -1987,6 +2276,44 @@ def main(argv: list[str] | None = None) -> None:
                     args.project_dir,
                     args.run_id,
                     args.message,
+                )
+            )
+        if argv[0] == "explain":
+            args = _build_explain_parser().parse_args(argv[1:])
+            raise SystemExit(
+                _explain_command(
+                    args.project_dir,
+                    args.task_id,
+                )
+            )
+        if argv[0] == "inspect":
+            args = _build_inspect_parser().parse_args(argv[1:])
+            raise SystemExit(
+                _inspect_command(
+                    args.project_dir,
+                    args.task_id,
+                    as_json=bool(args.json),
+                )
+            )
+        if argv[0] == "trace":
+            args = _build_trace_parser().parse_args(argv[1:])
+            raise SystemExit(
+                _trace_command(
+                    args.project_dir,
+                    args.task_id,
+                    as_json=bool(args.json),
+                    limit=args.limit,
+                )
+            )
+        if argv[0] == "logs":
+            args = _build_logs_parser().parse_args(argv[1:])
+            raise SystemExit(
+                _logs_command(
+                    args.project_dir,
+                    args.task_id,
+                    args.step,
+                    args.lines,
+                    args.run_id,
                 )
             )
 

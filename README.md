@@ -329,6 +329,76 @@ See [docs/HUMAN_IN_THE_LOOP.md](docs/HUMAN_IN_THE_LOOP.md) for comprehensive doc
 - Interactive mode details
 - Advanced usage patterns
 
+## Enhanced Error Messages & Debugging
+
+The runner provides comprehensive debugging tools for troubleshooting failures:
+
+### Debug Commands
+
+**Explain why a task is blocked:**
+```bash
+feature-prd-runner explain phase-1
+```
+
+**Inspect full task state:**
+```bash
+feature-prd-runner inspect phase-1
+feature-prd-runner inspect phase-1 --json  # JSON output
+```
+
+**Trace event history:**
+```bash
+feature-prd-runner trace phase-1
+feature-prd-runner trace phase-1 --limit 20  # Last 20 events
+```
+
+**View detailed logs:**
+```bash
+feature-prd-runner logs phase-1
+feature-prd-runner logs phase-1 --step verify --lines 200
+```
+
+### Rich Error Reports
+
+Errors include:
+- Root cause analysis
+- Files involved
+- Actionable suggestions with commands
+- Quick fixes
+
+Example error output:
+```
+❌ Error: phase-1
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Error Type: test_failed
+Verification failed: 2 tests failed
+
+Root Cause:
+  Tests failed during verification.
+
+Files Involved:
+  1. tests/test_auth.py
+
+Suggested Actions:
+  [1] Review test failures
+      $ feature-prd-runner logs phase-1 --step verify
+
+  [2] Retry after reviewing
+      $ feature-prd-runner retry phase-1
+
+Quick Fixes:
+  • View full test output
+    $ cat .prd_runner/runs/*/tests_phase-1.log
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+See [docs/DEBUGGING.md](docs/DEBUGGING.md) for full documentation on:
+- All debugging commands
+- Error analysis features
+- Root cause identification
+- Programmatic access
+- Best practices
+
 ## Troubleshooting
 
 - `Codex command must include {prompt_file}, {prompt}, or '-'`: update `--codex-command` to accept input.
