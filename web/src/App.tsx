@@ -6,6 +6,7 @@ import LiveLog from './components/LiveLog'
 import MetricsPanel from './components/MetricsPanel'
 import MetricsChart from './components/MetricsChart'
 import ControlPanel from './components/ControlPanel'
+import DependencyGraph from './components/DependencyGraph'
 
 interface ProjectStatus {
   project_dir: string
@@ -100,6 +101,8 @@ function App() {
         </div>
 
         <MetricsChart />
+
+        <DependencyGraph />
 
         {status?.run_id && (
           <LiveLog runId={status.run_id} />
