@@ -9,6 +9,7 @@ import ControlPanel from './components/ControlPanel'
 import DependencyGraph from './components/DependencyGraph'
 import ProjectSelector from './components/ProjectSelector'
 import Login from './components/Login'
+import ApprovalGate from './components/ApprovalGate'
 
 interface ProjectStatus {
   project_dir: string
@@ -258,6 +259,8 @@ function App() {
           currentPhaseId={status?.current_phase_id}
           status={status?.status}
         />
+
+        <ApprovalGate projectDir={currentProject || undefined} />
 
         <div className="grid">
           <div className="col-2">

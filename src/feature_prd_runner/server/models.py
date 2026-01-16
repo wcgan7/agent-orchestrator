@@ -158,6 +158,31 @@ class AuthStatus(BaseModel):
     username: Optional[str] = None
 
 
+class ApprovalGateInfo(BaseModel):
+    """Approval gate information."""
+
+    request_id: str
+    gate_type: str
+    message: str
+    task_id: Optional[str] = None
+    phase_id: Optional[str] = None
+    created_at: str
+    timeout: Optional[int] = None
+    context: dict[str, Any] = Field(default_factory=dict)
+    show_diff: bool = False
+    show_plan: bool = False
+    show_tests: bool = False
+    show_review: bool = False
+
+
+class ApprovalAction(BaseModel):
+    """Approval action request."""
+
+    request_id: str
+    approved: bool
+    feedback: Optional[str] = None
+
+
 class WebSocketMessage(BaseModel):
     """WebSocket message."""
 

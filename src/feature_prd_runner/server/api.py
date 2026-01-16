@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -15,6 +17,8 @@ from ..io_utils import _load_data
 from ..phase_utils import _normalize_phases
 from ..tasks import _normalize_tasks
 from .models import (
+    ApprovalAction,
+    ApprovalGateInfo,
     AuthStatus,
     ControlAction,
     ControlResponse,
@@ -645,6 +649,133 @@ def create_app(
                 success=False,
                 message=f"Internal error: {e}",
                 data={"action": action.action, "task_id": action.task_id},
+            )
+
+    @app.get("/api/approvals")
+    async def get_approvals(
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+    ) -> list[ApprovalGateInfo]:
+        """Get pending approval requests.
+
+        Args:
+            project_dir: Project directory path.
+
+        Returns:
+            List of pending approval requests.
+        """
+        proj_dir = _get_project_dir(project_dir)
+        paths = _get_paths(proj_dir)
+
+        # Look for pending approval requests in message bus
+        approvals = []
+        message_bus_path = paths["state_dir"] / "message_bus.json"
+
+        if message_bus_path.exists():
+            try:
+                with open(message_bus_path) as f:
+                    bus_data = json.load(f)
+
+                # Find pending approval requests
+                for request in bus_data.get("approval_requests", []):
+                    if request.get("status") == "pending":
+                        approvals.append(
+                            ApprovalGateInfo(
+                                request_id=request.get("id", ""),
+                                gate_type=request.get("gate_type", ""),
+                                message=request.get("message", ""),
+                                task_id=request.get("context", {}).get("task_id"),
+                                phase_id=request.get("context", {}).get("phase_id"),
+                                created_at=request.get("created_at", ""),
+                                timeout=request.get("timeout"),
+                                context=request.get("context", {}),
+                                show_diff=request.get("context", {}).get("show_diff", False),
+                                show_plan=request.get("context", {}).get("show_plan", False),
+                                show_tests=request.get("context", {}).get("show_tests", False),
+                                show_review=request.get("context", {}).get("show_review", False),
+                            )
+                        )
+
+            except Exception as e:
+                logger.error("Failed to read message bus: {}", e)
+
+        return approvals
+
+    @app.post("/api/approvals/respond")
+    async def respond_to_approval(
+        action: ApprovalAction,
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+    ) -> ControlResponse:
+        """Respond to an approval request.
+
+        Args:
+            action: Approval action (approve/reject with optional feedback).
+            project_dir: Project directory path.
+
+        Returns:
+            Response indicating success or failure.
+        """
+        proj_dir = _get_project_dir(project_dir)
+        paths = _get_paths(proj_dir)
+
+        message_bus_path = paths["state_dir"] / "message_bus.json"
+
+        if not message_bus_path.exists():
+            return ControlResponse(
+                success=False,
+                message="No pending approval requests found",
+                data={},
+            )
+
+        try:
+            # Read message bus
+            with open(message_bus_path) as f:
+                bus_data = json.load(f)
+
+            # Find the request
+            request_found = False
+            for request in bus_data.get("approval_requests", []):
+                if request.get("id") == action.request_id:
+                    request_found = True
+                    request["status"] = "approved" if action.approved else "rejected"
+                    request["responded_at"] = datetime.now(timezone.utc).isoformat()
+                    if action.feedback:
+                        request["feedback"] = action.feedback
+                    break
+
+            if not request_found:
+                return ControlResponse(
+                    success=False,
+                    message=f"Approval request {action.request_id} not found",
+                    data={},
+                )
+
+            # Write back to message bus
+            with open(message_bus_path, "w") as f:
+                json.dump(bus_data, f, indent=2)
+
+            logger.info(
+                "Approval request {} {}: {}",
+                action.request_id,
+                "approved" if action.approved else "rejected",
+                action.feedback or "no feedback",
+            )
+
+            return ControlResponse(
+                success=True,
+                message=f"Approval request {'approved' if action.approved else 'rejected'}",
+                data={
+                    "request_id": action.request_id,
+                    "approved": action.approved,
+                    "feedback": action.feedback,
+                },
+            )
+
+        except Exception as e:
+            logger.error("Failed to respond to approval: {}", e)
+            return ControlResponse(
+                success=False,
+                message=f"Error processing approval: {e}",
+                data={},
             )
 
     @app.get("/api/metrics")
