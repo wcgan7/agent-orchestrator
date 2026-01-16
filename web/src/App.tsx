@@ -5,6 +5,7 @@ import PhaseTimeline from './components/PhaseTimeline'
 import LiveLog from './components/LiveLog'
 import MetricsPanel from './components/MetricsPanel'
 import MetricsChart from './components/MetricsChart'
+import ControlPanel from './components/ControlPanel'
 
 interface ProjectStatus {
   project_dir: string
@@ -82,6 +83,12 @@ function App() {
 
       <div className="container">
         <RunDashboard status={status} />
+
+        <ControlPanel
+          currentTaskId={status?.current_task_id}
+          currentPhaseId={status?.current_phase_id}
+          status={status?.status}
+        />
 
         <div className="grid">
           <div className="col-2">

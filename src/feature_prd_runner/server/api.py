@@ -402,13 +402,11 @@ def create_app(
             project_dir: Project directory path.
 
         Returns:
-            Control response.
+            Control response with success status and message.
         """
-        proj_dir = _get_project_dir(project_dir)
-        paths = _get_paths(proj_dir)
+        from .control import ControlError, create_controller
 
-        # For now, this is a placeholder that would integrate with the orchestrator
-        # Full implementation would need to coordinate with running processes
+        proj_dir = _get_project_dir(project_dir)
 
         logger.info(
             "Control action received: {} for task={} (project={})",
@@ -417,17 +415,69 @@ def create_app(
             proj_dir,
         )
 
-        # TODO: Implement actual control logic
-        # This would require:
-        # 1. Inter-process communication with running orchestrator
-        # 2. Signal handling
-        # 3. State updates
+        try:
+            controller = create_controller(proj_dir)
 
-        return ControlResponse(
-            success=False,
-            message=f"Control action '{action.action}' not yet implemented",
-            data={"action": action.action, "task_id": action.task_id},
-        )
+            if action.action == "retry":
+                if not action.task_id:
+                    return ControlResponse(
+                        success=False,
+                        message="task_id required for retry action",
+                        data={},
+                    )
+                step = action.params.get("step", "plan_impl") if action.params else "plan_impl"
+                result = controller.retry_task(action.task_id, step)
+
+            elif action.action == "skip":
+                if not action.task_id:
+                    return ControlResponse(
+                        success=False,
+                        message="task_id required for skip action",
+                        data={},
+                    )
+                step = action.params.get("step") if action.params else None
+                result = controller.skip_step(action.task_id, step)
+
+            elif action.action == "resume":
+                if not action.task_id:
+                    return ControlResponse(
+                        success=False,
+                        message="task_id required for resume action",
+                        data={},
+                    )
+                step = action.params.get("step") if action.params else None
+                result = controller.resume_task(action.task_id, step)
+
+            elif action.action == "stop":
+                result = controller.stop_run()
+
+            else:
+                return ControlResponse(
+                    success=False,
+                    message=f"Unknown action: {action.action}",
+                    data={"action": action.action},
+                )
+
+            return ControlResponse(
+                success=result["success"],
+                message=result["message"],
+                data=result,
+            )
+
+        except ControlError as e:
+            logger.error("Control action failed: {}", e)
+            return ControlResponse(
+                success=False,
+                message=str(e),
+                data={"action": action.action, "task_id": action.task_id},
+            )
+        except Exception as e:
+            logger.error("Unexpected error in control action: {}", e)
+            return ControlResponse(
+                success=False,
+                message=f"Internal error: {e}",
+                data={"action": action.action, "task_id": action.task_id},
+            )
 
     @app.get("/api/metrics")
     async def get_metrics(
