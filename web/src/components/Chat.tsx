@@ -24,7 +24,7 @@ const Chat = ({ runId, projectDir }: ChatProps) => {
   const messagesEndRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    if (isOpen && runId) {
+    if (isOpen) {
       fetchMessages()
       const interval = setInterval(fetchMessages, 3000)
       return () => clearInterval(interval)
@@ -56,7 +56,7 @@ const Chat = ({ runId, projectDir }: ChatProps) => {
         throw new Error(`HTTP error ${response.status}`)
       }
       const data = await response.json()
-      setMessages(data)
+      setMessages(Array.isArray(data) ? data : [])
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch messages')
@@ -141,6 +141,7 @@ const Chat = ({ runId, projectDir }: ChatProps) => {
         className="chat-toggle"
         onClick={() => setIsOpen(true)}
         title="Open chat"
+        aria-label="Open chat"
       >
         💬 Chat
       </button>

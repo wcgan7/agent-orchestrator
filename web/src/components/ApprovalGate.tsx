@@ -51,7 +51,7 @@ const ApprovalGate = ({ projectDir }: ApprovalGateProps) => {
         throw new Error(`HTTP error ${response.status}`)
       }
       const data = await response.json()
-      setApprovals(data)
+      setApprovals(Array.isArray(data) ? data : [])
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch approvals')

@@ -99,7 +99,8 @@ describe('Chat', () => {
     await userEvent.click(toggleButton)
 
     await waitFor(() => {
-      const messages = screen.getAllByClassName('chat-message')
+      const messages = document.querySelectorAll('.chat-message')
+      expect(messages.length).toBeGreaterThanOrEqual(2)
       expect(messages[0]).toHaveClass('human')
       expect(messages[1]).toHaveClass('worker')
     })

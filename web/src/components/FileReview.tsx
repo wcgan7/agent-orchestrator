@@ -45,7 +45,7 @@ const FileReview = ({ taskId, projectDir }: FileReviewProps) => {
         throw new Error(`HTTP error ${response.status}`)
       }
       const data = await response.json()
-      setFiles(data)
+      setFiles(Array.isArray(data) ? data : [])
       setError(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to fetch file changes')

@@ -13,6 +13,34 @@ export default function PhaseTimeline() {
   const [phases, setPhases] = useState<Phase[]>([])
   const [loading, setLoading] = useState(true)
 
+  const normalizePhases = (value: unknown): Phase[] => {
+    if (!Array.isArray(value)) return []
+    const out: Phase[] = []
+    for (const item of value) {
+      if (!item || typeof item !== 'object') continue
+      const raw = item as Record<string, unknown>
+      const id = typeof raw.id === 'string' ? raw.id : ''
+      if (!id) continue
+      const depsRaw = raw.deps
+      const deps = Array.isArray(depsRaw)
+        ? depsRaw.map((d) => String(d)).filter(Boolean)
+        : []
+      const progress =
+        typeof raw.progress === 'number' && Number.isFinite(raw.progress)
+          ? raw.progress
+          : 0
+      out.push({
+        id,
+        name: typeof raw.name === 'string' ? raw.name : '',
+        description: typeof raw.description === 'string' ? raw.description : '',
+        status: typeof raw.status === 'string' ? raw.status : '',
+        deps,
+        progress,
+      })
+    }
+    return out
+  }
+
   useEffect(() => {
     fetchPhases()
     const interval = setInterval(fetchPhases, 5000)
@@ -24,7 +52,7 @@ export default function PhaseTimeline() {
       const response = await fetch('/api/phases')
       if (response.ok) {
         const data = await response.json()
-        setPhases(data)
+        setPhases(normalizePhases(data))
       }
     } catch (err) {
       console.error('Failed to fetch phases:', err)

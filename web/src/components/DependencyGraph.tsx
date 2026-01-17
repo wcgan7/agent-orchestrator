@@ -26,6 +26,34 @@ export default function DependencyGraph() {
   const [nodes, setNodes, onNodesChange] = useNodesState([])
   const [edges, setEdges, onEdgesChange] = useEdgesState([])
 
+  const normalizePhases = (value: unknown): Phase[] => {
+    if (!Array.isArray(value)) return []
+    const out: Phase[] = []
+    for (const item of value) {
+      if (!item || typeof item !== 'object') continue
+      const raw = item as Record<string, unknown>
+      const id = typeof raw.id === 'string' ? raw.id : ''
+      if (!id) continue
+      const depsRaw = raw.deps
+      const deps = Array.isArray(depsRaw)
+        ? depsRaw.map((d) => String(d)).filter(Boolean)
+        : []
+      const progress =
+        typeof raw.progress === 'number' && Number.isFinite(raw.progress)
+          ? raw.progress
+          : 0
+      out.push({
+        id,
+        name: typeof raw.name === 'string' ? raw.name : '',
+        description: typeof raw.description === 'string' ? raw.description : '',
+        status: typeof raw.status === 'string' ? raw.status : '',
+        deps,
+        progress,
+      })
+    }
+    return out
+  }
+
   useEffect(() => {
     fetchPhases()
     const interval = setInterval(fetchPhases, 10000) // Poll every 10 seconds
@@ -43,7 +71,7 @@ export default function DependencyGraph() {
       const response = await fetch('/api/phases')
       if (response.ok) {
         const data = await response.json()
-        setPhases(data)
+        setPhases(normalizePhases(data))
       }
     } catch (err) {
       console.error('Failed to fetch phases:', err)
@@ -111,7 +139,8 @@ export default function DependencyGraph() {
     // Create edges from dependencies
     const newEdges: Edge[] = []
     phaseList.forEach((phase) => {
-      phase.deps.forEach((depId) => {
+      const deps = Array.isArray(phase.deps) ? phase.deps : []
+      deps.forEach((depId) => {
         newEdges.push({
           id: `${depId}-${phase.id}`,
           source: depId,
@@ -146,12 +175,13 @@ export default function DependencyGraph() {
       visited.add(phaseId)
 
       const phase = phaseList.find((p) => p.id === phaseId)
-      if (!phase || phase.deps.length === 0) {
+      const deps = phase && Array.isArray(phase.deps) ? phase.deps : []
+      if (!phase || deps.length === 0) {
         levels[phaseId] = 0
         return 0
       }
 
-      const maxDepth = Math.max(...phase.deps.map((depId) => calculateDepth(depId, new Set(visited))))
+      const maxDepth = Math.max(...deps.map((depId) => calculateDepth(depId, new Set(visited))))
       levels[phaseId] = maxDepth + 1
       return maxDepth + 1
     }

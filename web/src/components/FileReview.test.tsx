@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import FileReview from './FileReview'
 
@@ -73,16 +73,19 @@ describe('FileReview', () => {
       json: async () => mockFiles,
     })
 
-    render(<FileReview />)
+    const { container } = render(<FileReview />)
 
     await waitFor(() => {
-      expect(screen.getByText('src/app.ts')).toBeInTheDocument()
-      expect(screen.getByText('src/new.ts')).toBeInTheDocument()
-      expect(screen.getByText('src/old.ts')).toBeInTheDocument()
-      expect(screen.getByText('+10')).toBeInTheDocument()
-      expect(screen.getByText('-5')).toBeInTheDocument()
-      expect(screen.getByText('+20')).toBeInTheDocument()
-      expect(screen.getByText('-15')).toBeInTheDocument()
+      const list = container.querySelector('.file-list')
+      expect(list).not.toBeNull()
+      const listQueries = within(list as HTMLElement)
+      expect(listQueries.getByText('src/app.ts')).toBeInTheDocument()
+      expect(listQueries.getByText('src/new.ts')).toBeInTheDocument()
+      expect(listQueries.getByText('src/old.ts')).toBeInTheDocument()
+      expect(screen.getAllByText('+10').length).toBeGreaterThan(0)
+      expect(screen.getAllByText('-5').length).toBeGreaterThan(0)
+      expect(screen.getAllByText('+20').length).toBeGreaterThan(0)
+      expect(screen.getAllByText('-15').length).toBeGreaterThan(0)
     })
   })
 
@@ -159,14 +162,18 @@ describe('FileReview', () => {
       json: async () => mockFiles,
     })
 
-    render(<FileReview />)
+    const { container } = render(<FileReview />)
 
     await waitFor(() => {
-      expect(screen.getByText('first.ts')).toBeInTheDocument()
+      const list = container.querySelector('.file-list')
+      expect(list).not.toBeNull()
+      const listQueries = within(list as HTMLElement)
+      expect(listQueries.getByText('first.ts')).toBeInTheDocument()
     })
 
     // Click on second file
-    const secondFile = screen.getAllByText('second.ts')[0]
+    const list = container.querySelector('.file-list') as HTMLElement
+    const secondFile = within(list).getByText('second.ts')
     await userEvent.click(secondFile)
 
     // Should display second file's diff
@@ -196,11 +203,11 @@ describe('FileReview', () => {
     render(<FileReview />)
 
     await waitFor(() => {
-      const diffView = screen.getByText('deleted line')
+      const diffView = screen.getByText('-deleted line')
       expect(diffView).toBeInTheDocument()
       expect(diffView).toHaveClass('diff-line', 'deletion')
 
-      const addedLine = screen.getByText('added line')
+      const addedLine = screen.getByText('+added line')
       expect(addedLine).toHaveClass('diff-line', 'addition')
 
       const hunkLine = screen.getByText('@@ -1,3 +1,4 @@')
@@ -240,7 +247,9 @@ describe('FileReview', () => {
     render(<FileReview />)
 
     await waitFor(() => {
-      expect(screen.getByText('test.ts')).toBeInTheDocument()
+      const list = document.querySelector('.file-list')
+      expect(list).not.toBeNull()
+      expect(within(list as HTMLElement).getByText('test.ts')).toBeInTheDocument()
     })
 
     const approveButton = screen.getByRole('button', { name: /✓ approve/i })
@@ -289,7 +298,9 @@ describe('FileReview', () => {
     render(<FileReview />)
 
     await waitFor(() => {
-      expect(screen.getByText('test.ts')).toBeInTheDocument()
+      const list = document.querySelector('.file-list')
+      expect(list).not.toBeNull()
+      expect(within(list as HTMLElement).getByText('test.ts')).toBeInTheDocument()
     })
 
     const rejectButton = screen.getByRole('button', { name: /✗ reject/i })
@@ -327,7 +338,9 @@ describe('FileReview', () => {
     render(<FileReview />)
 
     await waitFor(() => {
-      expect(screen.getByText('test.ts')).toBeInTheDocument()
+      const list = document.querySelector('.file-list')
+      expect(list).not.toBeNull()
+      expect(within(list as HTMLElement).getByText('test.ts')).toBeInTheDocument()
     })
 
     const commentInput = screen.getByPlaceholderText(/add optional comment/i)
@@ -368,7 +381,9 @@ describe('FileReview', () => {
     render(<FileReview />)
 
     await waitFor(() => {
-      expect(screen.getByText('test.ts')).toBeInTheDocument()
+      const list = document.querySelector('.file-list')
+      expect(list).not.toBeNull()
+      expect(within(list as HTMLElement).getByText('test.ts')).toBeInTheDocument()
     })
 
     const commentInput = screen.getByPlaceholderText(/add optional comment/i)
@@ -420,7 +435,9 @@ describe('FileReview', () => {
     render(<FileReview />)
 
     await waitFor(() => {
-      expect(screen.getByText('test.ts')).toBeInTheDocument()
+      const list = document.querySelector('.file-list')
+      expect(list).not.toBeNull()
+      expect(within(list as HTMLElement).getByText('test.ts')).toBeInTheDocument()
     })
 
     const commentInput = screen.getByPlaceholderText(
@@ -471,7 +488,9 @@ describe('FileReview', () => {
     render(<FileReview />)
 
     await waitFor(() => {
-      expect(screen.getByText('test.ts')).toBeInTheDocument()
+      const list = document.querySelector('.file-list')
+      expect(list).not.toBeNull()
+      expect(within(list as HTMLElement).getByText('test.ts')).toBeInTheDocument()
     })
 
     const approveButton = screen.getByRole('button', { name: /✓ approve/i })
@@ -482,7 +501,7 @@ describe('FileReview', () => {
     // Buttons should be disabled during submission
     expect(approveButton).toBeDisabled()
     expect(rejectButton).toBeDisabled()
-    expect(screen.getByText(/processing/i)).toBeInTheDocument()
+    expect(screen.getAllByText(/processing/i).length).toBeGreaterThan(0)
   })
 
   it('navigates between files with previous/next buttons', async () => {
@@ -638,10 +657,11 @@ describe('FileReview', () => {
       json: async () => mockFiles,
     })
 
-    render(<FileReview />)
+    const { container } = render(<FileReview />)
 
     await waitFor(() => {
-      const fileItems = screen.getAllByClassName('file-item')
+      const fileItems = container.querySelectorAll('.file-item')
+      expect(fileItems.length).toBeGreaterThanOrEqual(3)
       expect(fileItems[0]).toHaveClass('approved')
       expect(fileItems[1]).toHaveClass('rejected')
       expect(fileItems[2]).not.toHaveClass('approved')

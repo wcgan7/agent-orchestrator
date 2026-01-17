@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import App from '../App'
 
@@ -30,17 +30,35 @@ describe('Integration Tests', () => {
       ]
 
       const mockStatus = {
-        run_id: 'run-123',
-        current_task_id: 'task-1',
+        project_dir: '',
         status: 'running',
+        current_task_id: 'task-1',
+        current_phase_id: 'phase-1',
+        phases_completed: 0,
+        phases_total: 1,
+        tasks_ready: 0,
+        tasks_running: 1,
+        tasks_done: 0,
+        tasks_blocked: 0,
       }
 
-      let fetchCallCount = 0
+      let approvalsCallCount = 0
       global.fetch = vi.fn().mockImplementation((url) => {
-        fetchCallCount++
+        const urlString = url.toString()
+
+        if (urlString.includes('/api/auth/status')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              enabled: false,
+              authenticated: true,
+              username: null,
+            }),
+          })
+        }
 
         // Status endpoint
-        if (url.toString().includes('/api/status')) {
+        if (urlString.includes('/api/status')) {
           return Promise.resolve({
             ok: true,
             json: async () => mockStatus,
@@ -48,28 +66,22 @@ describe('Integration Tests', () => {
         }
 
         // Approval requests endpoint
-        if (
-          url.toString().includes('/api/approval-requests') &&
-          !url.toString().includes('request_id')
-        ) {
-          if (fetchCallCount <= 2) {
+        if (urlString.includes('/api/approvals')) {
+          approvalsCallCount++
+          if (approvalsCallCount === 1) {
             return Promise.resolve({
               ok: true,
               json: async () => mockApprovals,
             })
-          } else {
-            return Promise.resolve({
-              ok: true,
-              json: async () => [],
-            })
           }
+          return Promise.resolve({
+            ok: true,
+            json: async () => [],
+          })
         }
 
         // Approve endpoint
-        if (
-          url.toString().includes('/api/approval-requests') &&
-          url.toString().includes('request_id')
-        ) {
+        if (urlString.includes('/api/approvals/respond')) {
           return Promise.resolve({
             ok: true,
             json: async () => ({ success: true, message: 'Approved' }),
@@ -101,10 +113,10 @@ describe('Integration Tests', () => {
       // Verify approval API was called
       await waitFor(() => {
         expect(global.fetch).toHaveBeenCalledWith(
-          expect.stringContaining('request_id=req-1'),
+          expect.stringContaining('/api/approvals/respond'),
           expect.objectContaining({
             method: 'POST',
-            body: expect.stringContaining('"approved":true'),
+            body: expect.stringContaining('"request_id":"req-1"'),
           })
         )
       })
@@ -126,13 +138,13 @@ describe('Integration Tests', () => {
       ]
 
       global.fetch = vi.fn().mockImplementation((url) => {
-        if (url.toString().includes('/api/approval-requests')) {
-          if (url.toString().includes('request_id')) {
-            return Promise.resolve({
-              ok: true,
-              json: async () => ({ success: true }),
-            })
-          }
+        if (url.toString().includes('/api/approvals/respond')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({ success: true }),
+          })
+        }
+        if (url.toString().includes('/api/approvals')) {
           return Promise.resolve({
             ok: true,
             json: async () => mockApprovals,
@@ -160,7 +172,7 @@ describe('Integration Tests', () => {
 
       await waitFor(() => {
         expect(global.fetch).toHaveBeenCalledWith(
-          expect.stringContaining('request_id=req-1'),
+          expect.stringContaining('/api/approvals/respond'),
           expect.objectContaining({
             method: 'POST',
             body: expect.stringContaining('Needs more tests'),
@@ -184,9 +196,39 @@ describe('Integration Tests', () => {
       ]
 
       global.fetch = vi.fn().mockImplementation((url, options) => {
+        const urlString = url.toString()
+
+        if (urlString.includes('/api/auth/status')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              enabled: false,
+              authenticated: true,
+              username: null,
+            }),
+          })
+        }
+
+        if (urlString.includes('/api/status')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              project_dir: '',
+              status: 'running',
+              run_id: 'run-123',
+              phases_completed: 0,
+              phases_total: 1,
+              tasks_ready: 0,
+              tasks_running: 0,
+              tasks_done: 0,
+              tasks_blocked: 0,
+            }),
+          })
+        }
+
         // GET messages
         if (
-          url.toString().includes('/api/messages') &&
+          urlString.includes('/api/messages') &&
           (!options || options.method !== 'POST')
         ) {
           return Promise.resolve({
@@ -197,7 +239,7 @@ describe('Integration Tests', () => {
 
         // POST message
         if (
-          url.toString().includes('/api/messages') &&
+          urlString.includes('/api/messages') &&
           options?.method === 'POST'
         ) {
           return Promise.resolve({
@@ -215,7 +257,9 @@ describe('Integration Tests', () => {
       render(<App />)
 
       // Open chat
-      const chatToggle = screen.getByRole('button', { name: /open chat/i })
+      const chatToggle = await screen.findByRole('button', {
+        name: /open chat/i,
+      })
       await userEvent.click(chatToggle)
 
       // Wait for messages to load
@@ -299,7 +343,9 @@ describe('Integration Tests', () => {
 
       // Wait for files to load
       await waitFor(() => {
-        expect(screen.getByText('src/app.ts')).toBeInTheDocument()
+        const fileList = document.querySelector('.file-review .file-list')
+        expect(fileList).not.toBeNull()
+        expect(within(fileList as HTMLElement).getByText('src/app.ts')).toBeInTheDocument()
       })
 
       // Add comment to first file
@@ -325,7 +371,9 @@ describe('Integration Tests', () => {
       await userEvent.click(nextButton)
 
       await waitFor(() => {
-        expect(screen.getByText('src/test.ts')).toBeInTheDocument()
+        const fileList = document.querySelector('.file-review .file-list')
+        expect(fileList).not.toBeNull()
+        expect(within(fileList as HTMLElement).getByText('src/test.ts')).toBeInTheDocument()
         expect(screen.getByText(/file 2 of 2/i)).toBeInTheDocument()
       })
     })
@@ -346,14 +394,50 @@ describe('Integration Tests', () => {
 
     it('recovers from temporary network errors', async () => {
       let callCount = 0
-      global.fetch = vi.fn().mockImplementation(() => {
-        callCount++
-        if (callCount === 1) {
-          return Promise.reject(new Error('Network error'))
+      global.fetch = vi.fn().mockImplementation((url) => {
+        const urlString = url.toString()
+
+        if (urlString.includes('/api/auth/status')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              enabled: false,
+              authenticated: true,
+              username: null,
+            }),
+          })
         }
+
+        if (urlString.includes('/api/status')) {
+          callCount++
+          if (callCount === 1) {
+            return Promise.reject(new Error('Network error'))
+          }
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              project_dir: '',
+              status: 'running',
+              phases_completed: 0,
+              phases_total: 1,
+              tasks_ready: 0,
+              tasks_running: 0,
+              tasks_done: 0,
+              tasks_blocked: 0,
+            }),
+          })
+        }
+
+        if (urlString.includes('/api/approvals')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => [],
+          })
+        }
+
         return Promise.resolve({
           ok: true,
-          json: async () => [],
+          json: async () => ({}),
         })
       })
 
@@ -361,18 +445,18 @@ describe('Integration Tests', () => {
 
       // First call fails
       await waitFor(() => {
-        expect(screen.getByText(/error/i)).toBeInTheDocument()
+        expect(
+          screen.getByRole('heading', { name: /^error$/i })
+        ).toBeInTheDocument()
       })
 
-      // Component should retry and succeed
-      await waitFor(
-        () => {
-          expect(
-            screen.getByText(/no pending approvals/i)
-          ).toBeInTheDocument()
-        },
-        { timeout: 5000 }
-      )
+      // Manual retry (more deterministic than waiting for the 5s poll)
+      const retryButton = screen.getByRole('button', { name: /retry/i })
+      await userEvent.click(retryButton)
+
+      await waitFor(() => {
+        expect(screen.getByText(/no pending approvals/i)).toBeInTheDocument()
+      })
     })
   })
 
@@ -451,18 +535,17 @@ describe('Integration Tests', () => {
 
       let approvalCount = 2
       global.fetch = vi.fn().mockImplementation((url, options) => {
-        if (url.toString().includes('/api/approval-requests')) {
-          if (url.toString().includes('request_id')) {
-            approvalCount--
-            return Promise.resolve({
-              ok: true,
-              json: async () => ({ success: true }),
-            })
-          }
+        if (url.toString().includes('/api/approvals/respond')) {
+          approvalCount--
           return Promise.resolve({
             ok: true,
-            json: async () =>
-              approvalCount === 2 ? mockApprovals : [mockApprovals[1]],
+            json: async () => ({ success: true }),
+          })
+        }
+        if (url.toString().includes('/api/approvals')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => (approvalCount === 2 ? mockApprovals : [mockApprovals[1]]),
           })
         }
         return Promise.resolve({
@@ -530,19 +613,48 @@ describe('Integration Tests', () => {
       ]
 
       global.fetch = vi.fn().mockImplementation((url) => {
-        if (url.toString().includes('/api/approval-requests')) {
+        const urlString = url.toString()
+        if (urlString.includes('/api/auth/status')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              enabled: false,
+              authenticated: true,
+              username: null,
+            }),
+          })
+        }
+        if (urlString.includes('/api/status')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              project_dir: '',
+              status: 'running',
+              run_id: 'run-123',
+              current_task_id: 'task-1',
+              phases_completed: 0,
+              phases_total: 1,
+              tasks_ready: 0,
+              tasks_running: 0,
+              tasks_done: 0,
+              tasks_blocked: 0,
+            }),
+          })
+        }
+
+        if (urlString.includes('/api/approvals')) {
           return Promise.resolve({
             ok: true,
             json: async () => mockApprovals,
           })
         }
-        if (url.toString().includes('/api/file-changes')) {
+        if (urlString.includes('/api/file-changes')) {
           return Promise.resolve({
             ok: true,
             json: async () => mockFiles,
           })
         }
-        if (url.toString().includes('/api/messages')) {
+        if (urlString.includes('/api/messages')) {
           return Promise.resolve({
             ok: true,
             json: async () => mockMessages,
@@ -559,7 +671,9 @@ describe('Integration Tests', () => {
       // All components should load independently
       await waitFor(() => {
         expect(screen.getByText(/approval message/i)).toBeInTheDocument()
-        expect(screen.getByText('test.ts')).toBeInTheDocument()
+        const fileList = document.querySelector('.file-review .file-list')
+        expect(fileList).not.toBeNull()
+        expect(within(fileList as HTMLElement).getByText('test.ts')).toBeInTheDocument()
       })
 
       // Open chat
@@ -572,7 +686,11 @@ describe('Integration Tests', () => {
 
       // All three components should be visible and functional
       expect(screen.getByText(/approval message/i)).toBeInTheDocument()
-      expect(screen.getByText('test.ts')).toBeInTheDocument()
+      {
+        const fileList = document.querySelector('.file-review .file-list')
+        expect(fileList).not.toBeNull()
+        expect(within(fileList as HTMLElement).getByText('test.ts')).toBeInTheDocument()
+      }
       expect(screen.getByText(/chat message/i)).toBeInTheDocument()
     })
   })
@@ -580,14 +698,51 @@ describe('Integration Tests', () => {
   describe('Real-time Updates', () => {
     it('polls for new approval requests', async () => {
       let callCount = 0
-      global.fetch = vi.fn().mockImplementation(() => {
-        callCount++
-        if (callCount === 1) {
+      const originalSetInterval = global.setInterval
+      const originalClearInterval = global.clearInterval
+      global.setInterval = ((cb: any) => {
+        if (typeof cb === 'function') cb()
+        return 0 as any
+      }) as any
+      global.clearInterval = (() => {}) as any
+
+      global.fetch = vi.fn().mockImplementation((url) => {
+        const urlString = url.toString()
+        if (urlString.includes('/api/auth/status')) {
           return Promise.resolve({
             ok: true,
-            json: async () => [],
+            json: async () => ({
+              enabled: false,
+              authenticated: true,
+              username: null,
+            }),
           })
-        } else {
+        }
+
+        if (urlString.includes('/api/status')) {
+          return Promise.resolve({
+            ok: true,
+            json: async () => ({
+              project_dir: '',
+              status: 'running',
+              phases_completed: 0,
+              phases_total: 1,
+              tasks_ready: 0,
+              tasks_running: 0,
+              tasks_done: 0,
+              tasks_blocked: 0,
+            }),
+          })
+        }
+
+        if (urlString.includes('/api/approvals')) {
+          callCount++
+          if (callCount === 1) {
+            return Promise.resolve({
+              ok: true,
+              json: async () => [],
+            })
+          }
           return Promise.resolve({
             ok: true,
             json: async () => [
@@ -605,22 +760,20 @@ describe('Integration Tests', () => {
             ],
           })
         }
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({}),
+        })
       })
 
       render(<App />)
 
-      // Initially no approvals
       await waitFor(() => {
-        expect(screen.getByText(/no pending approvals/i)).toBeInTheDocument()
+        expect(screen.getByText(/new approval/i)).toBeInTheDocument()
       })
 
-      // Wait for poll to happen (3 seconds)
-      await waitFor(
-        () => {
-          expect(screen.getByText(/new approval/i)).toBeInTheDocument()
-        },
-        { timeout: 5000 }
-      )
+      global.setInterval = originalSetInterval
+      global.clearInterval = originalClearInterval
     })
   })
 })

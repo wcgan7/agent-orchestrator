@@ -120,7 +120,8 @@ describe('ApprovalGate', () => {
           ok: true,
           json: async () => mockApprovals,
         })
-      } else {
+      }
+      if (fetchCallCount === 2) {
         // Approve response
         return Promise.resolve({
           ok: true,
@@ -130,6 +131,11 @@ describe('ApprovalGate', () => {
           }),
         })
       }
+      // Refresh fetch
+      return Promise.resolve({
+        ok: true,
+        json: async () => [],
+      })
     })
 
     render(<ApprovalGate />)
@@ -169,7 +175,8 @@ describe('ApprovalGate', () => {
           ok: true,
           json: async () => mockApprovals,
         })
-      } else {
+      }
+      if (fetchCallCount === 2) {
         return Promise.resolve({
           ok: true,
           json: async () => ({
@@ -178,6 +185,10 @@ describe('ApprovalGate', () => {
           }),
         })
       }
+      return Promise.resolve({
+        ok: true,
+        json: async () => [],
+      })
     })
 
     render(<ApprovalGate />)

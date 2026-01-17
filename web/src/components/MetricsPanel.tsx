@@ -34,6 +34,28 @@ interface RunMetrics {
 export default function MetricsPanel({ status }: Props) {
   const [metrics, setMetrics] = useState<RunMetrics | null>(null)
 
+  const normalizeMetrics = (value: unknown): RunMetrics | null => {
+    if (!value || typeof value !== 'object') return null
+    const raw = value as Record<string, unknown>
+
+    const num = (key: keyof RunMetrics): number => {
+      const v = raw[key as string]
+      return typeof v === 'number' && Number.isFinite(v) ? v : 0
+    }
+
+    return {
+      tokens_used: num('tokens_used'),
+      api_calls: num('api_calls'),
+      estimated_cost_usd: num('estimated_cost_usd'),
+      wall_time_seconds: num('wall_time_seconds'),
+      phases_completed: num('phases_completed'),
+      phases_total: num('phases_total'),
+      files_changed: num('files_changed'),
+      lines_added: num('lines_added'),
+      lines_removed: num('lines_removed'),
+    }
+  }
+
   useEffect(() => {
     fetchMetrics()
     const interval = setInterval(fetchMetrics, 10000) // Poll every 10 seconds
@@ -45,7 +67,7 @@ export default function MetricsPanel({ status }: Props) {
       const response = await fetch('/api/metrics')
       if (response.ok) {
         const data = await response.json()
-        setMetrics(data)
+        setMetrics(normalizeMetrics(data))
       }
     } catch (err) {
       console.error('Failed to fetch metrics:', err)

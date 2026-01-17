@@ -28,7 +28,7 @@ export default function ProjectSelector({ currentProject, onProjectChange }: Pro
       const response = await fetch('/api/projects')
       if (response.ok) {
         const data = await response.json()
-        setProjects(data)
+        setProjects(Array.isArray(data) ? data : [])
       }
     } catch (err) {
       console.error('Failed to fetch projects:', err)

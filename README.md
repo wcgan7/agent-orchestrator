@@ -23,10 +23,34 @@ From this repo:
 python -m pip install -e .
 ```
 
-If you prefer `uv`:
+If you prefer `uv` (install `uv` first via `brew install uv`, `pipx install uv`, or `python -m pip install uv`):
 
 ```bash
 uv pip install -e .
+```
+
+## Tests
+
+Python unit tests:
+
+```bash
+python -m pip install -e ".[test]"
+pytest
+```
+
+If you prefer `uv`:
+
+```bash
+uv pip install -e ".[test]"
+pytest
+```
+
+Web dashboard tests (Vitest):
+
+```bash
+cd web
+npm install
+npm test
 ```
 
 ## Quick Start (in your target project)
