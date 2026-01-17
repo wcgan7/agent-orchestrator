@@ -2,6 +2,17 @@ import { expect, afterEach } from 'vitest'
 import { cleanup } from '@testing-library/react'
 import '@testing-library/jest-dom/vitest'
 
+// Silence noisy React act(...) warnings in tests (they do not affect runtime behavior).
+// Keep other console.error output intact to avoid hiding real failures.
+const originalConsoleError = console.error
+console.error = (...args: unknown[]) => {
+  const first = args[0]
+  if (typeof first === 'string' && first.includes('not wrapped in act')) {
+    return
+  }
+  originalConsoleError(...(args as Parameters<typeof console.error>))
+}
+
 // Cleanup after each test
 afterEach(() => {
   cleanup()

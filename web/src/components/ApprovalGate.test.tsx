@@ -4,8 +4,11 @@ import userEvent from '@testing-library/user-event'
 import ApprovalGate from './ApprovalGate'
 
 describe('ApprovalGate', () => {
+  let user: ReturnType<typeof userEvent.setup>
+
   beforeEach(() => {
     vi.clearAllMocks()
+    user = userEvent.setup()
   })
 
   it('renders loading state initially', () => {
@@ -145,7 +148,7 @@ describe('ApprovalGate', () => {
     })
 
     const approveButton = screen.getByRole('button', { name: /approve/i })
-    await userEvent.click(approveButton)
+    await user.click(approveButton)
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledTimes(3) // initial + approve + refresh
@@ -198,7 +201,7 @@ describe('ApprovalGate', () => {
     })
 
     const rejectButton = screen.getByRole('button', { name: /reject/i })
-    await userEvent.click(rejectButton)
+    await user.click(rejectButton)
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledTimes(3)
@@ -232,7 +235,7 @@ describe('ApprovalGate', () => {
     })
 
     const feedbackInput = screen.getByPlaceholderText(/optional feedback/i)
-    await userEvent.type(feedbackInput, 'Looks good to me')
+    await user.type(feedbackInput, 'Looks good to me')
 
     expect(feedbackInput).toHaveValue('Looks good to me')
   })

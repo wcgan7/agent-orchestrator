@@ -4,10 +4,13 @@ import userEvent from '@testing-library/user-event'
 import App from '../App'
 
 describe('Integration Tests', () => {
+  let user: ReturnType<typeof userEvent.setup>
+
   beforeEach(() => {
     vi.clearAllMocks()
     // Reset localStorage
     global.localStorage.clear()
+    user = userEvent.setup()
   })
 
   describe('Approval Workflow', () => {
@@ -108,7 +111,7 @@ describe('Integration Tests', () => {
 
       // Approve the request
       const approveButton = screen.getByRole('button', { name: /approve/i })
-      await userEvent.click(approveButton)
+      await user.click(approveButton)
 
       // Verify approval API was called
       await waitFor(() => {
@@ -164,11 +167,11 @@ describe('Integration Tests', () => {
 
       // Add feedback
       const feedbackInput = screen.getByPlaceholderText(/optional feedback/i)
-      await userEvent.type(feedbackInput, 'Needs more tests')
+      await user.type(feedbackInput, 'Needs more tests')
 
       // Reject
       const rejectButton = screen.getByRole('button', { name: /reject/i })
-      await userEvent.click(rejectButton)
+      await user.click(rejectButton)
 
       await waitFor(() => {
         expect(global.fetch).toHaveBeenCalledWith(
@@ -260,7 +263,7 @@ describe('Integration Tests', () => {
       const chatToggle = await screen.findByRole('button', {
         name: /open chat/i,
       })
-      await userEvent.click(chatToggle)
+      await user.click(chatToggle)
 
       // Wait for messages to load
       await waitFor(() => {
@@ -269,10 +272,10 @@ describe('Integration Tests', () => {
 
       // Type and send message
       const input = screen.getByPlaceholderText(/type a message/i)
-      await userEvent.type(input, 'New guidance message')
+      await user.type(input, 'New guidance message')
 
       const sendButton = screen.getByRole('button', { name: /send/i })
-      await userEvent.click(sendButton)
+      await user.click(sendButton)
 
       // Verify message was sent
       await waitFor(() => {
@@ -350,11 +353,11 @@ describe('Integration Tests', () => {
 
       // Add comment to first file
       const commentInput = screen.getByPlaceholderText(/add optional comment/i)
-      await userEvent.type(commentInput, 'Looks good')
+      await user.type(commentInput, 'Looks good')
 
       // Approve first file
       const approveButton = screen.getByRole('button', { name: /✓ approve/i })
-      await userEvent.click(approveButton)
+      await user.click(approveButton)
 
       await waitFor(() => {
         expect(global.fetch).toHaveBeenCalledWith(
@@ -368,7 +371,7 @@ describe('Integration Tests', () => {
 
       // Navigate to next file
       const nextButton = screen.getByRole('button', { name: /next →/i })
-      await userEvent.click(nextButton)
+      await user.click(nextButton)
 
       await waitFor(() => {
         const fileList = document.querySelector('.file-review .file-list')
@@ -452,7 +455,7 @@ describe('Integration Tests', () => {
 
       // Manual retry (more deterministic than waiting for the 5s poll)
       const retryButton = screen.getByRole('button', { name: /retry/i })
-      await userEvent.click(retryButton)
+      await user.click(retryButton)
 
       await waitFor(() => {
         expect(screen.getByText(/no pending approvals/i)).toBeInTheDocument()
@@ -563,7 +566,7 @@ describe('Integration Tests', () => {
 
       // Approve one
       const approveButtons = screen.getAllByRole('button', { name: /approve/i })
-      await userEvent.click(approveButtons[0])
+      await user.click(approveButtons[0])
 
       // Badge should update to 1
       await waitFor(
@@ -678,7 +681,7 @@ describe('Integration Tests', () => {
 
       // Open chat
       const chatToggle = screen.getByRole('button', { name: /open chat/i })
-      await userEvent.click(chatToggle)
+      await user.click(chatToggle)
 
       await waitFor(() => {
         expect(screen.getByText(/chat message/i)).toBeInTheDocument()

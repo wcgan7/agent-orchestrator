@@ -4,8 +4,11 @@ import userEvent from '@testing-library/user-event'
 import BreakpointsPanel from './BreakpointsPanel'
 
 describe('BreakpointsPanel', () => {
+  let user: ReturnType<typeof userEvent.setup>
+
   beforeEach(() => {
     vi.clearAllMocks()
+    user = userEvent.setup()
   })
 
   it('fetches breakpoints with project_dir and shows empty state', async () => {
@@ -72,7 +75,7 @@ describe('BreakpointsPanel', () => {
     })
 
     const createButton = screen.getByRole('button', { name: /create/i })
-    await userEvent.click(createButton)
+    await user.click(createButton)
 
     await waitFor(() => {
       expect(screen.getByText('bp-123')).toBeInTheDocument()
@@ -85,4 +88,3 @@ describe('BreakpointsPanel', () => {
     expect(postCalls[0][1].body).toContain('"target":"verify"')
   })
 })
-

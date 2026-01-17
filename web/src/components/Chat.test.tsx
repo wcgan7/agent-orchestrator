@@ -4,8 +4,11 @@ import userEvent from '@testing-library/user-event'
 import Chat from './Chat'
 
 describe('Chat', () => {
+  let user: ReturnType<typeof userEvent.setup>
+
   beforeEach(() => {
     vi.clearAllMocks()
+    user = userEvent.setup()
   })
 
   it('renders chat toggle button when closed', () => {
@@ -17,7 +20,7 @@ describe('Chat', () => {
     render(<Chat />)
 
     const toggleButton = screen.getByRole('button', { name: /open chat/i })
-    await userEvent.click(toggleButton)
+    await user.click(toggleButton)
 
     expect(screen.getByText(/live collaboration chat/i)).toBeInTheDocument()
   })
@@ -26,7 +29,7 @@ describe('Chat', () => {
     render(<Chat />)
 
     const toggleButton = screen.getByRole('button', { name: /open chat/i })
-    await userEvent.click(toggleButton)
+    await user.click(toggleButton)
 
     expect(screen.getByText(/no active run/i)).toBeInTheDocument()
     expect(screen.getByText(/chat is available when a run is active/i)).toBeInTheDocument()
@@ -60,7 +63,7 @@ describe('Chat', () => {
     render(<Chat runId="run-123" />)
 
     const toggleButton = screen.getByRole('button', { name: /open chat/i })
-    await userEvent.click(toggleButton)
+    await user.click(toggleButton)
 
     await waitFor(() => {
       expect(screen.getByText(/focus on error handling/i)).toBeInTheDocument()
@@ -96,7 +99,7 @@ describe('Chat', () => {
     render(<Chat runId="run-123" />)
 
     const toggleButton = screen.getByRole('button', { name: /open chat/i })
-    await userEvent.click(toggleButton)
+    await user.click(toggleButton)
 
     await waitFor(() => {
       const messages = document.querySelectorAll('.chat-message')
@@ -124,17 +127,17 @@ describe('Chat', () => {
     render(<Chat runId="run-123" />)
 
     const toggleButton = screen.getByRole('button', { name: /open chat/i })
-    await userEvent.click(toggleButton)
+    await user.click(toggleButton)
 
     await waitFor(() => {
       expect(screen.getByPlaceholderText(/type a message/i)).toBeInTheDocument()
     })
 
     const input = screen.getByPlaceholderText(/type a message/i)
-    await userEvent.type(input, 'Test message')
+    await user.type(input, 'Test message')
 
     const sendButton = screen.getByRole('button', { name: /send/i })
-    await userEvent.click(sendButton)
+    await user.click(sendButton)
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
@@ -165,22 +168,22 @@ describe('Chat', () => {
     render(<Chat runId="run-123" projectDir="/tmp/project" />)
 
     const toggleButton = screen.getByRole('button', { name: /open chat/i })
-    await userEvent.click(toggleButton)
+    await user.click(toggleButton)
 
     const typeSelect = await screen.findByLabelText(/message type/i)
-    await userEvent.selectOptions(typeSelect, 'requirement')
+    await user.selectOptions(typeSelect, 'requirement')
 
     const requirementTaskId = screen.getByLabelText(/requirement task id/i)
-    await userEvent.type(requirementTaskId, 'phase-1')
+    await user.type(requirementTaskId, 'phase-1')
 
     const prioritySelect = screen.getByLabelText(/requirement priority/i)
-    await userEvent.selectOptions(prioritySelect, 'high')
+    await user.selectOptions(prioritySelect, 'high')
 
     const input = screen.getByPlaceholderText(/type a message/i)
-    await userEvent.type(input, 'Must add rate limiting')
+    await user.type(input, 'Must add rate limiting')
 
     const sendButton = screen.getByRole('button', { name: /send/i })
-    await userEvent.click(sendButton)
+    await user.click(sendButton)
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
@@ -216,28 +219,28 @@ describe('Chat', () => {
     render(<Chat runId="run-123" projectDir="/tmp/project" />)
 
     const toggleButton = screen.getByRole('button', { name: /open chat/i })
-    await userEvent.click(toggleButton)
+    await user.click(toggleButton)
 
     const typeSelect = await screen.findByLabelText(/message type/i)
-    await userEvent.selectOptions(typeSelect, 'correction')
+    await user.selectOptions(typeSelect, 'correction')
 
     const input = screen.getByPlaceholderText(/type a message/i)
-    await userEvent.type(input, 'Missing input validation')
+    await user.type(input, 'Missing input validation')
 
     const sendButton = screen.getByRole('button', { name: /send/i })
     expect(sendButton).toBeDisabled()
 
     const correctionTaskId = screen.getByLabelText(/correction task id/i)
-    await userEvent.type(correctionTaskId, 'phase-2')
+    await user.type(correctionTaskId, 'phase-2')
     expect(sendButton).not.toBeDisabled()
 
     const correctionFile = screen.getByLabelText(/correction file path/i)
-    await userEvent.type(correctionFile, 'src/app.py')
+    await user.type(correctionFile, 'src/app.py')
 
     const correctionFix = screen.getByLabelText(/correction suggested fix/i)
-    await userEvent.type(correctionFix, 'Add validation for empty input')
+    await user.type(correctionFix, 'Add validation for empty input')
 
-    await userEvent.click(sendButton)
+    await user.click(sendButton)
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
@@ -274,18 +277,18 @@ describe('Chat', () => {
     render(<Chat runId="run-123" />)
 
     const toggleButton = screen.getByRole('button', { name: /open chat/i })
-    await userEvent.click(toggleButton)
+    await user.click(toggleButton)
 
     await waitFor(() => {
       expect(screen.getByPlaceholderText(/type a message/i)).toBeInTheDocument()
     })
 
     const input = screen.getByPlaceholderText(/type a message/i) as HTMLTextAreaElement
-    await userEvent.type(input, 'Test message')
+    await user.type(input, 'Test message')
     expect(input.value).toBe('Test message')
 
     const sendButton = screen.getByRole('button', { name: /send/i })
-    await userEvent.click(sendButton)
+    await user.click(sendButton)
 
     await waitFor(() => {
       expect(input.value).toBe('')
@@ -310,14 +313,14 @@ describe('Chat', () => {
     render(<Chat runId="run-123" />)
 
     const toggleButton = screen.getByRole('button', { name: /open chat/i })
-    await userEvent.click(toggleButton)
+    await user.click(toggleButton)
 
     await waitFor(() => {
       expect(screen.getByPlaceholderText(/type a message/i)).toBeInTheDocument()
     })
 
     const input = screen.getByPlaceholderText(/type a message/i)
-    await userEvent.type(input, 'Test message{Enter}')
+    await user.type(input, 'Test message{Enter}')
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
@@ -338,7 +341,7 @@ describe('Chat', () => {
     render(<Chat runId="run-123" />)
 
     const toggleButton = screen.getByRole('button', { name: /open chat/i })
-    await userEvent.click(toggleButton)
+    await user.click(toggleButton)
 
     await waitFor(() => {
       const sendButton = screen.getByRole('button', { name: /send/i })
@@ -352,7 +355,7 @@ describe('Chat', () => {
     render(<Chat runId="run-123" />)
 
     const toggleButton = screen.getByRole('button', { name: /open chat/i })
-    await userEvent.click(toggleButton)
+    await user.click(toggleButton)
 
     await waitFor(() => {
       expect(screen.getByText(/error/i)).toBeInTheDocument()
@@ -363,14 +366,14 @@ describe('Chat', () => {
     render(<Chat runId="run-123" />)
 
     const toggleButton = screen.getByRole('button', { name: /open chat/i })
-    await userEvent.click(toggleButton)
+    await user.click(toggleButton)
 
     await waitFor(() => {
       expect(screen.getByText(/live collaboration chat/i)).toBeInTheDocument()
     })
 
     const closeButton = screen.getByRole('button', { name: /close chat/i })
-    await userEvent.click(closeButton)
+    await user.click(closeButton)
 
     expect(screen.queryByText(/live collaboration chat/i)).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /open chat/i })).toBeInTheDocument()
@@ -385,7 +388,7 @@ describe('Chat', () => {
     render(<Chat runId="run-123" />)
 
     const toggleButton = screen.getByRole('button', { name: /open chat/i })
-    await userEvent.click(toggleButton)
+    await user.click(toggleButton)
 
     await waitFor(() => {
       expect(screen.getByText(/provide guidance/i)).toBeInTheDocument()

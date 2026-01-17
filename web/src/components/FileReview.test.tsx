@@ -4,8 +4,11 @@ import userEvent from '@testing-library/user-event'
 import FileReview from './FileReview'
 
 describe('FileReview', () => {
+  let user: ReturnType<typeof userEvent.setup>
+
   beforeEach(() => {
     vi.clearAllMocks()
+    user = userEvent.setup()
   })
 
   it('renders loading state initially', () => {
@@ -174,7 +177,7 @@ describe('FileReview', () => {
     // Click on second file
     const list = container.querySelector('.file-list') as HTMLElement
     const secondFile = within(list).getByText('second.ts')
-    await userEvent.click(secondFile)
+    await user.click(secondFile)
 
     // Should display second file's diff
     await waitFor(() => {
@@ -253,7 +256,7 @@ describe('FileReview', () => {
     })
 
     const approveButton = screen.getByRole('button', { name: /✓ approve/i })
-    await userEvent.click(approveButton)
+    await user.click(approveButton)
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
@@ -304,7 +307,7 @@ describe('FileReview', () => {
     })
 
     const rejectButton = screen.getByRole('button', { name: /✗ reject/i })
-    await userEvent.click(rejectButton)
+    await user.click(rejectButton)
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
@@ -344,7 +347,7 @@ describe('FileReview', () => {
     })
 
     const commentInput = screen.getByPlaceholderText(/add optional comment/i)
-    await userEvent.type(commentInput, 'This needs refactoring')
+    await user.type(commentInput, 'This needs refactoring')
 
     expect(commentInput).toHaveValue('This needs refactoring')
   })
@@ -387,10 +390,10 @@ describe('FileReview', () => {
     })
 
     const commentInput = screen.getByPlaceholderText(/add optional comment/i)
-    await userEvent.type(commentInput, 'Needs work')
+    await user.type(commentInput, 'Needs work')
 
     const approveButton = screen.getByRole('button', { name: /✓ approve/i })
-    await userEvent.click(approveButton)
+    await user.click(approveButton)
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
@@ -443,11 +446,11 @@ describe('FileReview', () => {
     const commentInput = screen.getByPlaceholderText(
       /add optional comment/i
     ) as HTMLTextAreaElement
-    await userEvent.type(commentInput, 'Test comment')
+    await user.type(commentInput, 'Test comment')
     expect(commentInput.value).toBe('Test comment')
 
     const approveButton = screen.getByRole('button', { name: /✓ approve/i })
-    await userEvent.click(approveButton)
+    await user.click(approveButton)
 
     await waitFor(() => {
       expect(commentInput.value).toBe('')
@@ -496,7 +499,7 @@ describe('FileReview', () => {
     const approveButton = screen.getByRole('button', { name: /✓ approve/i })
     const rejectButton = screen.getByRole('button', { name: /✗ reject/i })
 
-    await userEvent.click(approveButton)
+    await user.click(approveButton)
 
     // Buttons should be disabled during submission
     expect(approveButton).toBeDisabled()
@@ -552,7 +555,7 @@ describe('FileReview', () => {
 
     // Click next
     const nextButton = screen.getByRole('button', { name: /next →/i })
-    await userEvent.click(nextButton)
+    await user.click(nextButton)
 
     await waitFor(() => {
       expect(screen.getByText(/file 2 of 3/i)).toBeInTheDocument()
@@ -560,7 +563,7 @@ describe('FileReview', () => {
     })
 
     // Click next again
-    await userEvent.click(nextButton)
+    await user.click(nextButton)
 
     await waitFor(() => {
       expect(screen.getByText(/file 3 of 3/i)).toBeInTheDocument()
@@ -571,7 +574,7 @@ describe('FileReview', () => {
     expect(nextButton).toBeDisabled()
 
     // Click previous
-    await userEvent.click(prevButton)
+    await user.click(prevButton)
 
     await waitFor(() => {
       expect(screen.getByText(/file 2 of 3/i)).toBeInTheDocument()
