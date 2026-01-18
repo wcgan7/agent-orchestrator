@@ -15,6 +15,7 @@ import FileReview from './components/FileReview'
 import TasksPanel from './components/TasksPanel'
 import RunsPanel from './components/RunsPanel'
 import BreakpointsPanel from './components/BreakpointsPanel'
+import TaskLauncher from './components/TaskLauncher'
 
 interface ProjectStatus {
   project_dir: string
@@ -50,6 +51,7 @@ function App() {
   const [currentProject, setCurrentProject] = useState<string | null>(() => {
     return localStorage.getItem(STORAGE_KEY_PROJECT)
   })
+  const [showLauncher, setShowLauncher] = useState(false)
 
   // Check auth status on mount
   useEffect(() => {
@@ -155,6 +157,12 @@ function App() {
     setLoading(true)
   }
 
+  const handleRunStarted = (_runId: string) => {
+    setShowLauncher(false)
+    // Refresh status to show the new run
+    fetchStatus()
+  }
+
   // Show login page if auth is enabled and not authenticated
   if (!authChecked) {
     return (
@@ -258,6 +266,33 @@ function App() {
 
       <div className="container">
         <RunDashboard status={status} />
+
+        {/* Task Launcher Section */}
+        <div style={{ marginBottom: '1.5rem' }}>
+          <button
+            onClick={() => setShowLauncher(!showLauncher)}
+            style={{
+              padding: '0.75rem 1.5rem',
+              background: showLauncher ? '#666' : '#007bff',
+              color: '#fff',
+              border: 'none',
+              borderRadius: '6px',
+              fontSize: '0.95rem',
+              fontWeight: '600',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+            }}
+          >
+            {showLauncher ? 'Hide Task Launcher' : 'Launch New Run'}
+          </button>
+        </div>
+
+        {showLauncher && (
+          <TaskLauncher
+            projectDir={currentProject}
+            onRunStarted={handleRunStarted}
+          />
+        )}
 
         <ControlPanel
           currentTaskId={status?.current_task_id}

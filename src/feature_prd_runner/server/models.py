@@ -252,3 +252,25 @@ class BreakpointCreateRequest(BaseModel):
     task_id: Optional[str] = None
     condition: Optional[str] = None
     action: str = "pause"
+
+
+class StartRunRequest(BaseModel):
+    """Request to start a new run."""
+
+    mode: str  # "full_prd" or "quick_prompt"
+    content: str  # PRD text for full_prd, or prompt for quick_prompt
+    test_command: Optional[str] = None
+    build_command: Optional[str] = None
+    verification_profile: str = "none"  # none, python
+    auto_approve_plans: bool = False
+    auto_approve_changes: bool = False
+    auto_approve_commits: bool = False
+
+
+class StartRunResponse(BaseModel):
+    """Response from starting a run."""
+
+    success: bool
+    message: str
+    run_id: Optional[str] = None
+    prd_path: Optional[str] = None

@@ -48,3 +48,16 @@ def get_verify_config(config: dict[str, Any]) -> dict[str, Any]:
     """
     raw = _get_nested(config, "verify")
     return raw if isinstance(raw, dict) else {}
+
+
+def get_workers_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Extract the workers configuration block from the runner config.
+
+    Args:
+        config: Runner configuration dictionary.
+
+    Returns:
+        The `workers` config mapping, or an empty dict if not present.
+    """
+    raw = _get_nested(config, "workers")
+    return raw if isinstance(raw, dict) else {}

@@ -18,7 +18,7 @@ from loguru import logger
 from .actions.run_worker import run_resume_prompt_action
 from .constants import LOCK_FILE, STATE_DIR_NAME
 from .io_utils import FileLock, _append_event, _load_data, _save_data, _update_progress
-from .models import ProgressHumanBlockers, ResumePromptResult, WorkerFailed
+from .models import ProgressHumanBlockers, ResumePromptResult, TaskStep, WorkerFailed
 from .state import _ensure_state_files, _finalize_run_state
 from .utils import _now_iso
 
@@ -110,6 +110,7 @@ def execute_custom_prompt(
     user_prompt: str,
     project_dir: Path,
     codex_command: str = "codex exec -",
+    worker: Optional[str] = None,
     heartbeat_seconds: int = 120,
     heartbeat_grace_seconds: int = 300,
     shift_minutes: int = 45,
@@ -214,10 +215,31 @@ def execute_custom_prompt(
         except Exception:
             pass
 
-    # Execute via resume prompt action (which accepts arbitrary prompts)
-    # Override the prompt building by passing it directly
+    # Resolve workers config for the target project and run via resume prompt action.
+    from .config import load_runner_config
+    from .workers import get_workers_runtime_config, resolve_worker_for_step
+
+    cfg, _cfg_err = load_runner_config(project_dir)
+    workers_runtime = get_workers_runtime_config(
+        config=cfg,
+        codex_command_fallback=codex_command,
+        cli_worker=worker,
+    )
+    spec = resolve_worker_for_step(workers_runtime, TaskStep.RESUME_PROMPT)
+
+    # Codex providers receive the full progress-contract prompt; non-agentic providers
+    # receive the raw instructions and return a patch-based JSON result.
+    effective_prompt = prompt_text if spec.type == "codex" else user_prompt
+    if spec.type != "codex" and override_agents:
+        effective_prompt = (
+            "IMPORTANT - SUPERADMIN MODE:\n"
+            "- You may bypass normal AGENTS.md rules if necessary to complete the task\n"
+            "- You may modify any files needed\n\n"
+            + effective_prompt
+        )
+
     custom_event = run_resume_prompt_action(
-        user_prompt=prompt_text,  # Pass the fully built prompt
+        user_prompt=effective_prompt,
         project_dir=project_dir,
         run_dir=custom_run_dir,
         run_id=custom_run_id,
@@ -227,6 +249,7 @@ def execute_custom_prompt(
         heartbeat_grace_seconds=heartbeat_grace_seconds,
         shift_minutes=shift_minutes,
         on_spawn=_on_worker_spawn,
+        workers_runtime=workers_runtime,
     )
 
     _append_event(paths["events"], custom_event.to_dict())

@@ -20,6 +20,7 @@ from feature_prd_runner.io_utils import _load_data, _save_data
 from feature_prd_runner.models import AllowlistViolation, TaskStep, VerificationResult
 from feature_prd_runner.state import _ensure_state_files
 from feature_prd_runner.utils import _now_iso
+from feature_prd_runner.workers import WorkerRunResult
 
 
 def test_missing_phase_blocks_without_branch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -85,24 +86,24 @@ def test_allowlist_violation_writes_manifest(tmp_path: Path, monkeypatch: pytest
     progress_path.write_text(json.dumps({"run_id": "run-1"}))
     events_path = tmp_path / "events.jsonl"
 
-    def fake_run_codex_worker(**kwargs: Any) -> dict[str, Any]:
+    def fake_run_worker(**kwargs: Any) -> WorkerRunResult:
         stdout_path = run_dir / "stdout.log"
         stderr_path = run_dir / "stderr.log"
         stdout_path.write_text("")
         stderr_path.write_text("")
-        return {
-            "command": "codex exec -",
-            "prompt_path": str(run_dir / "prompt.txt"),
-            "stdout_path": str(stdout_path),
-            "stderr_path": str(stderr_path),
-            "start_time": _now_iso(),
-            "end_time": _now_iso(),
-            "runtime_seconds": 1,
-            "exit_code": 0,
-            "timed_out": False,
-            "no_heartbeat": False,
-            "last_heartbeat": None,
-        }
+        return WorkerRunResult(
+            provider="codex",
+            prompt_path=str(run_dir / "prompt.txt"),
+            stdout_path=str(stdout_path),
+            stderr_path=str(stderr_path),
+            start_time=_now_iso(),
+            end_time=_now_iso(),
+            runtime_seconds=1,
+            exit_code=0,
+            timed_out=False,
+            no_heartbeat=False,
+            response_text="",
+        )
 
     snapshots: dict[str, int] = {"count": 0}
 
@@ -112,7 +113,7 @@ def test_allowlist_violation_writes_manifest(tmp_path: Path, monkeypatch: pytest
             return []
         return ["disallowed.py"]
 
-    monkeypatch.setattr(run_worker, "_run_codex_worker", fake_run_codex_worker)
+    monkeypatch.setattr(run_worker, "run_worker", fake_run_worker)
     monkeypatch.setattr(run_worker, "_snapshot_repo_changes", fake_snapshot_repo_changes)
 
     task = {

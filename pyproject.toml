@@ -18,6 +18,8 @@ dependencies = [
 test = [
   "pytest>=7",
   "tomli>=2; python_version < '3.11'",
+  "httpx>=0.24.0",  # Required for FastAPI TestClient
+  "anthropic>=0.18.0",  # Required for API tests (mocked)
 ]
 dev = [
   "mypy>=1.8",

@@ -224,6 +224,7 @@ Common options:
 - `--ensure-deps-command "..."`: install command used by `--ensure-deps install` (defaults to `python -m pip install -e ".[test]"` with fallback to `python -m pip install -e .`).
 - `--new-branch` / `--no-new-branch`: create/switch to a new git branch once at the start of the run (default: True). If `--no-new-branch`, you must already be on a named branch (not detached HEAD).
 - `--codex-command "..."`: Codex CLI command used to run the worker (default: `codex exec -`).
+- `--worker NAME`: worker provider name override (e.g., `codex`, `ollama`). Overrides `.prd_runner/config.yaml` routing.
 - `--shift-minutes N`: timebox per worker run.
 - `--reset-state`: archive and recreate `.prd_runner/` before starting.
 - `--require-clean` / `--no-require-clean`: refuse to run if there are git changes outside `.prd_runner/` (default: True).
@@ -268,6 +269,24 @@ verify:
   lint_command: "ruff check ."
   typecheck_command: "mypy ."
   test_command: "pytest -q"
+
+workers:
+  default: codex
+  providers:
+    codex:
+      type: codex
+      command: "codex exec -"
+    local:
+      type: ollama   # alias: "local"
+      endpoint: "http://localhost:11434"
+      model: "qwen2.5-coder:7b"
+      temperature: 0.2
+      num_ctx: 8192
+  routing:
+    plan: local
+    plan_impl: local
+    review: local
+    implement: codex
 ```
 
 CLI flags override `config.yaml`.
@@ -281,6 +300,20 @@ CLI flags override `config.yaml`.
 - inline placeholder: `codex exec {prompt}`
 
 Available placeholders: `{prompt_file}`, `{project_dir}`, `{run_dir}`, `{prompt}`.
+
+## Workers (Codex + Ollama)
+
+List configured workers for a project:
+
+```bash
+feature-prd-runner workers list --project-dir /path/to/your/project
+```
+
+Test a worker (checks Codex binary, or Ollama endpoint/model):
+
+```bash
+feature-prd-runner workers test local --project-dir /path/to/your/project
+```
 
 ## Custom Prompts & Ad-Hoc Tasks
 

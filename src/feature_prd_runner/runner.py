@@ -101,6 +101,12 @@ def _build_run_parser() -> argparse.ArgumentParser:
         help="Codex CLI command (default: codex exec -)",
     )
     parser.add_argument(
+        "--worker",
+        type=str,
+        default=None,
+        help="Worker provider name override (e.g., codex, ollama). Overrides .prd_runner/config.yaml routing.",
+    )
+    parser.add_argument(
         "--test-command",
         type=str,
         default=None,
@@ -367,6 +373,96 @@ def _build_doctor_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _build_workers_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Feature PRD Runner - worker providers",
+    )
+    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+    list_parser = subparsers.add_parser("list", help="List configured worker providers")
+    list_parser.add_argument(
+        "--project-dir",
+        type=Path,
+        default=Path("."),
+        help="Project directory (default: current directory)",
+    )
+    list_parser.add_argument(
+        "--codex-command",
+        type=str,
+        default="codex exec -",
+        help="Codex CLI command fallback (default: codex exec -)",
+    )
+
+    test_parser = subparsers.add_parser("test", help="Test a configured worker provider")
+    test_parser.add_argument(
+        "worker",
+        type=str,
+        help="Worker provider name (e.g., codex, ollama)",
+    )
+    test_parser.add_argument(
+        "--project-dir",
+        type=Path,
+        default=Path("."),
+        help="Project directory (default: current directory)",
+    )
+    test_parser.add_argument(
+        "--codex-command",
+        type=str,
+        default="codex exec -",
+        help="Codex CLI command fallback (default: codex exec -)",
+    )
+
+    return parser
+
+
+def _workers_command(args: argparse.Namespace) -> int:
+    from .config import load_runner_config
+    from .workers import get_workers_runtime_config
+    from .workers.diagnostics import test_worker
+
+    project_dir = args.project_dir.resolve()
+    config, config_err = load_runner_config(project_dir)
+    runtime = get_workers_runtime_config(
+        config=config,
+        codex_command_fallback=str(args.codex_command),
+        cli_worker=None,
+    )
+
+    if args.subcommand == "list":
+        sys.stdout.write(f"Default: {runtime.default_worker}\n")
+        if runtime.routing:
+            sys.stdout.write("Routing:\n")
+            for k in sorted(runtime.routing.keys()):
+                sys.stdout.write(f"- {k}: {runtime.routing[k]}\n")
+        sys.stdout.write("Providers:\n")
+        for name in sorted(runtime.providers.keys()):
+            spec = runtime.providers[name]
+            detail = spec.type
+            if spec.type == "ollama":
+                detail = f"ollama model={spec.model} endpoint={spec.endpoint}"
+            elif spec.type == "codex":
+                detail = f"codex command={spec.command}"
+            sys.stdout.write(f"- {name}: {detail}\n")
+        if config_err:
+            sys.stdout.write(f"\nWarning: config.yaml parse error: {config_err}\n")
+        return 0
+
+    if args.subcommand == "test":
+        name = str(args.worker).strip()
+        if name not in runtime.providers:
+            sys.stderr.write(f"Unknown worker '{name}' (available: {', '.join(sorted(runtime.providers.keys()))})\n")
+            return 2
+        ok, msg = test_worker(runtime.providers[name])
+        if ok:
+            sys.stdout.write(f"✓ {name}: {msg}\n")
+            return 0
+        sys.stderr.write(f"✗ {name}: {msg}\n")
+        return 1
+
+    sys.stderr.write(f"Unknown workers subcommand: {args.subcommand}\n")
+    return 2
+
+
 def _build_list_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Feature PRD Runner - list phases and tasks",
@@ -555,6 +651,12 @@ def _build_exec_parser() -> argparse.ArgumentParser:
         help="Codex CLI command (default: codex exec -)",
     )
     parser.add_argument(
+        "--worker",
+        type=str,
+        default=None,
+        help="Worker provider name override for this exec (e.g., codex, ollama).",
+    )
+    parser.add_argument(
         "--override-agents",
         action="store_true",
         help="Enable superadmin mode - bypass AGENTS.md rules",
@@ -606,6 +708,7 @@ def _exec_command(
     project_dir: Path,
     prompt: str,
     codex_command: str,
+    worker: str | None,
     override_agents: bool,
     then_continue: bool,
     context_task: Optional[str],
@@ -629,6 +732,7 @@ def _exec_command(
         user_prompt=prompt,
         project_dir=project_dir,
         codex_command=codex_command,
+        worker=worker,
         heartbeat_seconds=heartbeat_seconds,
         heartbeat_grace_seconds=heartbeat_grace_seconds,
         shift_minutes=shift_minutes,
@@ -3875,6 +3979,9 @@ def main(argv: list[str] | None = None) -> None:
                     as_json=bool(args.json),
                 )
             )
+        if argv[0] == "workers":
+            args = _build_workers_parser().parse_args(argv[1:])
+            raise SystemExit(_workers_command(args))
         if argv[0] == "list":
             args = _build_list_parser().parse_args(argv[1:])
             raise SystemExit(
@@ -3937,6 +4044,7 @@ def main(argv: list[str] | None = None) -> None:
                     args.project_dir,
                     args.prompt,
                     args.codex_command,
+                    args.worker,
                     bool(args.override_agents),
                     bool(args.then_continue),
                     args.context_task,
@@ -4093,6 +4201,7 @@ def main(argv: list[str] | None = None) -> None:
         project_dir=args.project_dir,
         prd_path=args.prd_file,
         codex_command=args.codex_command,
+        worker=args.worker,
         max_iterations=args.max_iterations,
         shift_minutes=args.shift_minutes,
         heartbeat_seconds=args.heartbeat_seconds,

@@ -19,6 +19,7 @@ from .actions.run_worker import run_resume_prompt_action, run_worker_action
 from .custom_execution import execute_custom_prompt
 from .approval_gates import ApprovalGateManager, GateType, create_default_gates_config
 from .breakpoints import BreakpointManager
+from .config import load_runner_config
 from .parallel_integration import (
     should_use_parallel_execution,
     log_parallel_execution_intent,
@@ -113,6 +114,7 @@ from .utils import _hash_file, _now_iso
 from .git_utils import _git_changed_files
 from .constants import IGNORED_REVIEW_PATH_PREFIXES
 from .validation import validate_phase_plan_schema, validate_task_queue_schema
+from .workers import WorkersRuntimeConfig, get_workers_runtime_config
 
 
 def _sanitize_branch_fragment(value: str) -> str:
@@ -192,6 +194,7 @@ def run_feature_prd(
     project_dir: Path,
     prd_path: Path,
     codex_command: str = "codex exec -",
+    worker: Optional[str] = None,
     max_iterations: Optional[int] = None,
     shift_minutes: int = DEFAULT_SHIFT_MINUTES,
     heartbeat_seconds: int = DEFAULT_HEARTBEAT_SECONDS,
@@ -232,7 +235,8 @@ def run_feature_prd(
     Args:
         project_dir: Target project directory (git repository root).
         prd_path: Path to the feature PRD file.
-        codex_command: Codex CLI command template used to run the worker.
+        codex_command: Codex CLI command template used to run the Codex worker (also used as fallback when providers are not configured).
+        worker: Optional worker provider name override (e.g., "codex", "ollama").
         max_iterations: Optional hard limit on coordination loop iterations.
         shift_minutes: Timebox per worker run.
         heartbeat_seconds: Expected worker heartbeat interval.
@@ -295,6 +299,8 @@ def run_feature_prd(
     logger.info("Project directory: {}", project_dir)
     logger.info("PRD file: {}", prd_path)
     logger.info("Codex command: {}", codex_command)
+    if worker:
+        logger.info("Worker override: {}", worker)
     logger.info("Shift length: {} minutes", shift_minutes)
     logger.info("Heartbeat: {}s (grace {}s)", heartbeat_seconds, heartbeat_grace_seconds)
     logger.info("Max attempts per task: {}", max_attempts)
@@ -337,6 +343,16 @@ def run_feature_prd(
 
     paths = _ensure_state_files(project_dir, prd_path)
     breakpoint_manager = BreakpointManager(paths["state_dir"])
+
+    # Resolve worker routing configuration once for the run.
+    config, config_err = load_runner_config(project_dir)
+    if config_err:
+        logger.warning("config.yaml parse error: {}", config_err)
+    workers_runtime: WorkersRuntimeConfig = get_workers_runtime_config(
+        config=config,
+        codex_command_fallback=codex_command,
+        cli_worker=worker,
+    )
 
     lock_path = paths["state_dir"] / LOCK_FILE
     iteration = 0
@@ -648,6 +664,7 @@ def run_feature_prd(
             heartbeat_grace_seconds=heartbeat_grace_seconds,
             shift_minutes=shift_minutes,
             on_spawn=_on_custom_worker_spawn,
+            workers_runtime=workers_runtime,
         )
 
         _append_event(paths["events"], custom_event.to_dict())
@@ -1505,6 +1522,7 @@ def run_feature_prd(
                 test_command=test_command,
                 on_spawn=_on_worker_spawn,
                 simple_review=simple_review,
+                workers_runtime=workers_runtime,
             )
 
         elif step_enum in {TaskStep.PLAN_IMPL, TaskStep.IMPLEMENT, TaskStep.REVIEW}:
@@ -1543,6 +1561,7 @@ def run_feature_prd(
                 test_command=test_command,
                 on_spawn=_on_worker_spawn,
                 simple_review=simple_review,
+                workers_runtime=workers_runtime,
             )
 
         elif step_enum == TaskStep.VERIFY:

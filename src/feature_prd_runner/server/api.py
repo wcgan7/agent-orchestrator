@@ -36,6 +36,8 @@ from .models import (
     RunInfo,
     RunMetrics,
     SendMessageRequest,
+    StartRunRequest,
+    StartRunResponse,
     TaskInfo,
 )
 from .websocket import manager, watch_logs, watch_run_progress
@@ -1316,6 +1318,155 @@ def create_app(
             lines_added=metrics.lines_added,
             lines_removed=metrics.lines_removed,
         )
+
+    @app.post("/api/runs/start")
+    async def start_run(
+        request: StartRunRequest,
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+    ) -> StartRunResponse:
+        """Start a new run from the web UI.
+
+        Args:
+            request: Run configuration (PRD content or prompt, test/build commands, etc.).
+            project_dir: Project directory path.
+
+        Returns:
+            Response with run ID and status.
+        """
+        import subprocess
+        import tempfile
+        import uuid
+        from datetime import datetime
+
+        proj_dir = _get_project_dir(project_dir)
+
+        try:
+            # Generate or use provided PRD
+            prd_content = ""
+            if request.mode == "quick_prompt":
+                # Generate PRD from prompt using LLM
+                logger.info("Generating PRD from prompt: {}", request.content[:100])
+                try:
+                    import anthropic
+
+                    client = anthropic.Anthropic()
+                    response = client.messages.create(
+                        model="claude-sonnet-4-20250514",
+                        max_tokens=4000,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": f"""You are a product requirements document (PRD) generator. Generate a clear, well-structured PRD based on the following user request:
+
+{request.content}
+
+Format the PRD in markdown with these sections:
+# Feature: [Brief Title]
+
+## Overview
+[What is this feature and why is it needed?]
+
+## Requirements
+[Detailed functional requirements as a numbered list]
+
+## Technical Approach
+[High-level technical implementation notes]
+
+## Success Criteria
+[How to verify the feature works correctly]
+
+Be specific, actionable, and include all necessary details for implementation.""",
+                            }
+                        ],
+                    )
+                    prd_content = response.content[0].text
+                    logger.info("Generated PRD: {} chars", len(prd_content))
+                except Exception as e:
+                    logger.error("Failed to generate PRD: {}", e)
+                    return StartRunResponse(
+                        success=False,
+                        message=f"Failed to generate PRD from prompt: {e}",
+                        run_id=None,
+                        prd_path=None,
+                    )
+            elif request.mode == "full_prd":
+                prd_content = request.content
+            else:
+                return StartRunResponse(
+                    success=False,
+                    message=f"Invalid mode: {request.mode}. Must be 'full_prd' or 'quick_prompt'",
+                    run_id=None,
+                    prd_path=None,
+                )
+
+            # Save PRD to file
+            prd_dir = proj_dir / ".prd_runner" / "generated_prds"
+            prd_dir.mkdir(parents=True, exist_ok=True)
+
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            prd_filename = f"prd_{timestamp}.md"
+            prd_path = prd_dir / prd_filename
+
+            prd_path.write_text(prd_content)
+            logger.info("Saved PRD to: {}", prd_path)
+
+            # Build command arguments
+            run_id = f"web-{uuid.uuid4().hex[:8]}"
+
+            cmd_args = [
+                "feature-prd-runner",
+                "run",
+                "--project-dir",
+                str(proj_dir),
+                "--prd-file",
+                str(prd_path),
+            ]
+
+            # Add optional commands
+            if request.test_command:
+                cmd_args.extend(["--test-command", request.test_command])
+            if request.build_command:
+                cmd_args.extend(["--build-cmd", request.build_command])
+            if request.verification_profile:
+                cmd_args.extend(["--verification-profile", request.verification_profile])
+
+            # Add auto-approve flags (they're False by default in CLI, so we only set them if True)
+            # Note: The CLI doesn't have these exact flags, so we'll need to use interactive mode
+            # and rely on the approval gates being configured
+            if not (request.auto_approve_plans and request.auto_approve_changes and request.auto_approve_commits):
+                # If not all auto-approve, we might want interactive mode
+                # But for now, let's just run without interactive mode
+                pass
+
+            logger.info("Starting run with command: {}", " ".join(cmd_args))
+
+            # Spawn subprocess in background
+            # Use nohup or similar to detach from parent process
+            subprocess.Popen(
+                cmd_args,
+                cwd=proj_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                start_new_session=True,  # Detach from parent
+            )
+
+            logger.info("Started run {} for project {}", run_id, proj_dir)
+
+            return StartRunResponse(
+                success=True,
+                message=f"Run started successfully",
+                run_id=run_id,
+                prd_path=str(prd_path),
+            )
+
+        except Exception as e:
+            logger.error("Failed to start run: {}", e)
+            return StartRunResponse(
+                success=False,
+                message=f"Failed to start run: {e}",
+                run_id=None,
+                prd_path=None,
+            )
 
     @app.websocket("/ws/runs/{run_id}")
     async def websocket_run_updates(
