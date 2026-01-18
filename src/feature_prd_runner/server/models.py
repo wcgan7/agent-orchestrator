@@ -274,3 +274,22 @@ class StartRunResponse(BaseModel):
     message: str
     run_id: Optional[str] = None
     prd_path: Optional[str] = None
+
+
+class ExecTaskRequest(BaseModel):
+    """Request to execute a one-off task (exec command)."""
+
+    prompt: str
+    override_agents: bool = False
+    context_files: Optional[str] = None  # Comma-separated file paths
+    shift_minutes: int = 45
+    heartbeat_seconds: int = 120
+
+
+class ExecTaskResponse(BaseModel):
+    """Response from executing a task."""
+
+    success: bool
+    message: str
+    run_id: Optional[str] = None
+    error: Optional[str] = None

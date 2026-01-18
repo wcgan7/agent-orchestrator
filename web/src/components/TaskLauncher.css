@@ -49,14 +49,20 @@
   gap: 8px;
 }
 
+.mode-toggle-three {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+
 .mode-button {
   flex: 1;
-  padding: 12px 24px;
+  padding: 12px 16px;
   border: 2px solid #e0e0e0;
   background: white;
   color: #333;
   border-radius: 6px;
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   transition: all 0.2s;
@@ -76,6 +82,7 @@
   margin: 0;
   font-size: 13px;
   color: #666;
+  line-height: 1.5;
 }
 
 /* Content Textarea */
@@ -162,6 +169,32 @@
   width: 18px;
   height: 18px;
   cursor: pointer;
+  flex-shrink: 0;
+}
+
+.checkbox-label-standalone {
+  align-items: flex-start;
+  padding: 12px;
+  background: #fff;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+}
+
+.checkbox-label-standalone input[type='checkbox'] {
+  margin-top: 2px;
+}
+
+.checkbox-label-standalone small {
+  display: block;
+  margin-top: 4px;
+  color: #666;
+  font-weight: normal;
+}
+
+.field-hint {
+  margin: 4px 0 0 0;
+  font-size: 12px;
+  color: #666;
 }
 
 /* Messages */
@@ -224,8 +257,15 @@
     grid-template-columns: 1fr;
   }
 
-  .mode-toggle {
+  .mode-toggle,
+  .mode-toggle-three {
+    display: flex;
     flex-direction: column;
+  }
+
+  .mode-button {
+    font-size: 14px;
+    padding: 12px 24px;
   }
 
   .task-launcher {

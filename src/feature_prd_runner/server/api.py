@@ -25,6 +25,8 @@ from .models import (
     ChatMessage,
     ControlAction,
     ControlResponse,
+    ExecTaskRequest,
+    ExecTaskResponse,
     FileChange,
     FileReviewRequest,
     LoginRequest,
@@ -1466,6 +1468,73 @@ Be specific, actionable, and include all necessary details for implementation.""
                 message=f"Failed to start run: {e}",
                 run_id=None,
                 prd_path=None,
+            )
+
+    @app.post("/api/runs/exec")
+    async def exec_task(
+        request: ExecTaskRequest,
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+    ) -> ExecTaskResponse:
+        """Execute a one-off task using the exec command.
+
+        This endpoint runs a task immediately and terminates upon completion,
+        skipping the full workflow (plan → implement → verify → review → commit).
+
+        Args:
+            request: Task execution request (prompt, options).
+            project_dir: Project directory path.
+
+        Returns:
+            Response with execution status and run ID.
+        """
+        from ..custom_execution import execute_custom_prompt
+
+        proj_dir = _get_project_dir(project_dir)
+
+        try:
+            logger.info("Executing one-off task: {}", request.prompt[:100])
+
+            # Build context if files are provided
+            context = None
+            if request.context_files:
+                context = {"files": request.context_files.split(",")}
+
+            # Execute the custom prompt (synchronous, blocks until complete)
+            success, error_message = execute_custom_prompt(
+                user_prompt=request.prompt,
+                project_dir=proj_dir,
+                override_agents=request.override_agents,
+                context=context,
+                shift_minutes=request.shift_minutes,
+                heartbeat_seconds=request.heartbeat_seconds,
+                heartbeat_grace_seconds=300,
+                then_continue=False,
+            )
+
+            if success:
+                logger.info("Task executed successfully")
+                return ExecTaskResponse(
+                    success=True,
+                    message="Task executed successfully",
+                    run_id=None,  # execute_custom_prompt doesn't return run_id easily
+                    error=None,
+                )
+            else:
+                logger.error("Task execution failed: {}", error_message)
+                return ExecTaskResponse(
+                    success=False,
+                    message="Task execution failed",
+                    run_id=None,
+                    error=error_message,
+                )
+
+        except Exception as e:
+            logger.error("Failed to execute task: {}", e)
+            return ExecTaskResponse(
+                success=False,
+                message=f"Failed to execute task: {e}",
+                run_id=None,
+                error=str(e),
             )
 
     @app.websocket("/ws/runs/{run_id}")
