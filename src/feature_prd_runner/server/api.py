@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import platform
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -43,6 +45,46 @@ from .models import (
     TaskInfo,
 )
 from .websocket import manager, watch_logs, watch_run_progress
+
+
+def _find_codex_command() -> str | None:
+    """Auto-detect codex command on the system.
+
+    Returns:
+        The codex command string if found, None otherwise.
+    """
+    is_windows = platform.system() == "Windows"
+
+    # Try to find codex in PATH first
+    codex_path = shutil.which("codex")
+    if codex_path:
+        logger.info("Found codex in PATH: {}", codex_path)
+        return f"{codex_path} exec -"
+
+    # On Windows, try common installation locations
+    if is_windows:
+        common_paths = [
+            Path(r"C:\Program Files\nodejs\codex.cmd"),
+            Path(r"C:\Program Files (x86)\nodejs\codex.cmd"),
+            Path.home() / "AppData" / "Roaming" / "npm" / "codex.cmd",
+            Path.home() / "AppData" / "Local" / "Programs" / "Claude" / "codex.cmd",
+            Path(r"C:\Program Files\Claude\codex.cmd"),
+        ]
+
+        for path in common_paths:
+            if path.exists():
+                logger.info("Found codex at: {}", path)
+                return f'"{path}" exec -'
+
+    # Try alternative names (claude, claude-code, etc.)
+    alternative_names = ["claude", "claude-code"]
+    for name in alternative_names:
+        alt_path = shutil.which(name)
+        if alt_path:
+            logger.info("Found {} in PATH: {}", name, alt_path)
+            return f"{alt_path} exec -"
+
+    return None
 
 
 def create_app(
@@ -1356,12 +1398,19 @@ def create_app(
                 if config_err:
                     logger.warning("Failed to load config: {}", config_err)
 
-                # Get codex command from config or use default
-                codex_cmd = "codex exec -"
+                # Get codex command from config, auto-detect, or use default
+                codex_cmd = None
                 if config and "codex_command" in config:
                     codex_cmd = config["codex_command"]
-
-                logger.info("Using codex command: {}", codex_cmd)
+                    logger.info("Using codex command from config: {}", codex_cmd)
+                else:
+                    # Try to auto-detect
+                    codex_cmd = _find_codex_command()
+                    if codex_cmd:
+                        logger.info("Auto-detected codex command: {}", codex_cmd)
+                    else:
+                        logger.warning("Could not auto-detect codex command, using default")
+                        codex_cmd = "codex exec -"
 
                 # Create a temporary file path for the generated PRD
                 generated_prd_path = proj_dir / ".prd_runner" / "temp_generated_prd.md"
@@ -1407,7 +1456,12 @@ Write the generated PRD to the file: {generated_prd_path}"""
                         # Check if it's a codex not found error
                         error_details = error_msg or ""
                         if "cannot find the file" in error_details.lower() or "no such file" in error_details.lower():
-                            error_details += f"\n\nMake sure codex is installed and in your PATH, or configure 'codex_command' in .prd_runner/config.yaml"
+                            error_details += (
+                                f"\n\nCodex command used: {codex_cmd}\n"
+                                f"Make sure codex is installed and in your PATH.\n"
+                                f"Alternatively, configure 'codex_command' in .prd_runner/config.yaml with the full path.\n"
+                                f"Example (Windows): codex_command: 'C:\\Program Files\\nodejs\\codex.cmd exec -'"
+                            )
                         return StartRunResponse(
                             success=False,
                             message=f"Failed to generate PRD from prompt: {error_details}",
@@ -1436,7 +1490,12 @@ Write the generated PRD to the file: {generated_prd_path}"""
                     error_msg = str(e)
                     # Check if it's a codex not found error
                     if "cannot find the file" in error_msg.lower() or "no such file" in error_msg.lower():
-                        error_msg += f"\n\nMake sure codex is installed and in your PATH, or configure 'codex_command' in .prd_runner/config.yaml"
+                        error_msg += (
+                            f"\n\nCodex command used: {codex_cmd}\n"
+                            f"Make sure codex is installed and in your PATH.\n"
+                            f"Alternatively, configure 'codex_command' in .prd_runner/config.yaml with the full path.\n"
+                            f"Example (Windows): codex_command: 'C:\\Program Files\\nodejs\\codex.cmd exec -'"
+                        )
                     return StartRunResponse(
                         success=False,
                         message=f"Failed to generate PRD from prompt: {error_msg}",
