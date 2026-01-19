@@ -1403,6 +1403,24 @@ def create_app(
                 if config and "codex_command" in config:
                     codex_cmd = config["codex_command"]
                     logger.info("Using codex command from config: {}", codex_cmd)
+
+                    # Validate that the command includes stdin or placeholder
+                    has_stdin = " -" in codex_cmd or codex_cmd.endswith("-")
+                    has_placeholder = "{prompt_file}" in codex_cmd or "{prompt}" in codex_cmd
+                    if not has_stdin and not has_placeholder:
+                        return StartRunResponse(
+                            success=False,
+                            message=(
+                                f"Invalid codex_command in config: {codex_cmd}\n\n"
+                                f"The command must include one of:\n"
+                                f"  - 'exec -' to read from stdin (recommended)\n"
+                                f"  - '{{prompt_file}}' placeholder\n"
+                                f"  - '{{prompt}}' placeholder\n\n"
+                                f"Example: codex_command: 'C:/Program Files/nodejs/codex.ps1 exec -'"
+                            ),
+                            run_id=None,
+                            prd_path=None,
+                        )
                 else:
                     # Try to auto-detect
                     codex_cmd = _find_codex_command()
