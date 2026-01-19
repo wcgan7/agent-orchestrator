@@ -1350,6 +1350,10 @@ def create_app(
                 logger.info("Generating PRD from prompt: {}", request.content[:100])
                 from ..custom_execution import execute_custom_prompt
 
+                # Create a temporary file path for the generated PRD
+                generated_prd_path = proj_dir / ".prd_runner" / "temp_generated_prd.md"
+                generated_prd_path.parent.mkdir(parents=True, exist_ok=True)
+
                 prd_gen_prompt = f"""You are a product requirements document (PRD) generator. Generate a clear, well-structured PRD based on the following user request:
 
 {request.content}
@@ -1371,7 +1375,7 @@ Format the PRD in markdown with these sections:
 
 Be specific, actionable, and include all necessary details for implementation.
 
-Write the generated PRD to a file named 'generated_prd.md' in the current directory."""
+Write the generated PRD to the file: {generated_prd_path}"""
 
                 try:
                     # Use codex to generate the PRD
@@ -1395,7 +1399,6 @@ Write the generated PRD to a file named 'generated_prd.md' in the current direct
                         )
 
                     # Read the generated PRD
-                    generated_prd_path = proj_dir / "generated_prd.md"
                     if not generated_prd_path.exists():
                         logger.error("Generated PRD file not found at {}", generated_prd_path)
                         return StartRunResponse(
