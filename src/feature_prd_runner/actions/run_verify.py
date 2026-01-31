@@ -67,6 +67,15 @@ def _is_pytest_command(command: str) -> bool:
 
     return False
 
+
+def _pytest_xdist_available() -> bool:
+    """Check if pytest-xdist is installed for parallel test execution."""
+    try:
+        import importlib.util
+        return importlib.util.find_spec("xdist") is not None
+    except Exception:
+        return False
+
 def run_verify_action(
     *,
     project_dir: Path,
@@ -368,6 +377,9 @@ def run_verify_action(
     if not failing_stage and isinstance(test_command, str) and test_command.strip():
         cmd = test_command.strip()
         if _is_pytest_command(cmd):
+            # Use parallel execution if xdist is available and -n not already specified
+            if _pytest_xdist_available() and "-n" not in cmd.split():
+                cmd += " -n auto"
             if "--tb=" not in cmd:
                 cmd += " --tb=long"
             if "--disable-warnings" not in cmd:
