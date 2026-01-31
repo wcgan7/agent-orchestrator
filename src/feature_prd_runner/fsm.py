@@ -80,6 +80,28 @@ def _infer_missing_tool(command: str | None, log_tail: str | None) -> str | None
     return None
 
 
+def _select_fix_prompt_mode(error_type: str | None) -> PromptMode:
+    """Select the appropriate granular PromptMode based on verification error type.
+
+    Args:
+        error_type: The error type from verification (e.g., "format_failed", "lint_failed").
+
+    Returns:
+        The most specific PromptMode for the error type.
+    """
+    error_type = (error_type or "").strip().lower()
+    if error_type == "format_failed":
+        return PromptMode.FIX_FORMAT
+    if error_type == "lint_failed":
+        return PromptMode.FIX_LINT
+    if error_type == "typecheck_failed":
+        return PromptMode.FIX_TYPECHECK
+    if error_type == "tests_failed":
+        return PromptMode.FIX_TESTS
+    # Default fallback for unknown error types
+    return PromptMode.FIX_VERIFY
+
+
 def reduce_task(task: TaskState, event: Any, *, caps: dict[str, int]) -> TaskState:
     """Reduce a task state given an event.
 
@@ -210,6 +232,9 @@ def reduce_task(task: TaskState, event: Any, *, caps: dict[str, int]) -> TaskSta
             "log_path": event.log_path,
             "log_tail": event.log_tail,
             "captured_at": event.captured_at,
+            "error_type": event.error_type,
+            "stage": event.stage,
+            "all_failing_paths": list(event.all_failing_paths) if event.all_failing_paths else [],
         }
         if event.passed:
             task.test_fail_attempts = 0
@@ -260,8 +285,9 @@ def reduce_task(task: TaskState, event: Any, *, caps: dict[str, int]) -> TaskSta
             _set_waiting(task, "TESTS_STUCK", task.last_error_type, task.last_error)
             return task
         _clear_blocking(task)
-        # Verification can fail due to lint/typecheck/format/tests; treat as fix-verify.
-        _set_step(task, TaskStep.IMPLEMENT, PromptMode.FIX_VERIFY)
+        # Select granular prompt mode based on the failing verification stage
+        prompt_mode = _select_fix_prompt_mode(error_type)
+        _set_step(task, TaskStep.IMPLEMENT, prompt_mode)
         _set_ready(task)
         return task
 

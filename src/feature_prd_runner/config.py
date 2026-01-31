@@ -61,3 +61,37 @@ def get_workers_config(config: dict[str, Any]) -> dict[str, Any]:
     """
     raw = _get_nested(config, "workers")
     return raw if isinstance(raw, dict) else {}
+
+
+# Valid language values that can be specified in config
+VALID_LANGUAGES = {"python", "typescript", "javascript", "go", "rust", "auto"}
+
+
+def get_language_config(config: dict[str, Any]) -> str | None:
+    """Extract the language setting from the runner config.
+
+    Args:
+        config: Runner configuration dictionary.
+
+    Returns:
+        The language string if valid, or None if not set or invalid.
+    """
+    raw = config.get("language")
+    if isinstance(raw, str) and raw in VALID_LANGUAGES:
+        return raw
+    return None
+
+
+def get_verify_profile_config(config: dict[str, Any]) -> str | None:
+    """Extract the verify_profile setting from the runner config.
+
+    Args:
+        config: Runner configuration dictionary.
+
+    Returns:
+        The verify_profile string if set, or None.
+    """
+    raw = config.get("verify_profile")
+    if isinstance(raw, str) and raw:
+        return raw
+    return None

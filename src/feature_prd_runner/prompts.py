@@ -9,6 +9,216 @@ from .constants import REVIEW_MIN_EVIDENCE_ITEMS
 from .utils import _normalize_text
 
 
+def _build_minimal_review_fix_prompt(
+    *,
+    review_blockers: list[str],
+    review_blocker_files: list[str],
+    allowed_files: Optional[list[str]] = None,
+    events_path: Optional[Path] = None,
+    progress_path: Optional[Path] = None,
+    run_id: Optional[str] = None,
+    heartbeat_seconds: Optional[int] = None,
+) -> str:
+    """Build a minimal prompt for addressing review blockers without full PRD context.
+
+    This prompt is focused and efficient - it only includes information needed
+    to address the specific review issues. It does NOT include PRD, acceptance
+    criteria, or full implementation context.
+
+    Args:
+        review_blockers: List of blocking issues from the review.
+        review_blocker_files: List of files implicated in the blockers.
+        allowed_files: List of files the agent is allowed to edit.
+        events_path: Path to events file for progress reporting.
+        progress_path: Path to progress file for progress reporting.
+        run_id: Current run identifier.
+        heartbeat_seconds: Heartbeat interval for progress reporting.
+
+    Returns:
+        A minimal, focused prompt string for addressing review blockers.
+    """
+    # Build blockers list
+    blockers_block = ""
+    if review_blockers:
+        blockers_list = "\n".join(f"- {blocker}" for blocker in review_blockers)
+        blockers_block = f"""
+Blocking issues to address:
+{blockers_list}
+"""
+
+    # Build implicated files list
+    files_block = ""
+    if review_blocker_files:
+        files_list = "\n".join(f"- {f}" for f in review_blocker_files)
+        files_block = f"""
+Files implicated in the blockers:
+{files_list}
+"""
+
+    # Build allowed files section
+    allowed_files = list(allowed_files) if allowed_files else []
+    allowed_block = ""
+    if allowed_files:
+        allowed_list = "\n".join(f"- {path}" for path in allowed_files[:30])
+        if len(allowed_files) > 30:
+            allowed_list += f"\n- ... and {len(allowed_files) - 30} more files"
+        allowed_block = f"""
+Allowed files to edit:
+{allowed_list}
+"""
+
+    # Progress contract
+    progress_block = ""
+    if progress_path and run_id:
+        heartbeat_block = ""
+        if heartbeat_seconds:
+            heartbeat_block = f"  Update heartbeat at least every {heartbeat_seconds} seconds.\n"
+        progress_block = f"""
+Progress contract (REQUIRED):
+- Write snapshot to: {progress_path}
+  Required fields: run_id={run_id}, task_id, phase, actions, claims, next_steps, human_blocking_issues, human_next_steps, heartbeat.
+{heartbeat_block}"""
+
+    events_block = ""
+    if events_path:
+        events_block = f"- Append events to: {events_path}\n"
+
+    return f"""ADDRESS REVIEW BLOCKERS
+
+The previous implementation review found issues that must be addressed before merging.
+{blockers_block}{files_block}
+Instructions:
+1. Fix ONLY the blocking issues listed above
+2. Make minimal changes to address the review feedback
+3. Do NOT add new features or refactor unrelated code
+4. Focus on the specific files mentioned in the blockers
+{allowed_block}
+{events_block}{progress_block}"""
+
+
+def _build_minimal_fix_prompt(
+    *,
+    prompt_mode: str,
+    last_verification: dict[str, Any],
+    allowed_files: Optional[list[str]] = None,
+    events_path: Optional[Path] = None,
+    progress_path: Optional[Path] = None,
+    run_id: Optional[str] = None,
+    heartbeat_seconds: Optional[int] = None,
+) -> str:
+    """Build a minimal prompt for fixing simple verification failures.
+
+    This prompt is focused and efficient - it only includes information needed
+    to fix the specific verification issue (format, lint, or typecheck).
+    It does NOT include PRD, acceptance criteria, or implementation context.
+
+    Args:
+        prompt_mode: The prompt mode (fix_format, fix_lint, fix_typecheck).
+        last_verification: Verification snapshot with command, error, failing paths.
+        allowed_files: List of files the agent is allowed to edit.
+        events_path: Path to events file for progress reporting.
+        progress_path: Path to progress file for progress reporting.
+        run_id: Current run identifier.
+        heartbeat_seconds: Heartbeat interval for progress reporting.
+
+    Returns:
+        A minimal, focused prompt string for fixing the verification issue.
+    """
+    snapshot = last_verification or {}
+    cmd = str(snapshot.get("command") or "").strip()
+    log_path = str(snapshot.get("log_path") or "").strip()
+    log_tail = str(snapshot.get("log_tail") or "").strip()
+    exit_code = snapshot.get("exit_code")
+    error_type = str(snapshot.get("error_type") or "").strip()
+    stage = str(snapshot.get("stage") or "").strip()
+    all_failing_paths = list(snapshot.get("all_failing_paths") or [])
+
+    # Determine header and instructions based on prompt mode
+    if prompt_mode == "fix_format":
+        header = "FORMAT CHECK FAILING"
+        instructions = """Instructions:
+1. Fix ONLY the formatting issues listed above
+2. Do NOT modify code logic or add features
+3. Make minimal changes to satisfy the formatter
+4. If the formatter has an auto-fix option, you may run it"""
+    elif prompt_mode == "fix_lint":
+        header = "LINT CHECK FAILING"
+        instructions = """Instructions:
+1. Fix ONLY the lint errors listed above
+2. Do NOT modify code logic or add features
+3. Make minimal changes to satisfy the linter
+4. Common fixes: remove unused imports, fix line length, add missing type hints"""
+    elif prompt_mode == "fix_typecheck":
+        header = "TYPE CHECK FAILING"
+        instructions = """Instructions:
+1. Fix ONLY the type errors listed above
+2. Do NOT modify code logic or add features
+3. Make minimal changes to fix type annotations
+4. Common fixes: add type hints, fix incompatible types, handle Optional properly"""
+    else:
+        # Fallback for unknown modes
+        header = "VERIFICATION FAILING"
+        instructions = """Instructions:
+1. Fix the verification errors listed above
+2. Make minimal changes to pass verification"""
+
+    # Build failing files section
+    failing_files_block = ""
+    if all_failing_paths:
+        failing_files_list = "\n".join(f"- {path}" for path in all_failing_paths)
+        failing_files_block = f"""
+Files with errors:
+{failing_files_list}
+"""
+
+    # Build allowed files section (only include failing files that are allowed)
+    allowed_files = list(allowed_files) if allowed_files else []
+    if all_failing_paths and allowed_files:
+        # Filter to only show the intersection
+        relevant_allowed = [f for f in all_failing_paths if f in allowed_files or any(f.startswith(a.rstrip('/') + '/') for a in allowed_files if a.endswith('/'))]
+        if not relevant_allowed:
+            relevant_allowed = all_failing_paths  # Fall back to all failing paths
+    else:
+        relevant_allowed = all_failing_paths if all_failing_paths else allowed_files
+
+    allowed_block = ""
+    if relevant_allowed:
+        allowed_list = "\n".join(f"- {path}" for path in relevant_allowed)
+        allowed_block = f"""
+Allowed files to edit:
+{allowed_list}
+"""
+
+    # Progress contract (optional but recommended)
+    progress_block = ""
+    if progress_path and run_id:
+        heartbeat_block = ""
+        if heartbeat_seconds:
+            heartbeat_block = f"  Update heartbeat at least every {heartbeat_seconds} seconds.\n"
+        progress_block = f"""
+Progress contract (REQUIRED):
+- Write snapshot to: {progress_path}
+  Required fields: run_id={run_id}, task_id, phase, actions, claims, next_steps, human_blocking_issues, human_next_steps, heartbeat.
+{heartbeat_block}"""
+
+    events_block = ""
+    if events_path:
+        events_block = f"- Append events to: {events_path}\n"
+
+    return f"""{header}
+
+Command: {cmd or "(unknown)"}
+Exit code: {exit_code if exit_code is not None else "(unknown)"}
+Log: {log_path or "(unknown)"}
+{failing_files_block}
+Error details:
+{log_tail or "(no output captured)"}
+
+{instructions}
+{allowed_block}
+{events_block}{progress_block}"""
+
+
 def _build_resume_prompt(
     user_prompt: str,
     progress_path: Path,
@@ -143,24 +353,65 @@ def _build_phase_prompt(
         heartbeat_block = f"  Update heartbeat at least every {heartbeat_seconds} seconds.\n"
 
     banner_block = ""
-    if prompt_mode in {"fix_tests", "fix_verify"}:
+    if prompt_mode in {"fix_tests", "fix_verify", "fix_format", "fix_lint", "fix_typecheck"}:
         snapshot = last_verification or {}
         cmd = str(snapshot.get("command") or "").strip()
         log_path = str(snapshot.get("log_path") or "").strip()
         log_tail = str(snapshot.get("log_tail") or "").strip()
         exit_code = snapshot.get("exit_code")
-        header = "TESTS ARE FAILING -- FIX THIS FIRST" if prompt_mode == "fix_tests" else "VERIFY IS FAILING -- FIX THIS FIRST"
+        all_failing_paths = list(snapshot.get("all_failing_paths") or [])
+
+        # Stage-specific headers and instructions
+        if prompt_mode == "fix_format":
+            header = "FORMAT CHECK FAILING -- FIX THIS FIRST"
+            priority_instruction = """Priority for this run:
+1) Fix ONLY the formatting issues (minimal change).
+2) Do NOT modify code logic - only fix formatting.
+3) Only then continue implementing remaining acceptance criteria if needed."""
+        elif prompt_mode == "fix_lint":
+            header = "LINT CHECK FAILING -- FIX THIS FIRST"
+            priority_instruction = """Priority for this run:
+1) Fix ONLY the lint errors in the listed files (minimal change).
+2) Do NOT modify code logic - only fix lint issues.
+3) Only then continue implementing remaining acceptance criteria if needed."""
+        elif prompt_mode == "fix_typecheck":
+            header = "TYPE CHECK FAILING -- FIX THIS FIRST"
+            priority_instruction = """Priority for this run:
+1) Fix ONLY the type errors in the listed files (minimal change).
+2) Do NOT modify code logic - only fix type annotations.
+3) Only then continue implementing remaining acceptance criteria if needed."""
+        elif prompt_mode == "fix_tests":
+            header = "TESTS ARE FAILING -- FIX THIS FIRST"
+            priority_instruction = """Priority for this run:
+1) Fix the failing tests (this may require code logic changes).
+2) Only then continue implementing remaining acceptance criteria."""
+        else:
+            header = "VERIFY IS FAILING -- FIX THIS FIRST"
+            priority_instruction = """Priority for this run:
+1) Fix the failing verification (minimal change).
+2) Only then continue implementing remaining acceptance criteria."""
+
+        # Include failing files if available
+        failing_files_block = ""
+        if all_failing_paths:
+            failing_files_list = "\n".join(f"  - {path}" for path in all_failing_paths[:20])  # Limit to 20 files
+            if len(all_failing_paths) > 20:
+                failing_files_list += f"\n  ... and {len(all_failing_paths) - 20} more files"
+            failing_files_block = f"""
+Files with errors:
+{failing_files_list}
+"""
+
         banner_block = f"""
 {header}
 Command: {cmd or "(unknown)"}
 Exit code: {exit_code if exit_code is not None else "(unknown)"}
 Log: {log_path or "(unknown)"}
+{failing_files_block}
 Recent output:
 {log_tail or "(no log output captured)"}
 
-Priority for this run:
-1) Fix the failing verification (minimal change).
-2) Only then continue implementing remaining acceptance criteria.
+{priority_instruction}
 """
     elif prompt_mode == "address_review":
         blockers = review_blockers or []
@@ -257,6 +508,115 @@ def _extract_prd_markers(prd_text: str, max_items: int = 20) -> list[str]:
                 if len(markers) >= max_items:
                     return markers
     return markers
+
+
+def _build_minimal_allowlist_expansion_prompt(
+    *,
+    phase: dict[str, Any],
+    impl_plan_path: Path,
+    current_allowlist: list[str],
+    expansion_paths: list[str],
+    error_type: Optional[str] = None,
+    log_tail: Optional[str] = None,
+    progress_path: Optional[Path] = None,
+    run_id: Optional[str] = None,
+    heartbeat_seconds: Optional[int] = None,
+) -> str:
+    """Build a minimal prompt for allowlist expansion without full PRD context.
+
+    This prompt is focused and efficient - it only asks the agent to update the
+    implementation plan to include files that failed verification. It does NOT
+    include the full PRD content, which significantly reduces token usage.
+
+    Args:
+        phase: Phase metadata (id, name, description).
+        impl_plan_path: Path where the updated plan should be written.
+        current_allowlist: Files currently in the plan's allowlist.
+        expansion_paths: Files that need to be added to the allowlist.
+        error_type: Type of verification error (e.g., "typecheck_failed").
+        log_tail: Recent verification output for context.
+        progress_path: Path to progress file for progress reporting.
+        run_id: Current run identifier.
+        heartbeat_seconds: Heartbeat interval for progress reporting.
+
+    Returns:
+        A minimal, focused prompt string for allowlist expansion.
+    """
+    # Determine the failure type for context
+    failure_context = ""
+    if error_type:
+        if "format" in error_type.lower():
+            failure_context = "These files have **formatting errors** that need to be fixed."
+        elif "lint" in error_type.lower():
+            failure_context = "These files have **lint errors** that need to be fixed."
+        elif "typecheck" in error_type.lower():
+            failure_context = "These files have **type check errors** that need to be fixed."
+        elif "test" in error_type.lower():
+            failure_context = "These files are involved in **test failures** that need to be fixed."
+        else:
+            failure_context = f"These files failed verification ({error_type})."
+    else:
+        failure_context = "These files failed verification and need to be included in the plan."
+
+    # Build the paths lists
+    current_list = "\n".join(f"- {p}" for p in sorted(current_allowlist)[:50])
+    if len(current_allowlist) > 50:
+        current_list += f"\n- ... and {len(current_allowlist) - 50} more files"
+
+    expansion_list = "\n".join(f"- {p}" for p in expansion_paths)
+
+    # Log tail excerpt for context
+    log_block = ""
+    if log_tail:
+        # Truncate to last 2000 chars for efficiency
+        tail = log_tail[-2000:] if len(log_tail) > 2000 else log_tail
+        log_block = f"""
+Recent verification output (for context):
+```
+{tail}
+```
+"""
+
+    # Progress contract
+    progress_block = ""
+    if progress_path and run_id:
+        heartbeat_block = ""
+        if heartbeat_seconds:
+            heartbeat_block = f"  Update heartbeat at least every {heartbeat_seconds} seconds.\n"
+        progress_block = f"""
+Progress contract (REQUIRED):
+- Write snapshot to: {progress_path}
+  Required fields: run_id={run_id}, task_id, phase, actions, claims,
+  next_steps, human_blocking_issues, human_next_steps, heartbeat.
+{heartbeat_block}"""
+
+    return f"""UPDATE IMPLEMENTATION PLAN: Allowlist Expansion Required
+
+Phase: {phase.get("name") or phase.get("id")}
+
+Verification found failing files outside the current plan allowlist.
+{failure_context}
+
+🚨 FILES THAT MUST BE ADDED TO THE PLAN:
+{expansion_list}
+
+Current allowlist (files already in plan):
+{current_list}
+{log_block}
+Your task:
+1. Read the existing implementation plan at: {impl_plan_path}
+2. Add ALL the files listed above to `files_to_change` (or `new_files` if they don't exist yet)
+3. Write the updated plan back to the same file
+
+Rules:
+- You MUST include ALL the files listed above in your updated plan
+- Do NOT remove any files that are already in the plan
+- Do NOT add unrelated files beyond what is requested
+- Keep the rest of the plan (spec_summary, technical_approach, etc.) unchanged
+- The plan schema must remain valid JSON
+{progress_block}
+Output file (write JSON): {impl_plan_path}
+"""
 
 
 def _build_impl_plan_prompt(

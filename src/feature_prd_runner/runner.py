@@ -28,6 +28,7 @@ from .constants import (
 from .orchestrator import _default_run_branch, run_feature_prd
 from .prompts import _build_phase_prompt, _build_plan_prompt, _build_review_prompt
 from .io_utils import FileLock, _load_data, _load_data_with_error, _save_data
+from .config import load_runner_config, get_language_config, get_verify_profile_config
 from .custom_execution import execute_custom_prompt
 from .messaging import ApprovalResponse, MessageBus, Message
 from .approval_gates import ApprovalGateManager
@@ -49,6 +50,7 @@ from .state import _active_run_is_stale
 from .utils import _hash_file, _now_iso
 from .validation import validate_phase_plan_schema, validate_task_queue_schema
 from .git_utils import _git_is_repo, _git_status_porcelain, _git_changed_files, _git_is_ignored, _git_tracked_paths
+from .language import detect_language, get_verify_profile_for_language
 
 
 __all__ = [
@@ -131,11 +133,18 @@ def _build_run_parser() -> argparse.ArgumentParser:
         help="Global typecheck command to run during VERIFY (before tests)",
     )
     parser.add_argument(
+        "--language",
+        type=str,
+        choices=["auto", "python", "typescript", "javascript", "go", "rust"],
+        default="auto",
+        help="Project language. If 'auto' (default), detected from manifest files.",
+    )
+    parser.add_argument(
         "--verify-profile",
         type=str,
-        choices=["none", "python"],
+        choices=["none", "python", "typescript", "javascript", "go", "rust"],
         default="none",
-        help="Verification preset (default: none)",
+        help="Verification preset (default: none). If 'none' and --language is set, uses language-appropriate profile.",
     )
     parser.add_argument(
         "--ensure-ruff",
@@ -2331,7 +2340,7 @@ def _build_example_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--language",
         type=str,
-        choices=["python", "typescript", "go"],
+        choices=["python", "typescript", "javascript", "go", "rust"],
         default="python",
         help="Project language (default: python)",
     )
@@ -2557,11 +2566,18 @@ target-version = "py310"
         elif language == "typescript":
             config_content = """# Feature PRD Runner Configuration
 
+# Project language
+language: typescript
+verify_profile: typescript
+
 # Verification commands
 test_command: npm test
 lint_command: npm run lint
 typecheck_command: npm run type-check
 format_command: npm run format:check
+
+# Ensure dependencies
+ensure_deps: install
 
 # Worker configuration
 codex_command: codex exec -
@@ -2610,6 +2626,10 @@ describe("main", () => {
         elif language == "go":
             config_content = """# Feature PRD Runner Configuration
 
+# Project language
+language: go
+verify_profile: go
+
 # Verification commands
 test_command: go test ./... -v
 lint_command: golangci-lint run
@@ -2650,6 +2670,119 @@ import "testing"
 func TestMain(t *testing.T) {
 	// Test passes if main doesn't panic
 	main()
+}
+""")
+
+        elif language == "javascript":
+            config_content = """# Feature PRD Runner Configuration
+
+# Project language
+language: javascript
+verify_profile: javascript
+
+# Verification commands
+test_command: npm test
+lint_command: npm run lint
+format_command: npm run format:check
+
+# Ensure dependencies
+ensure_deps: install
+
+# Worker configuration
+codex_command: codex exec -
+
+# Git configuration
+new_branch: feature/user-authentication
+
+# Retry configuration
+max_task_attempts: 10
+max_review_attempts: 3
+stop_on_blocking_issues: true
+"""
+
+            # Create package.json
+            package_json = {
+                "name": "auth-example",
+                "version": "0.1.0",
+                "description": "Example authentication system",
+                "scripts": {
+                    "test": "jest",
+                    "lint": "eslint .",
+                    "format:check": "prettier --check ."
+                }
+            }
+            import json
+            (output_dir / "package.json").write_text(json.dumps(package_json, indent=2) + "\n")
+
+            # Create sample JavaScript files
+            (src_dir / "index.js").write_text("""function main() {
+  console.log("Hello from Feature PRD Runner example!");
+}
+
+module.exports = { main };
+main();
+""")
+
+            (tests_dir / "index.test.js").write_text("""const { main } = require("../src/index");
+
+describe("main", () => {
+  it("should run without error", () => {
+    expect(() => main()).not.toThrow();
+  });
+});
+""")
+
+        elif language == "rust":
+            config_content = """# Feature PRD Runner Configuration
+
+# Project language
+language: rust
+verify_profile: rust
+
+# Verification commands
+test_command: cargo test
+lint_command: cargo clippy -- -D warnings
+format_command: cargo fmt -- --check
+
+# Worker configuration
+codex_command: codex exec -
+
+# Git configuration
+new_branch: feature/user-authentication
+
+# Retry configuration
+max_task_attempts: 10
+max_review_attempts: 3
+stop_on_blocking_issues: true
+"""
+
+            # Create Cargo.toml
+            (output_dir / "Cargo.toml").write_text("""[package]
+name = "auth-example"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+""")
+
+            # Create sample Rust files
+            (src_dir / "main.rs").write_text("""fn main() {
+    println!("Hello from Feature PRD Runner example!");
+}
+""")
+
+            (src_dir / "lib.rs").write_text("""pub fn greet() -> &'static str {
+    "Hello from Feature PRD Runner example!"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_greet() {
+        assert_eq!(greet(), "Hello from Feature PRD Runner example!");
+    }
 }
 """)
 
@@ -4197,6 +4330,41 @@ def main(argv: list[str] | None = None) -> None:
     parser = _build_run_parser()
     args = parser.parse_args(argv)
     _configure_logging(args.log_level)
+
+    # Load config file for language/profile overrides
+    config, config_err = load_runner_config(args.project_dir)
+    if config_err:
+        logger.warning("Config file error (using CLI defaults): {}", config_err)
+
+    # Resolve language: CLI > config > auto-detect
+    language = args.language
+    if language == "auto":
+        # Check config file for language setting
+        config_language = get_language_config(config)
+        if config_language and config_language != "auto":
+            language = config_language
+            logger.info("Using language '{}' from config file", language)
+        else:
+            # Auto-detect from project files
+            language = detect_language(args.project_dir)
+            if language == "unknown":
+                language = "python"  # Fallback for backwards compatibility
+            logger.info("Auto-detected project language: {}", language)
+
+    # Resolve verify_profile: CLI > config > language-based
+    verify_profile = args.verify_profile
+    if verify_profile == "none":
+        # Check config file for verify_profile
+        config_profile = get_verify_profile_config(config)
+        if config_profile:
+            verify_profile = config_profile
+            logger.info("Using verify profile '{}' from config file", verify_profile)
+        elif language != "unknown":
+            # Use language-based profile
+            verify_profile = get_verify_profile_for_language(language)  # type: ignore[arg-type]
+            if verify_profile != "none":
+                logger.info("Using verify profile '{}' based on detected language", verify_profile)
+
     run_feature_prd(
         project_dir=args.project_dir,
         prd_path=args.prd_file,
@@ -4213,7 +4381,7 @@ def main(argv: list[str] | None = None) -> None:
         format_command=args.format_command,
         lint_command=args.lint_command,
         typecheck_command=args.typecheck_command,
-        verify_profile=args.verify_profile,
+        verify_profile=verify_profile,
         ensure_ruff=args.ensure_ruff,
         ensure_deps=args.ensure_deps,
         ensure_deps_command=args.ensure_deps_command,
@@ -4230,6 +4398,7 @@ def main(argv: list[str] | None = None) -> None:
         interactive=bool(args.interactive),
         parallel=bool(args.parallel),
         max_workers=args.max_workers,
+        language=language,
     )
 
 

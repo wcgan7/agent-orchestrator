@@ -23,6 +23,11 @@ from ..signals import (
     extract_mypy_repo_paths,
     filter_repo_file_paths,
     infer_suspect_source_files,
+    get_test_parser,
+    get_lint_parser,
+    get_typecheck_parser,
+    get_format_parser,
+    get_traceback_parser,
 )
 from ..tasks import _format_log_path, _lint_log_path, _resolve_test_command, _tests_log_path, _typecheck_log_path
 from ..utils import _now_iso, _sanitize_phase_id
@@ -80,6 +85,7 @@ def run_verify_action(
     ensure_deps: str = "off",
     ensure_deps_command: Optional[str] = None,
     timeout_seconds: int,
+    language: str = "python",
 ) -> VerificationResult:
     """Run verification stages for a phase and persist verification artifacts.
 
@@ -104,6 +110,7 @@ def run_verify_action(
         ensure_deps: Dependency helper mode (install/off).
         ensure_deps_command: Optional dependency install command override.
         timeout_seconds: Timeout in seconds for each stage.
+        language: Project language for language-aware output parsing (python, typescript, etc.).
 
     Returns:
         A `VerificationResult` event describing the outcome.
@@ -432,16 +439,34 @@ def run_verify_action(
             except OSError:
                 excerpt_text = stage_for_event.get("log_tail") or ""
 
-        if stage_name in {"format", "lint"} and str(stage_for_event.get("command") or "").strip().startswith("ruff"):
-            failing_repo_paths = extract_ruff_repo_paths(excerpt_text, project_dir)
-        elif stage_name == "typecheck" and str(stage_for_event.get("command") or "").strip().startswith("mypy"):
-            failing_repo_paths = extract_mypy_repo_paths(excerpt_text, project_dir)
-        elif stage_name == "tests" and _is_pytest_command(str(stage_for_event.get("command") or "")):
+        stage_command = str(stage_for_event.get("command") or "")
+
+        if stage_name == "format":
+            # Use language-aware format parser
+            format_parser = get_format_parser(stage_command, language)
+            failing_repo_paths = format_parser(excerpt_text, project_dir)
+        elif stage_name == "lint":
+            # Use language-aware lint parser
+            lint_parser = get_lint_parser(stage_command, language)
+            failing_repo_paths = lint_parser(excerpt_text, project_dir)
+        elif stage_name == "typecheck":
+            # Use language-aware typecheck parser
+            typecheck_parser = get_typecheck_parser(stage_command, language)
+            failing_repo_paths = typecheck_parser(excerpt_text, project_dir)
+        elif stage_name == "tests":
+            # Use language-aware test and traceback parsers
+            test_parser = get_test_parser(stage_command, language)
+            traceback_parser = get_traceback_parser(language)
             fail_text = excerpt_text
-            failed_test_files = extract_failed_test_files(fail_text, project_dir)
-            trace_files = extract_traceback_repo_paths(fail_text, project_dir)
+            failed_test_files = test_parser(fail_text, project_dir)
+            trace_files = traceback_parser(fail_text, project_dir)
             src_in_traces = [p for p in trace_files if p.startswith("src/")]
-            suspect_source_files = infer_suspect_source_files(failed_test_files, project_dir) if (not src_in_traces and failed_test_files) else []
+            # Only infer suspect files for Python (uses AST parsing)
+            suspect_source_files = (
+                infer_suspect_source_files(failed_test_files, project_dir)
+                if (not src_in_traces and failed_test_files and language == "python")
+                else []
+            )
             failing_repo_paths = sorted(set(failed_test_files) | set(trace_files) | set(suspect_source_files))
         else:
             candidate_paths = filter_repo_file_paths(extract_paths_from_log(excerpt_text, project_dir), project_dir)
@@ -464,6 +489,9 @@ def run_verify_action(
     else:
         logger.info("Verification passed")
 
+    # Determine the stage name for the event
+    stage_name = str(stage_for_event.get("stage") or "") if stage_for_event else None
+
     event = VerificationResult(
         run_id=run_id,
         passed=bool(passed),
@@ -475,6 +503,8 @@ def run_verify_action(
         failing_paths=expansion_paths,
         needs_allowlist_expansion=bool(needs_expansion),
         error_type=error_type,
+        stage=stage_name,
+        all_failing_paths=list(failing_repo_paths),
     )
 
     _save_data(

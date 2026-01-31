@@ -34,6 +34,9 @@ class PromptMode(str, Enum):
     IMPLEMENT = "implement"
     FIX_TESTS = "fix_tests"
     FIX_VERIFY = "fix_verify"
+    FIX_FORMAT = "fix_format"
+    FIX_LINT = "fix_lint"
+    FIX_TYPECHECK = "fix_typecheck"
     ADDRESS_REVIEW = "address_review"
     EXPAND_ALLOWLIST = "expand_allowlist"
 
@@ -367,6 +370,8 @@ class VerificationResult(Event):
     failing_paths: list[str] = field(default_factory=list)
     needs_allowlist_expansion: bool = False
     error_type: Optional[str] = None
+    stage: Optional[str] = None  # "format", "lint", "typecheck", "tests"
+    all_failing_paths: list[str] = field(default_factory=list)  # All files with issues (not just expansion)
     task_id: Optional[str] = field(default=None, kw_only=True)
     phase: Optional[str] = field(default=None, kw_only=True)
 

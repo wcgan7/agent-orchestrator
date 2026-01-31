@@ -383,3 +383,475 @@ def infer_suspect_source_files(
                     suspects.add(path)
 
     return sorted(suspects)
+
+
+# =============================================================================
+# TypeScript/JavaScript Signal Extractors
+# =============================================================================
+
+# Jest/Vitest FAIL line: "FAIL src/utils.test.ts" or "FAIL  __tests__/auth.test.tsx"
+# Note: tsx must come before ts in alternation to match correctly
+_JEST_FAIL_RE = re.compile(r"(?m)^FAIL\s+(\S+\.(?:tsx|ts|jsx|js|mjs|cjs))")
+
+# Jest/Vitest test file in summary: "Tests: 2 failed, 1 passed"
+# followed by file paths in stack traces
+
+# Jest stack trace: "at Object.<anonymous> (src/foo.test.ts:25:18)"
+_JEST_STACK_RE = re.compile(
+    r"at\s+(?:[^\s]+\s+)?\(?"
+    r"(?P<path>[^\s():]+\.(?:tsx|ts|jsx|js|mjs|cjs))"
+    r":(?P<line>\d+):(?P<col>\d+)\)?"
+)
+
+# Jest error location: "● Test suite failed to run\n\n    src/utils.ts:42:5 - error"
+_JEST_ERROR_LOC_RE = re.compile(
+    r"(?m)^\s*(?P<path>[^\s:]+\.(?:tsx|ts|jsx|js)):(?P<line>\d+):(?P<col>\d+)\s*[-–]"
+)
+
+
+def extract_jest_failed_test_files(text: str, project_dir: Path) -> list[str]:
+    """Extract failing test file paths from Jest/Vitest output.
+
+    Parses formats:
+    - 'FAIL path/to/test.ts'
+    - 'FAIL path/to/test.tsx'
+    - Stack trace file references like 'at Object.<anonymous> (src/foo.test.ts:25:18)'
+    - Error locations like 'src/utils.ts:42:5 - error'
+
+    Args:
+        text: Raw Jest/Vitest output text.
+        project_dir: Repository root directory.
+
+    Returns:
+        List of repo-relative paths to failing test files.
+    """
+    if not text:
+        return []
+
+    root = project_dir.resolve()
+    out: set[str] = set()
+
+    # 1) From FAIL lines
+    for match in _JEST_FAIL_RE.findall(text):
+        path = match.strip().lstrip("./")
+        # Skip node_modules paths
+        if "node_modules" in path:
+            continue
+        p = (root / path).resolve()
+        try:
+            p.relative_to(root)
+        except Exception:
+            continue
+        if p.is_file():
+            out.add(p.relative_to(root).as_posix())
+
+    # 2) From stack traces
+    for match in _JEST_STACK_RE.finditer(text):
+        path = match.group("path").strip().lstrip("./")
+        if "node_modules" in path:
+            continue
+        p = (root / path).resolve()
+        try:
+            p.relative_to(root)
+        except Exception:
+            continue
+        if p.is_file():
+            out.add(p.relative_to(root).as_posix())
+
+    # 3) From error locations
+    for match in _JEST_ERROR_LOC_RE.finditer(text):
+        path = match.group("path").strip().lstrip("./")
+        if "node_modules" in path:
+            continue
+        p = (root / path).resolve()
+        try:
+            p.relative_to(root)
+        except Exception:
+            continue
+        if p.is_file():
+            out.add(p.relative_to(root).as_posix())
+
+    return sorted(out)
+
+
+# ESLint output format (default/stylish formatter):
+# /absolute/path/to/file.ts
+#   12:5   error  'foo' is defined but never used  @typescript-eslint/no-unused-vars
+#
+# Or compact format:
+# path/to/file.ts:12:5: 'foo' is defined but never used @typescript-eslint/no-unused-vars
+_ESLINT_FILE_HEADER_RE = re.compile(
+    r"(?m)^(?P<path>(?:[A-Za-z]:)?[^\s\n:]+\.(?:ts|tsx|js|jsx|mjs|cjs|vue))\s*$"
+)
+_ESLINT_COMPACT_RE = re.compile(
+    r"(?m)^(?P<path>(?:[A-Za-z]:)?[^\s:]+\.(?:ts|tsx|js|jsx|mjs|cjs|vue)):(?P<line>\d+):(?P<col>\d+):"
+)
+
+
+def extract_eslint_repo_paths(text: str, project_dir: Path) -> list[str]:
+    """Extract repo file paths from ESLint output.
+
+    Parses formats:
+    - Stylish formatter: '/path/to/file.ts' on its own line
+    - Compact formatter: 'path/to/file.ts:12:5: message'
+
+    Args:
+        text: Raw ESLint output text.
+        project_dir: Repository root directory.
+
+    Returns:
+        List of repo-relative paths with lint errors.
+    """
+    if not text:
+        return []
+
+    root = project_dir.resolve()
+    out: set[str] = set()
+
+    # 1) From file header lines (stylish formatter)
+    for match in _ESLINT_FILE_HEADER_RE.finditer(text):
+        raw_path = match.group("path").strip()
+        if "node_modules" in raw_path:
+            continue
+
+        # Handle absolute paths
+        p = Path(raw_path)
+        if p.is_absolute():
+            try:
+                rel = p.resolve().relative_to(root)
+            except Exception:
+                continue
+            if (root / rel).is_file():
+                out.add(rel.as_posix())
+        else:
+            # Repo-relative path
+            rel = raw_path.replace("\\", "/").lstrip("./")
+            candidate = (root / rel).resolve()
+            try:
+                candidate.relative_to(root)
+            except Exception:
+                continue
+            if candidate.is_file():
+                out.add(candidate.relative_to(root).as_posix())
+
+    # 2) From compact format lines
+    for match in _ESLINT_COMPACT_RE.finditer(text):
+        raw_path = match.group("path").strip()
+        if "node_modules" in raw_path:
+            continue
+
+        p = Path(raw_path)
+        if p.is_absolute():
+            try:
+                rel = p.resolve().relative_to(root)
+            except Exception:
+                continue
+            if (root / rel).is_file():
+                out.add(rel.as_posix())
+        else:
+            rel = raw_path.replace("\\", "/").lstrip("./")
+            candidate = (root / rel).resolve()
+            try:
+                candidate.relative_to(root)
+            except Exception:
+                continue
+            if candidate.is_file():
+                out.add(candidate.relative_to(root).as_posix())
+
+    return sorted(out)
+
+
+# TypeScript compiler (tsc) output format:
+# src/utils.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.
+# or
+# src/utils.ts:12:5 - error TS2322: Type 'string' is not assignable...
+_TSC_PAREN_RE = re.compile(
+    r"(?m)^(?P<path>(?:[A-Za-z]:)?[^\s(:]+\.(?:tsx|ts))\((?P<line>\d+),(?P<col>\d+)\):\s*error"
+)
+_TSC_COLON_RE = re.compile(
+    r"(?m)^(?P<path>(?:[A-Za-z]:)?[^\s:]+\.(?:tsx|ts)):(?P<line>\d+):(?P<col>\d+)\s*[-–]\s*error"
+)
+
+
+def extract_tsc_repo_paths(text: str, project_dir: Path) -> list[str]:
+    """Extract repo file paths from TypeScript compiler (tsc) output.
+
+    Parses formats:
+    - 'path/to/file.ts(12,5): error TS2322: ...'
+    - 'path/to/file.ts:12:5 - error TS2322: ...'
+
+    Args:
+        text: Raw tsc output text.
+        project_dir: Repository root directory.
+
+    Returns:
+        List of repo-relative paths with type errors.
+    """
+    if not text:
+        return []
+
+    root = project_dir.resolve()
+    out: set[str] = set()
+
+    for rx in (_TSC_PAREN_RE, _TSC_COLON_RE):
+        for match in rx.finditer(text):
+            raw_path = match.group("path").strip()
+            if "node_modules" in raw_path:
+                continue
+
+            p = Path(raw_path)
+            if p.is_absolute():
+                try:
+                    rel = p.resolve().relative_to(root)
+                except Exception:
+                    continue
+                if (root / rel).is_file():
+                    out.add(rel.as_posix())
+            else:
+                rel = raw_path.replace("\\", "/").lstrip("./")
+                candidate = (root / rel).resolve()
+                try:
+                    candidate.relative_to(root)
+                except Exception:
+                    continue
+                if candidate.is_file():
+                    out.add(candidate.relative_to(root).as_posix())
+
+    return sorted(out)
+
+
+# Prettier output format (check mode):
+# Checking formatting...
+# [warn] src/utils.ts
+# [warn] src/components/Button.tsx
+# [warn] Code style issues found in 2 files.
+_PRETTIER_WARN_RE = re.compile(
+    r"(?m)^\[warn\]\s+(?P<path>[^\s]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|css|scss|md|yaml|yml))\s*$"
+)
+
+
+def extract_prettier_repo_paths(text: str, project_dir: Path) -> list[str]:
+    """Extract repo file paths from Prettier check output.
+
+    Parses format:
+    - '[warn] path/to/file.ts'
+
+    Args:
+        text: Raw Prettier output text.
+        project_dir: Repository root directory.
+
+    Returns:
+        List of repo-relative paths with formatting issues.
+    """
+    if not text:
+        return []
+
+    root = project_dir.resolve()
+    out: set[str] = set()
+
+    for match in _PRETTIER_WARN_RE.finditer(text):
+        raw_path = match.group("path").strip()
+        if "node_modules" in raw_path:
+            continue
+
+        rel = raw_path.replace("\\", "/").lstrip("./")
+        candidate = (root / rel).resolve()
+        try:
+            candidate.relative_to(root)
+        except Exception:
+            continue
+        if candidate.is_file():
+            out.add(candidate.relative_to(root).as_posix())
+
+    return sorted(out)
+
+
+# JavaScript/TypeScript stack trace frame:
+# at Function.processTicksAndRejections (node:internal/process/task_queues:95:5)
+# at AuthService.login (src/services/auth.ts:42:15)
+# at Object.<anonymous> (__tests__/auth.test.ts:25:18)
+_JS_STACK_FRAME_RE = re.compile(
+    r"at\s+(?:[^\s]+\s+)?\(?"
+    r"(?P<path>[^\s():]+\.(?:tsx|ts|jsx|js|mjs|cjs))"
+    r":(?P<line>\d+):(?P<col>\d+)\)?"
+)
+
+
+def extract_js_stacktrace_repo_paths(text: str, project_dir: Path) -> list[str]:
+    """Extract repo file paths from JavaScript/TypeScript stack traces.
+
+    Parses formats:
+    - 'at Function (path/to/file.ts:line:col)'
+    - 'at path/to/file.ts:line:col'
+
+    Excludes:
+    - node_modules paths
+    - node: internal paths
+
+    Args:
+        text: Raw stack trace text.
+        project_dir: Repository root directory.
+
+    Returns:
+        List of repo-relative paths from stack traces.
+    """
+    if not text:
+        return []
+
+    root = project_dir.resolve()
+    out: set[str] = set()
+
+    for match in _JS_STACK_FRAME_RE.finditer(text):
+        raw_path = match.group("path").strip()
+
+        # Skip node internals and node_modules
+        if raw_path.startswith("node:"):
+            continue
+        if "node_modules" in raw_path:
+            continue
+
+        rel = raw_path.replace("\\", "/").lstrip("./")
+        candidate = (root / rel).resolve()
+        try:
+            candidate.relative_to(root)
+        except Exception:
+            continue
+        if candidate.is_file():
+            out.add(candidate.relative_to(root).as_posix())
+
+    return sorted(out)
+
+
+# =============================================================================
+# Parser Registry for Language-Aware Verification
+# =============================================================================
+
+from typing import Callable
+
+# Type alias for parser functions
+PathExtractor = Callable[[str, Path], list[str]]
+
+
+def get_test_parser(command: str, language: str) -> PathExtractor:
+    """Return appropriate test output parser based on command and language.
+
+    Args:
+        command: The test command string.
+        language: The project language.
+
+    Returns:
+        A function that extracts file paths from test output.
+    """
+    cmd = (command or "").strip().lower()
+
+    # Explicit framework detection from command
+    if "vitest" in cmd:
+        return extract_jest_failed_test_files  # Vitest has same format as Jest
+    if "jest" in cmd:
+        return extract_jest_failed_test_files
+    if "pytest" in cmd or "python -m pytest" in cmd:
+        return extract_failed_test_files
+    if "mocha" in cmd:
+        return extract_jest_failed_test_files  # Similar stack trace format
+
+    # Infer from npm/yarn/pnpm test for JS/TS projects
+    if any(runner in cmd for runner in ["npm test", "yarn test", "pnpm test", "npm run test"]):
+        if language in ("typescript", "javascript"):
+            return extract_jest_failed_test_files
+
+    # Default based on language
+    if language in ("typescript", "javascript"):
+        return extract_jest_failed_test_files
+    return extract_failed_test_files  # Python default
+
+
+def get_lint_parser(command: str, language: str) -> PathExtractor:
+    """Return appropriate lint output parser based on command and language.
+
+    Args:
+        command: The lint command string.
+        language: The project language.
+
+    Returns:
+        A function that extracts file paths from lint output.
+    """
+    cmd = (command or "").strip().lower()
+
+    # Explicit tool detection from command
+    if "eslint" in cmd:
+        return extract_eslint_repo_paths
+    if "ruff" in cmd:
+        return extract_ruff_repo_paths
+    if "biome" in cmd:
+        return extract_eslint_repo_paths  # Similar format
+
+    # Default based on language
+    if language in ("typescript", "javascript"):
+        return extract_eslint_repo_paths
+    return extract_ruff_repo_paths  # Python default
+
+
+def get_typecheck_parser(command: str, language: str) -> PathExtractor:
+    """Return appropriate typecheck output parser based on command and language.
+
+    Args:
+        command: The typecheck command string.
+        language: The project language.
+
+    Returns:
+        A function that extracts file paths from typecheck output.
+    """
+    cmd = (command or "").strip().lower()
+
+    # Explicit tool detection from command
+    if "tsc" in cmd:
+        return extract_tsc_repo_paths
+    if "mypy" in cmd:
+        return extract_mypy_repo_paths
+    if "pyright" in cmd:
+        return extract_mypy_repo_paths  # Similar format
+
+    # Default based on language
+    if language == "typescript":
+        return extract_tsc_repo_paths
+    return extract_mypy_repo_paths  # Python default
+
+
+def get_format_parser(command: str, language: str) -> PathExtractor:
+    """Return appropriate format check output parser based on command and language.
+
+    Args:
+        command: The format command string.
+        language: The project language.
+
+    Returns:
+        A function that extracts file paths from format check output.
+    """
+    cmd = (command or "").strip().lower()
+
+    # Explicit tool detection from command
+    if "prettier" in cmd:
+        return extract_prettier_repo_paths
+    if "ruff" in cmd:
+        return extract_ruff_repo_paths
+    if "biome" in cmd:
+        return extract_eslint_repo_paths  # Similar format
+
+    # Default based on language
+    if language in ("typescript", "javascript"):
+        return extract_prettier_repo_paths
+    return extract_ruff_repo_paths  # Python default
+
+
+def get_traceback_parser(language: str) -> PathExtractor:
+    """Return appropriate traceback/stack trace parser based on language.
+
+    Args:
+        language: The project language.
+
+    Returns:
+        A function that extracts file paths from stack traces.
+    """
+    if language in ("typescript", "javascript"):
+        return extract_js_stacktrace_repo_paths
+    return extract_traceback_repo_paths  # Python default
