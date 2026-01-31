@@ -39,6 +39,9 @@ from ..models import (
 )
 from ..prompts import (
     _build_impl_plan_prompt,
+    _build_minimal_allowlist_expansion_prompt,
+    _build_minimal_fix_prompt,
+    _build_minimal_review_fix_prompt,
     _build_phase_prompt,
     _build_plan_prompt,
     _build_resume_prompt,
@@ -397,21 +400,47 @@ def run_worker_action(
         phase_test_command = None
         if phase:
             phase_test_command = phase.get("test_command") or task.get("test_command") or test_command
+
+        # Check if this is a pure allowlist expansion request (use minimal prompt)
+        expansion_paths = task.get("plan_expansion_request") or []
+        prompt_mode = task.get("prompt_mode")
+        is_expansion_only = bool(expansion_paths) and prompt_mode == "expand_allowlist"
+
         if spec.type == "codex":
-            prompt = _build_impl_plan_prompt(
-                phase=phase or {"id": phase_id, "acceptance_criteria": []},
-                prd_path=prd_path,
-                prd_text=prd_text,
-                prd_truncated=prd_truncated,
-                prd_markers=prd_markers,
-                impl_plan_path=plan_path,
-                user_prompt=user_prompt,
-                progress_path=progress_path,
-                run_id=run_id,
-                test_command=phase_test_command,
-                heartbeat_seconds=heartbeat_seconds,
-                plan_expansion_request=task.get("plan_expansion_request") or [],
-            )
+            if is_expansion_only and plan_path.exists():
+                # Use minimal expansion prompt - no full PRD needed
+                existing_plan = _load_data(plan_path, {})
+                current_allowlist = list(existing_plan.get("files_to_change") or []) + list(
+                    existing_plan.get("new_files") or []
+                )
+                last_verification = task.get("last_verification") or {}
+                prompt = _build_minimal_allowlist_expansion_prompt(
+                    phase=phase or {"id": phase_id, "acceptance_criteria": []},
+                    impl_plan_path=plan_path,
+                    current_allowlist=current_allowlist,
+                    expansion_paths=expansion_paths,
+                    error_type=last_verification.get("error_type"),
+                    log_tail=last_verification.get("log_tail"),
+                    progress_path=progress_path,
+                    run_id=run_id,
+                    heartbeat_seconds=heartbeat_seconds,
+                )
+            else:
+                # Full implementation plan prompt with PRD
+                prompt = _build_impl_plan_prompt(
+                    phase=phase or {"id": phase_id, "acceptance_criteria": []},
+                    prd_path=prd_path,
+                    prd_text=prd_text,
+                    prd_truncated=prd_truncated,
+                    prd_markers=prd_markers,
+                    impl_plan_path=plan_path,
+                    user_prompt=user_prompt,
+                    progress_path=progress_path,
+                    run_id=run_id,
+                    test_command=phase_test_command,
+                    heartbeat_seconds=heartbeat_seconds,
+                    plan_expansion_request=expansion_paths,
+                )
         else:
             prompt = build_local_impl_plan_prompt(
                 phase=phase or {"id": phase_id, "acceptance_criteria": []},
@@ -513,25 +542,58 @@ def run_worker_action(
             tech_approach = json.dumps(plan_data["steps"], indent=2)
 
         allowed_files = build_allowed_files(plan_data)
+
+        # Check if this is a simple verification fix or review fix that can use a minimal prompt
+        prompt_mode = task.get("prompt_mode")
+        last_verification = task.get("last_verification") or {}
+        is_simple_verification_fix = prompt_mode in {"fix_format", "fix_lint", "fix_typecheck"}
+        is_review_fix = prompt_mode == "address_review"
+        review_blockers = task.get("review_blockers") or []
+        review_blocker_files = task.get("review_blocker_files") or []
+
         if spec.type == "codex":
-            prompt = _build_phase_prompt(
-                prd_path=prd_path,
-                phase=phase,
-                task=task,
-                events_path=events_path,
-                progress_path=progress_path,
-                run_id=run_id,
-                user_prompt=user_prompt,
-                impl_plan_path=plan_path,
-                allowed_files=allowed_files,
-                no_progress_attempts=int(task.get("no_progress_attempts", 0)),
-                technical_approach_text=tech_approach,
-                heartbeat_seconds=heartbeat_seconds,
-                prompt_mode=task.get("prompt_mode"),
-                last_verification=task.get("last_verification"),
-                review_blockers=task.get("review_blockers"),
-                review_blocker_files=task.get("review_blocker_files"),
-            )
+            if is_simple_verification_fix:
+                # Use minimal fix prompt - no full PRD needed for simple verification fixes
+                prompt = _build_minimal_fix_prompt(
+                    prompt_mode=prompt_mode,
+                    last_verification=last_verification,
+                    allowed_files=allowed_files,
+                    events_path=events_path,
+                    progress_path=progress_path,
+                    run_id=run_id,
+                    heartbeat_seconds=heartbeat_seconds,
+                )
+            elif is_review_fix and review_blockers:
+                # Use minimal review fix prompt - no full PRD needed for addressing blockers
+                prompt = _build_minimal_review_fix_prompt(
+                    review_blockers=review_blockers,
+                    review_blocker_files=review_blocker_files,
+                    allowed_files=allowed_files,
+                    events_path=events_path,
+                    progress_path=progress_path,
+                    run_id=run_id,
+                    heartbeat_seconds=heartbeat_seconds,
+                )
+            else:
+                # Use full phase prompt for implementation, test fixes
+                prompt = _build_phase_prompt(
+                    prd_path=prd_path,
+                    phase=phase,
+                    task=task,
+                    events_path=events_path,
+                    progress_path=progress_path,
+                    run_id=run_id,
+                    user_prompt=user_prompt,
+                    impl_plan_path=plan_path,
+                    allowed_files=allowed_files,
+                    no_progress_attempts=int(task.get("no_progress_attempts", 0)),
+                    technical_approach_text=tech_approach,
+                    heartbeat_seconds=heartbeat_seconds,
+                    prompt_mode=prompt_mode,
+                    last_verification=last_verification,
+                    review_blockers=task.get("review_blockers"),
+                    review_blocker_files=task.get("review_blocker_files"),
+                )
         else:
             plan_text, plan_truncated2 = _render_json_for_prompt(plan_data, max_chars=40_000)
             if plan_truncated2:

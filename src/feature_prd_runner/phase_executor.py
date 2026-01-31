@@ -35,6 +35,7 @@ from .fsm import reduce_task
 from .git_coordinator import get_git_coordinator
 from .git_utils import _ensure_branch, _git_changed_files, _git_has_changes
 from .io_utils import FileLock, _append_event, _load_data, _save_data, _update_progress
+from .state_manager import state_transaction
 from .models import ProgressHumanBlockers, TaskLifecycle, TaskState, TaskStep, WorkerFailed, WorkerSucceeded
 from .parallel import PhaseResult
 from .tasks import _normalize_phases, _phase_for_task, _sync_phase_status
@@ -74,6 +75,7 @@ class PhaseExecutor:
         simple_review: bool = False,
         commit_enabled: bool = True,
         push_enabled: bool = True,
+        language: str = "python",
     ):
         """Initialize phase executor.
 
@@ -98,6 +100,7 @@ class PhaseExecutor:
             simple_review: Use simple review mode.
             commit_enabled: Enable commit step.
             push_enabled: Enable push step.
+            language: Project language for language-aware verification.
         """
         self.project_dir = project_dir
         self.prd_path = prd_path
@@ -119,6 +122,7 @@ class PhaseExecutor:
         self.simple_review = simple_review
         self.commit_enabled = commit_enabled
         self.push_enabled = push_enabled
+        self.language = language
         self.git_coordinator = get_git_coordinator()
         self.lock_path = paths["state_dir"] / "run.lock"
         self.breakpoint_manager = BreakpointManager(paths["state_dir"])
@@ -300,16 +304,16 @@ class PhaseExecutor:
                     )
                 except Exception as e:
                     logger.error("[Task {}] Branch setup failed: {}", task_id, e)
-                    with FileLock(self.lock_path):
-                        queue = _load_data(self.paths["task_queue"], {})
-                        tasks = _normalize_tasks(queue)
-                        task_obj = _find_task(tasks, task_id)
+                    with state_transaction(
+                        self.lock_path,
+                        self.paths["task_queue"],
+                    ) as state:
+                        task_obj = state.find_task(task_id)
                         if task_obj:
                             task_obj["lifecycle"] = TaskLifecycle.WAITING_HUMAN.value
                             task_obj["block_reason"] = "GIT_CHECKOUT_FAILED"
                             task_obj["last_error"] = str(e)
                             task_obj["status"] = TASK_STATUS_BLOCKED
-                            _save_queue(self.paths["task_queue"], queue, tasks)
                     return False, f"Branch setup failed: {e}"
 
             # Execute the appropriate action based on step
@@ -425,6 +429,7 @@ class PhaseExecutor:
                         ensure_deps=self.ensure_deps,
                         ensure_deps_command=self.ensure_deps_command,
                         timeout_seconds=self.shift_minutes * 60,
+                        language=self.language,
                     )
 
                 elif step_enum == TaskStep.COMMIT:
@@ -572,16 +577,16 @@ class PhaseExecutor:
 
         # Safety limit reached
         logger.error("[Task {}] Maximum iterations ({}) reached", task_id, max_iterations)
-        with FileLock(self.lock_path):
-            queue = _load_data(self.paths["task_queue"], {})
-            tasks = _normalize_tasks(queue)
-            task_obj = _find_task(tasks, task_id)
+        with state_transaction(
+            self.lock_path,
+            self.paths["task_queue"],
+        ) as state:
+            task_obj = state.find_task(task_id)
             if task_obj:
                 task_obj["lifecycle"] = TaskLifecycle.WAITING_HUMAN.value
                 task_obj["block_reason"] = "MAX_ITERATIONS"
                 task_obj["last_error"] = f"Task execution exceeded {max_iterations} iterations"
                 task_obj["status"] = TASK_STATUS_BLOCKED
-                _save_queue(self.paths["task_queue"], queue, tasks)
         return False, "Maximum iterations reached"
 
 

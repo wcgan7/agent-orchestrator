@@ -223,6 +223,7 @@ def run_feature_prd(
     interactive: bool = False,
     parallel: bool = False,
     max_workers: int = 3,
+    language: str = "python",
 ) -> None:
     """Run the Feature PRD Runner coordination loop.
 
@@ -265,6 +266,7 @@ def run_feature_prd(
         interactive: Whether to enable step-by-step approval gates for human-in-the-loop control.
         parallel: Whether to enable parallel execution of independent phases.
         max_workers: Maximum number of parallel workers (only used if parallel=True).
+        language: Project language (python, typescript, javascript, go, rust) for language-aware verification.
     """
     _require_yaml()
     project_dir = project_dir.resolve()
@@ -924,6 +926,7 @@ def run_feature_prd(
                             simple_review=simple_review,
                             commit_enabled=commit_enabled,
                             push_enabled=push_enabled,
+                            language=language,
                         )
 
                         # Create executor function for parallel execution
@@ -1592,6 +1595,7 @@ def run_feature_prd(
                 ensure_deps=ensure_deps,
                 ensure_deps_command=ensure_deps_command,
                 timeout_seconds=shift_minutes * 60,
+                language=language,
             )
 
         elif step_enum == TaskStep.COMMIT:

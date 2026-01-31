@@ -120,6 +120,7 @@ MAX_ALLOWLIST_EXPANSION_ATTEMPTS = 10
 REVIEW_SEVERITIES = {"critical", "high", "medium", "low"}
 REVIEW_BLOCKING_SEVERITIES = {"critical", "high", "medium"}  # gate commit on these
 
+# Legacy ignored paths (kept for backwards compatibility)
 IGNORED_REVIEW_PATH_PREFIXES = [
     ".prd_runner/",
     "__pycache__/",
@@ -139,3 +140,73 @@ IGNORED_REVIEW_PATH_PREFIXES = [
     "*.pyc",
     "*.pyo",
 ]
+
+# Language-specific ignored paths for code review
+IGNORED_PATHS_BY_LANGUAGE: dict[str, list[str]] = {
+    "python": [
+        "__pycache__/",
+        ".pytest_cache/",
+        ".mypy_cache/",
+        ".ruff_cache/",
+        ".tox/",
+        ".venv/",
+        "venv/",
+        ".eggs/",
+        "htmlcov/",
+        "*.egg-info",
+        "*.egg-info/*",
+        ".coverage",
+        "*.pyc",
+        "*.pyo",
+    ],
+    "typescript": [
+        "node_modules/",
+        "dist/",
+        "build/",
+        ".next/",
+        "out/",
+        "coverage/",
+        ".jest_cache/",
+        ".turbo/",
+        "*.js.map",
+        "*.d.ts.map",
+        ".tsbuildinfo",
+        "*.tsbuildinfo",
+    ],
+    "javascript": [
+        "node_modules/",
+        "dist/",
+        "build/",
+        "coverage/",
+        ".jest_cache/",
+    ],
+    "go": [
+        "vendor/",
+        "bin/",
+        "*.exe",
+    ],
+    "rust": [
+        "target/",
+        "Cargo.lock",
+    ],
+    "common": [
+        ".prd_runner/",
+        ".git/",
+        ".DS_Store",
+        "*.log",
+    ],
+}
+
+
+def get_ignored_review_paths(language: str = "python") -> list[str]:
+    """Get ignored paths for code review, combining language-specific and common paths.
+
+    Args:
+        language: The project language (python, typescript, javascript, go, rust).
+
+    Returns:
+        List of path prefixes/patterns to ignore during review.
+    """
+    language_paths = IGNORED_PATHS_BY_LANGUAGE.get(language, [])
+    common_paths = IGNORED_PATHS_BY_LANGUAGE.get("common", [])
+    return list(set(language_paths + common_paths))
