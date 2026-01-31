@@ -109,9 +109,64 @@ Note: the `COMMIT` step runs `git commit` and `git push -u origin <branch>` by d
 
 ## Language Support
 
-The runner is language-agnostic: it coordinates Codex + git and runs whatever `--test-command` you provide, so it can be used on repos in any language.
+The runner supports multiple programming languages with optimized verification output parsing:
 
-`VERIFY` is currently optimized for Python/pytest output parsing. For non-pytest commands it uses a more generic log excerpt + path extraction approach, and allowlist expansion signals are conservative.
+| Language   | Test Framework  | Linter           | Formatter        | Type Checker |
+|------------|-----------------|------------------|------------------|--------------|
+| Python     | pytest          | ruff             | ruff             | mypy         |
+| TypeScript | jest, vitest    | eslint           | prettier         | tsc          |
+| JavaScript | jest, vitest    | eslint           | prettier         | -            |
+| Go         | go test         | golangci-lint    | gofmt            | -            |
+| Rust       | cargo test      | clippy           | cargo fmt        | -            |
+
+### Language Detection
+
+The runner auto-detects your project language from manifest files:
+- `package.json` with TypeScript dependency → TypeScript
+- `package.json` without TypeScript → JavaScript
+- `pyproject.toml`, `setup.py`, `requirements.txt` → Python
+- `go.mod` → Go
+- `Cargo.toml` → Rust
+
+Or specify explicitly:
+
+```bash
+feature-prd-runner run my-feature.md --language typescript
+```
+
+### TypeScript/JavaScript Quick Start
+
+```bash
+# Auto-detected from package.json
+feature-prd-runner run my-feature.md
+
+# Or explicitly
+feature-prd-runner run my-feature.md --language typescript --verify-profile typescript
+```
+
+Configure in `.prd_runner/config.yaml`:
+
+```yaml
+language: typescript
+verify_profile: typescript
+
+test_command: npm test
+lint_command: npx eslint .
+typecheck_command: npx tsc --noEmit
+format_command: npx prettier --check .
+
+ensure_deps: install
+```
+
+### Creating Example Projects
+
+Generate a starter project for any supported language:
+
+```bash
+feature-prd-runner example --output ./my-ts-project --language typescript
+feature-prd-runner example --output ./my-py-project --language python
+feature-prd-runner example --output ./my-go-project --language go
+```
 
 ## Status
 
@@ -218,7 +273,8 @@ Common options:
 - `--format-command "..."`: optional format-check command run during `VERIFY` (before lint/tests).
 - `--lint-command "..."`: optional lint command run during `VERIFY` (before tests).
 - `--typecheck-command "..."`: optional typecheck command run during `VERIFY` (before tests).
-- `--verify-profile {none,python}`: enables preset defaults for Python projects (auto-detects `ruff`/`pytest`/`mypy`).
+- `--language {auto,python,typescript,javascript,go,rust}`: project language for verification parsing (default: auto-detect).
+- `--verify-profile {none,python,typescript,javascript,go,rust}`: enables preset defaults for the language (auto-detects tools).
 - `--ensure-ruff {off,warn,install,add-config}`: helper behavior when using ruff-based commands (default: off).
 - `--ensure-deps {off,install}`: optional helper to run an install step before verification (default: off).
 - `--ensure-deps-command "..."`: install command used by `--ensure-deps install` (defaults to `python -m pip install -e ".[test]"` with fallback to `python -m pip install -e .`).

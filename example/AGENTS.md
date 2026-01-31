@@ -84,13 +84,16 @@ Human blockers **stop the runner**.
 
 ### Documentation, types, and linting standards (REQUIRED)
 
-When working in Python code, agents must keep the codebase self-documenting and compatible with auto-doc tooling
-(e.g., Sphinx).
+Documentation standards vary by project language. Follow the standards for this project's primary language.
+
+#### Python Projects
+
+Keep the codebase self-documenting and compatible with auto-doc tooling (e.g., Sphinx).
 
 **Docstrings**
 
 - Use **Google-style** docstrings (strict).
-- Every `.py` file must start with a **module-level docstring** describing the module’s purpose.
+- Every `.py` file must start with a **module-level docstring** describing the module's purpose.
 - Every **public** function and class must have a docstring that includes:
   - Summary (one-line)
   - Args (all parameters)
@@ -106,6 +109,76 @@ When working in Python code, agents must keep the codebase self-documenting and 
 
 - Prefer `ruff` for linting and docstring validation (pydocstyle `google` convention).
 - If a verify command is configured, keep `ruff check .` passing (and `mypy` strict if configured).
+
+#### TypeScript Projects
+
+**Documentation**
+
+- Use JSDoc comments for public APIs and exported functions.
+- Document parameters with `@param`, return values with `@returns`.
+- Export type definitions for public interfaces.
+
+**Type safety**
+
+- Enable `strict` mode in `tsconfig.json`.
+- Avoid `any` type; use explicit types or generics.
+- Use type guards for runtime type checking where needed.
+
+**Linting and formatting**
+
+- Use ESLint with `@typescript-eslint/recommended` rules.
+- Use Prettier for formatting (or ESLint with formatting rules).
+- Keep `tsc --noEmit` passing (no type errors).
+
+#### JavaScript Projects
+
+**Documentation**
+
+- Use JSDoc comments for public APIs.
+- Document parameters with `@param`, return values with `@returns`.
+
+**Linting and formatting**
+
+- Use ESLint with recommended rules.
+- Use Prettier for formatting.
+
+#### Go Projects
+
+**Documentation**
+
+- Follow godoc conventions.
+- Document all exported symbols with comments starting with the symbol name.
+- Keep comments concise and descriptive.
+
+**Linting and formatting**
+
+- Use `gofmt` for formatting (required).
+- Use `golangci-lint` for linting (recommended).
+- Fix all linter warnings before committing.
+
+#### Rust Projects
+
+**Documentation**
+
+- Use `///` doc comments for public items.
+- Use `//!` for module-level documentation.
+- Include examples in doc comments where helpful.
+
+**Linting and formatting**
+
+- Use `cargo fmt` for formatting.
+- Use `cargo clippy` for linting.
+- Fix all clippy warnings before committing.
+
+### Verification command reference
+
+| Language   | Test           | Lint              | Format              | Typecheck      |
+|------------|----------------|-------------------|---------------------|----------------|
+| Python     | pytest         | ruff check        | ruff format --check | mypy           |
+| TypeScript | jest / vitest  | eslint            | prettier --check    | tsc --noEmit   |
+| JavaScript | jest / vitest  | eslint            | prettier --check    | N/A            |
+| Go         | go test ./...  | golangci-lint run | gofmt -l            | N/A (compiled) |
+| Rust       | cargo test     | cargo clippy      | cargo fmt --check   | N/A (compiled) |
 
 ### Repo modification policy by mode
 

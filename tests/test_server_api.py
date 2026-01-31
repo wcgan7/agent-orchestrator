@@ -136,7 +136,7 @@ def test_start_run_quick_prompt_mode(client: TestClient, test_project: Path):
         return True, None
 
     with patch("subprocess.Popen") as mock_popen, patch(
-        "feature_prd_runner.server.api.execute_custom_prompt",
+        "feature_prd_runner.custom_execution.execute_custom_prompt",
         side_effect=mock_execute_custom_prompt
     ):
         mock_process = MagicMock()
@@ -213,7 +213,7 @@ def test_start_run_empty_content(client: TestClient):
 def test_start_run_prd_generation_failure(client: TestClient):
     """Test handling of PRD generation failures."""
     with patch(
-        "feature_prd_runner.server.api.execute_custom_prompt",
+        "feature_prd_runner.custom_execution.execute_custom_prompt",
         return_value=(False, "Codex worker failed")
     ):
         response = client.post(
