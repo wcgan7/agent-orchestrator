@@ -131,7 +131,8 @@ def test_start_run_quick_prompt_mode(client: TestClient, test_project: Path):
 
     def mock_execute_custom_prompt(user_prompt, project_dir, **kwargs):
         # Simulate successful PRD generation by creating the file
-        prd_path = project_dir / "generated_prd.md"
+        prd_path = project_dir / ".prd_runner" / "temp_generated_prd.md"
+        prd_path.parent.mkdir(parents=True, exist_ok=True)
         prd_path.write_text(generated_prd_content)
         return True, None
 
