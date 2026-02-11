@@ -41,6 +41,24 @@ export default function TaskLauncher({ projectDir, onRunStarted }: TaskLauncherP
   const [overrideAgents, setOverrideAgents] = useState(false)
   const [contextFiles, setContextFiles] = useState('')
 
+  // Advanced options (Batch 6)
+  const [showAdvanced, setShowAdvanced] = useState(false)
+  const [language, setLanguage] = useState('')
+  const [resetState, setResetState] = useState(false)
+  const [requireClean, setRequireClean] = useState(true)
+  const [commitEnabled, setCommitEnabled] = useState(true)
+  const [pushEnabled, setPushEnabled] = useState(true)
+  const [parallel, setParallel] = useState(false)
+  const [maxWorkers, setMaxWorkers] = useState(3)
+  const [ensureRuff, setEnsureRuff] = useState('off')
+  const [ensureDeps, setEnsureDeps] = useState('off')
+  const [ensureDepsCommand, setEnsureDepsCommand] = useState('')
+  const [shiftMinutes, setShiftMinutes] = useState(45)
+  const [maxTaskAttempts, setMaxTaskAttempts] = useState(5)
+  const [maxReviewAttempts, setMaxReviewAttempts] = useState(10)
+  const [worker, setWorker] = useState('')
+  const [codexCommand, setCodexCommand] = useState('')
+
   const [isSubmitting, setIsSubmitting] = useState(false)
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -101,6 +119,22 @@ export default function TaskLauncher({ projectDir, onRunStarted }: TaskLauncherP
             auto_approve_plans: autoApprovePlans,
             auto_approve_changes: autoApproveChanges,
             auto_approve_commits: autoApproveCommits,
+            // Advanced options
+            language: language || null,
+            reset_state: resetState,
+            require_clean: requireClean,
+            commit_enabled: commitEnabled,
+            push_enabled: pushEnabled,
+            parallel,
+            max_workers: maxWorkers,
+            ensure_ruff: ensureRuff,
+            ensure_deps: ensureDeps,
+            ensure_deps_command: ensureDepsCommand || null,
+            shift_minutes: shiftMinutes,
+            max_task_attempts: maxTaskAttempts,
+            max_review_attempts: maxReviewAttempts,
+            worker: worker || null,
+            codex_command: codexCommand || null,
           }),
         })
 
@@ -332,6 +366,136 @@ export default function TaskLauncher({ projectDir, onRunStarted }: TaskLauncherP
                 </label>
               </div>
             </div>
+          </div>
+        )}
+
+        {/* Advanced Options (Batch 6) */}
+        {mode !== 'quick_task' && (
+          <div className="form-section config-section">
+            <button
+              type="button"
+              className="section-title"
+              style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, display: 'flex', alignItems: 'center', gap: '0.5rem', width: '100%', textAlign: 'left' }}
+              onClick={() => setShowAdvanced(!showAdvanced)}
+            >
+              <span style={{ transform: showAdvanced ? 'rotate(90deg)' : 'none', display: 'inline-block', transition: 'transform 0.2s' }}>{'\u25B6'}</span>
+              <h3 className="section-title" style={{ margin: 0 }}>Advanced Options</h3>
+            </button>
+
+            {showAdvanced && (
+              <>
+                {/* Language */}
+                <div className="form-field" style={{ marginTop: '0.75rem' }}>
+                  <label className="form-label" htmlFor="language">Language Profile</label>
+                  <select id="language" className="form-select" value={language} onChange={(e) => setLanguage(e.target.value)} disabled={isSubmitting}>
+                    <option value="">Auto-detect</option>
+                    <option value="python">Python</option>
+                    <option value="javascript">JavaScript</option>
+                    <option value="typescript">TypeScript</option>
+                    <option value="nextjs">Next.js</option>
+                    <option value="go">Go</option>
+                    <option value="rust">Rust</option>
+                    <option value="java">Java</option>
+                  </select>
+                </div>
+
+                {/* Execution */}
+                <div className="form-field">
+                  <label className="form-label">Execution</label>
+                  <div className="checkbox-group">
+                    <label className="checkbox-label">
+                      <input type="checkbox" checked={parallel} onChange={(e) => setParallel(e.target.checked)} disabled={isSubmitting} />
+                      <span>Parallel execution</span>
+                    </label>
+                    <label className="checkbox-label">
+                      <input type="checkbox" checked={resetState} onChange={(e) => setResetState(e.target.checked)} disabled={isSubmitting} />
+                      <span>Reset state (fresh start)</span>
+                    </label>
+                  </div>
+                </div>
+
+                {parallel && (
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="maxWorkers">Max Workers</label>
+                    <input id="maxWorkers" type="number" className="form-input" value={maxWorkers} onChange={(e) => setMaxWorkers(Number(e.target.value))} min={1} max={10} disabled={isSubmitting} />
+                  </div>
+                )}
+
+                {/* Git */}
+                <div className="form-field">
+                  <label className="form-label">Git</label>
+                  <div className="checkbox-group">
+                    <label className="checkbox-label">
+                      <input type="checkbox" checked={requireClean} onChange={(e) => setRequireClean(e.target.checked)} disabled={isSubmitting} />
+                      <span>Require clean working tree</span>
+                    </label>
+                    <label className="checkbox-label">
+                      <input type="checkbox" checked={commitEnabled} onChange={(e) => setCommitEnabled(e.target.checked)} disabled={isSubmitting} />
+                      <span>Auto-commit changes</span>
+                    </label>
+                    <label className="checkbox-label">
+                      <input type="checkbox" checked={pushEnabled} onChange={(e) => setPushEnabled(e.target.checked)} disabled={isSubmitting} />
+                      <span>Auto-push to remote</span>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Limits */}
+                <div className="form-row">
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="shiftMinutes">Timeout (min)</label>
+                    <input id="shiftMinutes" type="number" className="form-input" value={shiftMinutes} onChange={(e) => setShiftMinutes(Number(e.target.value))} min={5} disabled={isSubmitting} />
+                  </div>
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="maxTaskAttempts">Max Task Attempts</label>
+                    <input id="maxTaskAttempts" type="number" className="form-input" value={maxTaskAttempts} onChange={(e) => setMaxTaskAttempts(Number(e.target.value))} min={1} disabled={isSubmitting} />
+                  </div>
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="maxReviewAttempts">Max Review Attempts</label>
+                    <input id="maxReviewAttempts" type="number" className="form-input" value={maxReviewAttempts} onChange={(e) => setMaxReviewAttempts(Number(e.target.value))} min={1} disabled={isSubmitting} />
+                  </div>
+                </div>
+
+                {/* Quality */}
+                <div className="form-row">
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="ensureRuff">Ruff Linting</label>
+                    <select id="ensureRuff" className="form-select" value={ensureRuff} onChange={(e) => setEnsureRuff(e.target.value)} disabled={isSubmitting}>
+                      <option value="off">Off</option>
+                      <option value="check">Check</option>
+                      <option value="fix">Fix</option>
+                    </select>
+                  </div>
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="ensureDeps">Dependency Check</label>
+                    <select id="ensureDeps" className="form-select" value={ensureDeps} onChange={(e) => setEnsureDeps(e.target.value)} disabled={isSubmitting}>
+                      <option value="off">Off</option>
+                      <option value="check">Check</option>
+                      <option value="install">Install</option>
+                    </select>
+                  </div>
+                </div>
+
+                {ensureDeps !== 'off' && (
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="ensureDepsCommand">Deps Command</label>
+                    <input id="ensureDepsCommand" type="text" className="form-input" value={ensureDepsCommand} onChange={(e) => setEnsureDepsCommand(e.target.value)} placeholder="e.g., pip install -r requirements.txt" disabled={isSubmitting} />
+                  </div>
+                )}
+
+                {/* Worker */}
+                <div className="form-row">
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="worker">Worker Provider</label>
+                    <input id="worker" type="text" className="form-input" value={worker} onChange={(e) => setWorker(e.target.value)} placeholder="Default" disabled={isSubmitting} />
+                  </div>
+                  <div className="form-field">
+                    <label className="form-label" htmlFor="codexCommand">Codex Command</label>
+                    <input id="codexCommand" type="text" className="form-input" value={codexCommand} onChange={(e) => setCodexCommand(e.target.value)} placeholder="Auto-detect" disabled={isSubmitting} />
+                  </div>
+                </div>
+              </>
+            )}
           </div>
         )}
 

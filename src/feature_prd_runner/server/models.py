@@ -265,6 +265,23 @@ class StartRunRequest(BaseModel):
     auto_approve_plans: bool = False
     auto_approve_changes: bool = False
     auto_approve_commits: bool = False
+    # Advanced run options (Batch 6)
+    language: Optional[str] = None
+    reset_state: bool = False
+    require_clean: bool = True
+    commit_enabled: bool = True
+    push_enabled: bool = True
+    interactive: bool = False
+    parallel: bool = False
+    max_workers: int = 3
+    ensure_ruff: str = "off"
+    ensure_deps: str = "off"
+    ensure_deps_command: Optional[str] = None
+    shift_minutes: int = 45
+    max_task_attempts: int = 5
+    max_review_attempts: int = 10
+    worker: Optional[str] = None
+    codex_command: Optional[str] = None
 
 
 class StartRunResponse(BaseModel):
@@ -293,3 +310,115 @@ class ExecTaskResponse(BaseModel):
     message: str
     run_id: Optional[str] = None
     error: Optional[str] = None
+
+
+# --- Batch 1: Explain + Inspect ---
+
+
+class ExplainResponse(BaseModel):
+    """Explanation of why a task is blocked."""
+
+    task_id: str
+    explanation: str
+    is_blocked: bool
+
+
+class InspectResponse(BaseModel):
+    """Detailed task state inspection."""
+
+    task_id: str
+    lifecycle: str
+    step: str
+    status: str
+    worker_attempts: int
+    last_error: Optional[str] = None
+    last_error_type: Optional[str] = None
+    context: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+# --- Batch 2: Dry-Run + Doctor ---
+
+
+class DryRunResponse(BaseModel):
+    """Dry-run preview of next action."""
+
+    project_dir: str
+    state_dir: str
+    would_write_repo_files: bool = False
+    would_spawn_codex: bool = False
+    would_run_tests: bool = False
+    would_checkout_branch: bool = False
+    next: Optional[dict[str, Any]] = None
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+
+
+class DoctorResponse(BaseModel):
+    """Doctor diagnostics result."""
+
+    checks: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    errors: list[str] = Field(default_factory=list)
+    exit_code: int = 0
+
+
+# --- Batch 3: Workers ---
+
+
+class WorkerInfo(BaseModel):
+    """Worker provider information."""
+
+    name: str
+    type: str
+    detail: str = ""
+    model: Optional[str] = None
+    endpoint: Optional[str] = None
+    command: Optional[str] = None
+
+
+class WorkersListResponse(BaseModel):
+    """Workers list response."""
+
+    default_worker: str
+    routing: dict[str, str] = Field(default_factory=dict)
+    providers: list[WorkerInfo] = Field(default_factory=list)
+    config_error: Optional[str] = None
+
+
+class WorkerTestResponse(BaseModel):
+    """Worker test result."""
+
+    worker: str
+    success: bool
+    message: str
+
+
+# --- Batch 4: Correct + Require ---
+
+
+class CorrectionRequest(BaseModel):
+    """Structured correction to send to a running worker."""
+
+    issue: str
+    file_path: Optional[str] = None
+    suggested_fix: Optional[str] = None
+
+
+class RequirementRequest(BaseModel):
+    """Structured requirement to inject into a running worker."""
+
+    requirement: str
+    task_id: Optional[str] = None
+    priority: str = "medium"
+
+
+# --- Batch 5: Logs by Task ---
+
+
+class TaskLogsResponse(BaseModel):
+    """Logs for a specific task."""
+
+    task_id: str
+    run_id: Optional[str] = None
+    logs: dict[str, list[str]] = Field(default_factory=dict)

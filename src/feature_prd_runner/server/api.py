@@ -27,15 +27,21 @@ from .models import (
     ChatMessage,
     ControlAction,
     ControlResponse,
+    CorrectionRequest,
+    DoctorResponse,
+    DryRunResponse,
     ExecTaskRequest,
     ExecTaskResponse,
+    ExplainResponse,
     FileChange,
     FileReviewRequest,
+    InspectResponse,
     LoginRequest,
     LoginResponse,
     PhaseInfo,
     ProjectInfo,
     ProjectStatus,
+    RequirementRequest,
     RunDetail,
     RunInfo,
     RunMetrics,
@@ -43,6 +49,10 @@ from .models import (
     StartRunRequest,
     StartRunResponse,
     TaskInfo,
+    TaskLogsResponse,
+    WorkerInfo,
+    WorkerTestResponse,
+    WorkersListResponse,
 )
 from .websocket import manager, watch_logs, watch_run_progress
 
@@ -1561,13 +1571,39 @@ Write the generated PRD to the file: {generated_prd_path}"""
             if request.verification_profile:
                 cmd_args.extend(["--verification-profile", request.verification_profile])
 
-            # Add auto-approve flags (they're False by default in CLI, so we only set them if True)
-            # Note: The CLI doesn't have these exact flags, so we'll need to use interactive mode
-            # and rely on the approval gates being configured
-            if not (request.auto_approve_plans and request.auto_approve_changes and request.auto_approve_commits):
-                # If not all auto-approve, we might want interactive mode
-                # But for now, let's just run without interactive mode
-                pass
+            # Advanced run options (Batch 6)
+            if request.language:
+                cmd_args.extend(["--language", request.language])
+            if request.reset_state:
+                cmd_args.append("--reset-state")
+            if not request.require_clean:
+                cmd_args.append("--no-require-clean")
+            if not request.commit_enabled:
+                cmd_args.append("--no-commit")
+            if not request.push_enabled:
+                cmd_args.append("--no-push")
+            if request.interactive:
+                cmd_args.append("--interactive")
+            if request.parallel:
+                cmd_args.append("--parallel")
+            if request.max_workers != 3:
+                cmd_args.extend(["--max-workers", str(request.max_workers)])
+            if request.ensure_ruff != "off":
+                cmd_args.extend(["--ensure-ruff", request.ensure_ruff])
+            if request.ensure_deps != "off":
+                cmd_args.extend(["--ensure-deps", request.ensure_deps])
+            if request.ensure_deps_command:
+                cmd_args.extend(["--ensure-deps-command", request.ensure_deps_command])
+            if request.shift_minutes != 45:
+                cmd_args.extend(["--shift-minutes", str(request.shift_minutes)])
+            if request.max_task_attempts != 5:
+                cmd_args.extend(["--max-task-attempts", str(request.max_task_attempts)])
+            if request.max_review_attempts != 10:
+                cmd_args.extend(["--max-review-attempts", str(request.max_review_attempts)])
+            if request.worker:
+                cmd_args.extend(["--worker", request.worker])
+            if request.codex_command:
+                cmd_args.extend(["--codex-command", request.codex_command])
 
             logger.info("Starting run with command: {}", " ".join(cmd_args))
 
@@ -1712,6 +1748,559 @@ Write the generated PRD to the file: {generated_prd_path}"""
             logger.info("Client disconnected from log stream for run {}", run_id)
         except Exception as e:
             logger.error("WebSocket error for logs {}: {}", run_id, e)
+
+    # ------------------------------------------------------------------
+    # Batch 1: Explain + Inspect
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tasks/{task_id}/explain")
+    async def explain_task(
+        task_id: str,
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+    ) -> ExplainResponse:
+        """Explain why a task is blocked or errored."""
+        from ..debug import ErrorAnalyzer
+
+        proj_dir = _get_project_dir(project_dir)
+        paths = _get_paths(proj_dir)
+        if not paths["state_dir"].exists():
+            raise HTTPException(status_code=404, detail="No .prd_runner state found")
+
+        analyzer = ErrorAnalyzer(proj_dir)
+        explanation = analyzer.explain_blocking(task_id)
+        is_blocked = "blocked" in explanation.lower() or "waiting_human" in explanation.lower()
+
+        return ExplainResponse(
+            task_id=task_id,
+            explanation=explanation,
+            is_blocked=is_blocked,
+        )
+
+    @app.get("/api/tasks/{task_id}/inspect")
+    async def inspect_task(
+        task_id: str,
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+    ) -> InspectResponse:
+        """Inspect full task state."""
+        from ..debug import ErrorAnalyzer
+
+        proj_dir = _get_project_dir(project_dir)
+        paths = _get_paths(proj_dir)
+        if not paths["state_dir"].exists():
+            raise HTTPException(status_code=404, detail="No .prd_runner state found")
+
+        analyzer = ErrorAnalyzer(proj_dir)
+        snapshot = analyzer.inspect_state(task_id)
+        if not snapshot:
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+        return InspectResponse(
+            task_id=snapshot.task_id,
+            lifecycle=snapshot.lifecycle,
+            step=snapshot.step,
+            status=snapshot.status,
+            worker_attempts=snapshot.worker_attempts,
+            last_error=snapshot.last_error,
+            last_error_type=snapshot.last_error_type,
+            context=snapshot.context,
+            metadata=snapshot.metadata,
+        )
+
+    @app.get("/api/tasks/{task_id}/trace")
+    async def trace_task(
+        task_id: str,
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+        limit: int = Query(50, ge=1, le=1000, description="Max events"),
+    ) -> list[dict[str, Any]]:
+        """Get event history for a task (trace)."""
+        from ..debug import ErrorAnalyzer
+
+        proj_dir = _get_project_dir(project_dir)
+        paths = _get_paths(proj_dir)
+        if not paths["state_dir"].exists():
+            return []
+
+        analyzer = ErrorAnalyzer(proj_dir)
+        events = analyzer.trace_history(task_id)
+        if limit > 0:
+            events = events[-limit:]
+        return events
+
+    # ------------------------------------------------------------------
+    # Batch 2: Dry-Run + Doctor
+    # ------------------------------------------------------------------
+
+    @app.get("/api/dry-run")
+    async def dry_run(
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+        prd_file: Optional[str] = Query(None, description="PRD file path"),
+    ) -> DryRunResponse:
+        """Preview what the next run action would do without writing anything."""
+        proj_dir = _get_project_dir(project_dir)
+        paths = _get_paths(proj_dir)
+
+        warnings: list[str] = []
+        errors: list[str] = []
+        next_action: dict[str, Any] | None = None
+        would_spawn_codex = False
+        would_run_tests = False
+        would_checkout_branch = False
+
+        if not paths["state_dir"].exists():
+            return DryRunResponse(
+                project_dir=str(proj_dir),
+                state_dir=str(paths["state_dir"]),
+                next={"action": "init", "description": "Initialize .prd_runner state directory"},
+                warnings=["No state directory found — a fresh run would initialize it."],
+            )
+
+        # Load state files
+        run_state = _load_data(paths["run_state"], {})
+        queue = _load_data(paths["task_queue"], {})
+        plan = _load_data(paths["phase_plan"], {})
+        tasks = _normalize_tasks(queue)
+        phases = _normalize_phases(plan)
+
+        if not phases:
+            warnings.append("No phases found in phase_plan.yaml")
+        if not tasks:
+            warnings.append("No tasks found in task_queue.yaml")
+
+        # Check for active run
+        if run_state.get("status") == "running":
+            warnings.append(f"An active run exists: {run_state.get('run_id', 'unknown')}")
+
+        # Validate PRD if specified
+        if prd_file:
+            prd_path = Path(prd_file)
+            if not prd_path.exists():
+                errors.append(f"PRD file not found: {prd_file}")
+
+        # Find next task
+        ready_tasks = [t for t in tasks if t.get("lifecycle") == "ready"]
+        if ready_tasks:
+            task = ready_tasks[0]
+            step = task.get("step", "plan_impl")
+            would_spawn_codex = step in ("plan_impl", "implement", "review")
+            would_run_tests = step == "verify"
+            would_checkout_branch = bool(task.get("phase_id")) and task.get("type") != "plan"
+
+            next_action = {
+                "action": "process_task",
+                "task_id": task.get("id"),
+                "task_type": task.get("type"),
+                "step": step,
+                "phase_id": task.get("phase_id"),
+            }
+        elif all(t.get("lifecycle") == "done" for t in tasks) and tasks:
+            next_action = {"action": "complete", "description": "All tasks done"}
+        else:
+            blocked = [t for t in tasks if t.get("lifecycle") == "waiting_human"]
+            if blocked:
+                warnings.append(f"{len(blocked)} task(s) waiting for human intervention")
+
+        return DryRunResponse(
+            project_dir=str(proj_dir),
+            state_dir=str(paths["state_dir"]),
+            would_write_repo_files=would_spawn_codex,
+            would_spawn_codex=would_spawn_codex,
+            would_run_tests=would_run_tests,
+            would_checkout_branch=would_checkout_branch,
+            next=next_action,
+            warnings=warnings,
+            errors=errors,
+        )
+
+    @app.get("/api/doctor")
+    async def doctor(
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+        check_codex: bool = Query(False, description="Check codex availability"),
+    ) -> DoctorResponse:
+        """Run diagnostic checks on the project state."""
+        import subprocess
+
+        proj_dir = _get_project_dir(project_dir)
+        paths = _get_paths(proj_dir)
+
+        checks: dict[str, Any] = {}
+        warnings: list[str] = []
+        errors: list[str] = []
+
+        # Check state directory
+        if paths["state_dir"].exists():
+            checks["state_dir"] = {"status": "pass", "path": str(paths["state_dir"])}
+        else:
+            checks["state_dir"] = {"status": "fail", "path": str(paths["state_dir"])}
+            errors.append("No .prd_runner state directory found")
+
+        # Check git status
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--git-dir"],
+                cwd=proj_dir,
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                checks["git"] = {"status": "pass"}
+                # Check for uncommitted changes
+                status_result = subprocess.run(
+                    ["git", "status", "--porcelain"],
+                    cwd=proj_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if status_result.stdout.strip():
+                    warnings.append("Uncommitted changes detected in working tree")
+            else:
+                checks["git"] = {"status": "fail"}
+                warnings.append("Not a git repository")
+        except Exception:
+            checks["git"] = {"status": "fail"}
+            warnings.append("Unable to check git status")
+
+        # Check state files
+        for name, path in [
+            ("run_state", paths["run_state"]),
+            ("task_queue", paths["task_queue"]),
+            ("phase_plan", paths["phase_plan"]),
+        ]:
+            if path.exists():
+                data = _load_data(path, None)
+                if data is not None:
+                    checks[name] = {"status": "pass"}
+                else:
+                    checks[name] = {"status": "fail"}
+                    errors.append(f"Failed to parse {name}: {path.name}")
+            else:
+                checks[name] = {"status": "skip", "reason": "File not found"}
+
+        # Check codex availability
+        if check_codex:
+            codex_cmd = _find_codex_command()
+            if codex_cmd:
+                checks["codex"] = {"status": "pass", "command": codex_cmd}
+            else:
+                checks["codex"] = {"status": "fail"}
+                errors.append("Codex command not found in PATH")
+
+        exit_code = 1 if errors else 0
+        return DoctorResponse(
+            checks=checks,
+            warnings=warnings,
+            errors=errors,
+            exit_code=exit_code,
+        )
+
+    # ------------------------------------------------------------------
+    # Batch 3: Workers Management
+    # ------------------------------------------------------------------
+
+    @app.get("/api/workers")
+    async def list_workers(
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+    ) -> WorkersListResponse:
+        """List configured worker providers."""
+        from ..config import load_runner_config
+        from ..workers import get_workers_runtime_config
+
+        proj_dir = _get_project_dir(project_dir)
+        config, config_err = load_runner_config(proj_dir)
+
+        if config_err:
+            return WorkersListResponse(
+                default_worker="codex",
+                config_error=config_err,
+            )
+
+        try:
+            codex_cmd = _find_codex_command() or "codex exec -"
+            runtime = get_workers_runtime_config(config=config, codex_command_fallback=codex_cmd, cli_worker=None)
+
+            providers = []
+            for name, spec in runtime.providers.items():
+                providers.append(WorkerInfo(
+                    name=name,
+                    type=spec.type,
+                    detail=spec.command or spec.endpoint or "",
+                    model=spec.model,
+                    endpoint=spec.endpoint,
+                    command=spec.command,
+                ))
+
+            return WorkersListResponse(
+                default_worker=runtime.default_worker,
+                routing=dict(runtime.routing),
+                providers=providers,
+            )
+        except Exception as e:
+            logger.error("Failed to load workers config: {}", e)
+            return WorkersListResponse(
+                default_worker="codex",
+                config_error=str(e),
+            )
+
+    @app.post("/api/workers/{worker_name}/test")
+    async def test_worker(
+        worker_name: str,
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+    ) -> WorkerTestResponse:
+        """Test a worker provider."""
+        from ..config import load_runner_config
+        from ..workers import get_workers_runtime_config
+
+        proj_dir = _get_project_dir(project_dir)
+        config, config_err = load_runner_config(proj_dir)
+        if config_err:
+            return WorkerTestResponse(worker=worker_name, success=False, message=config_err)
+
+        try:
+            codex_cmd = _find_codex_command() or "codex exec -"
+            runtime = get_workers_runtime_config(config=config, codex_command_fallback=codex_cmd, cli_worker=None)
+
+            if worker_name not in runtime.providers:
+                return WorkerTestResponse(
+                    worker=worker_name,
+                    success=False,
+                    message=f"Provider '{worker_name}' not found",
+                )
+
+            spec = runtime.providers[worker_name]
+            if spec.type == "codex":
+                import shutil
+                cmd = (spec.command or "").split()[0] if spec.command else "codex"
+                found = shutil.which(cmd)
+                if found:
+                    return WorkerTestResponse(worker=worker_name, success=True, message=f"Found: {found}")
+                return WorkerTestResponse(worker=worker_name, success=False, message=f"Command not found: {cmd}")
+            elif spec.type == "ollama":
+                return WorkerTestResponse(
+                    worker=worker_name,
+                    success=bool(spec.endpoint and spec.model),
+                    message=f"Endpoint: {spec.endpoint}, Model: {spec.model}" if spec.endpoint else "Missing endpoint or model",
+                )
+            else:
+                return WorkerTestResponse(worker=worker_name, success=False, message=f"Unknown type: {spec.type}")
+
+        except Exception as e:
+            return WorkerTestResponse(worker=worker_name, success=False, message=str(e))
+
+    # ------------------------------------------------------------------
+    # Batch 4: Structured Correct + Require
+    # ------------------------------------------------------------------
+
+    @app.post("/api/tasks/{task_id}/correct")
+    async def correct_task(
+        task_id: str,
+        request: CorrectionRequest,
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+    ) -> ControlResponse:
+        """Send a structured correction to the running worker."""
+        import time
+
+        from ..messaging import Message, MessageBus
+
+        proj_dir = _get_project_dir(project_dir)
+        paths = _get_paths(proj_dir)
+
+        run_state = _load_data(paths["run_state"], {})
+        run_id = run_state.get("run_id")
+        if not run_id:
+            return ControlResponse(success=False, message="No active run found", data={})
+
+        # Find progress.json
+        progress_path = None
+        for run_dir in paths["runs"].glob(f"{run_id}*"):
+            candidate = run_dir / "progress.json"
+            if candidate.exists():
+                progress_path = candidate
+                break
+
+        if not progress_path:
+            return ControlResponse(success=False, message=f"No progress.json for run {run_id}", data={})
+
+        metadata: dict[str, Any] = {"task_id": task_id, "issue": request.issue}
+        if request.file_path:
+            metadata["file"] = request.file_path
+        if request.suggested_fix:
+            metadata["suggested_fix"] = request.suggested_fix
+
+        msg = Message(
+            id=f"correction-{int(time.time() * 1000)}",
+            type="correction",
+            content=request.issue,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            metadata=metadata,
+        )
+
+        MessageBus(progress_path).send_to_worker(msg)
+
+        return ControlResponse(
+            success=True,
+            message="Correction sent to worker",
+            data={"message_id": msg.id, "task_id": task_id},
+        )
+
+    @app.post("/api/requirements")
+    async def add_requirement(
+        request: RequirementRequest,
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+    ) -> ControlResponse:
+        """Inject a structured requirement into the running worker."""
+        import time
+
+        from ..messaging import Message, MessageBus
+
+        proj_dir = _get_project_dir(project_dir)
+        paths = _get_paths(proj_dir)
+
+        run_state = _load_data(paths["run_state"], {})
+        run_id = run_state.get("run_id")
+        if not run_id:
+            return ControlResponse(success=False, message="No active run found", data={})
+
+        progress_path = None
+        for run_dir in paths["runs"].glob(f"{run_id}*"):
+            candidate = run_dir / "progress.json"
+            if candidate.exists():
+                progress_path = candidate
+                break
+
+        if not progress_path:
+            return ControlResponse(success=False, message=f"No progress.json for run {run_id}", data={})
+
+        metadata: dict[str, Any] = {"priority": request.priority}
+        if request.task_id:
+            metadata["task_id"] = request.task_id
+
+        msg = Message(
+            id=f"requirement-{int(time.time() * 1000)}",
+            type="requirement",
+            content=request.requirement,
+            timestamp=datetime.now(timezone.utc).isoformat(),
+            metadata=metadata,
+        )
+
+        MessageBus(progress_path).send_to_worker(msg)
+
+        return ControlResponse(
+            success=True,
+            message="Requirement sent to worker",
+            data={"message_id": msg.id, "priority": request.priority},
+        )
+
+    # ------------------------------------------------------------------
+    # Batch 5: Logs by Task + Metrics Export
+    # ------------------------------------------------------------------
+
+    @app.get("/api/tasks/{task_id}/logs")
+    async def get_task_logs(
+        task_id: str,
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+        step: Optional[str] = Query(None, description="Filter by step"),
+        lines: int = Query(100, ge=1, le=10000, description="Max lines per file"),
+    ) -> TaskLogsResponse:
+        """Get logs for a specific task."""
+        proj_dir = _get_project_dir(project_dir)
+        paths = _get_paths(proj_dir)
+
+        if not paths["runs"].exists():
+            return TaskLogsResponse(task_id=task_id)
+
+        # Search for matching run by task_id in progress.json
+        matching_run_dir = None
+        matching_run_id = None
+        for run_dir in sorted(paths["runs"].iterdir(), key=lambda d: d.name, reverse=True):
+            if not run_dir.is_dir():
+                continue
+            progress_file = run_dir / "progress.json"
+            if progress_file.exists():
+                progress = _load_data(progress_file, {})
+                if progress.get("task_id") == task_id:
+                    matching_run_dir = run_dir
+                    matching_run_id = progress.get("run_id", run_dir.name)
+                    break
+
+        if not matching_run_dir:
+            # Fall back: check current run_state
+            run_state = _load_data(paths["run_state"], {})
+            run_id = run_state.get("run_id")
+            if run_id:
+                for run_dir in paths["runs"].glob(f"{run_id}*"):
+                    if run_dir.is_dir():
+                        matching_run_dir = run_dir
+                        matching_run_id = run_id
+                        break
+
+        if not matching_run_dir:
+            return TaskLogsResponse(task_id=task_id)
+
+        logs: dict[str, list[str]] = {}
+
+        # Determine which files to read based on step
+        if step == "verify":
+            log_patterns = ["verify_output*.txt", "pytest_failures*.txt"]
+        elif step:
+            log_patterns = [f"*{step}*.log", f"*{step}*.txt"]
+        else:
+            log_patterns = ["*.log", "*.txt"]
+
+        for pattern in log_patterns:
+            for log_file in matching_run_dir.glob(pattern):
+                try:
+                    file_lines = log_file.read_text().splitlines()
+                    logs[log_file.name] = file_lines[-lines:]
+                except Exception:
+                    logs[log_file.name] = ["[Error reading file]"]
+
+        return TaskLogsResponse(
+            task_id=task_id,
+            run_id=matching_run_id,
+            logs=logs,
+        )
+
+    @app.get("/api/metrics/export")
+    async def export_metrics(
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+        format: str = Query("csv", description="Export format: csv or html"),
+    ):
+        """Export metrics as CSV or HTML."""
+        from fastapi.responses import StreamingResponse
+
+        from .metrics import calculate_metrics
+
+        proj_dir = _get_project_dir(project_dir)
+        metrics = calculate_metrics(proj_dir)
+        data = metrics.to_dict()
+
+        if format == "html":
+            rows = "".join(
+                f"<tr><td>{k}</td><td>{v}</td></tr>" for k, v in data.items()
+            )
+            html = f"<html><body><table border='1'><tr><th>Metric</th><th>Value</th></tr>{rows}</table></body></html>"
+            return StreamingResponse(
+                iter([html]),
+                media_type="text/html",
+                headers={"Content-Disposition": "attachment; filename=metrics.html"},
+            )
+        else:
+            header = ",".join(data.keys())
+            values = ",".join(str(v) for v in data.values())
+            csv_content = f"{header}\n{values}\n"
+            return StreamingResponse(
+                iter([csv_content]),
+                media_type="text/csv",
+                headers={"Content-Disposition": "attachment; filename=metrics.csv"},
+            )
+
+    # ------------------------------------------------------------------
+    # Batch 6: Advanced Run Options (extend StartRunRequest mapping)
+    # ------------------------------------------------------------------
+    # Note: StartRunRequest model extended in models.py;
+    # the start_run endpoint above already handles the base fields.
+    # Additional fields are mapped in _build_advanced_cmd_args below.
 
     def _calculate_phase_progress(phase: dict[str, Any]) -> float:
         """Calculate progress for a phase (0.0 to 1.0)."""

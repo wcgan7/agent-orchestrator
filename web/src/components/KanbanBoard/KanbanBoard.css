@@ -785,3 +785,15 @@
   gap: 0.5rem;
   padding-top: 0.5rem;
 }
+
+/* Explain button on task cards */
+.task-card-explain-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 0;
+  color: #991b1b;
+  text-decoration: underline;
+  white-space: nowrap;
+}

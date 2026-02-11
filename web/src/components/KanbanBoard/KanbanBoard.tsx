@@ -255,6 +255,7 @@ export default function KanbanBoard({ projectDir }: Props) {
                   <TaskCard
                     key={task.id}
                     task={task}
+                    projectDir={projectDir}
                     onClick={() => setSelectedTask(task)}
                     onDragStart={() => handleDragStart(task.id)}
                   />

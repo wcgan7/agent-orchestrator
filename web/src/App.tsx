@@ -17,6 +17,11 @@ import RunsPanel from './components/RunsPanel'
 import CostBreakdown from './components/CostBreakdown'
 import BreakpointsPanel from './components/BreakpointsPanel'
 import TaskLauncher from './components/TaskLauncher'
+import DryRunPanel from './components/DryRunPanel'
+import DoctorPanel from './components/DoctorPanel'
+import WorkersPanel from './components/WorkersPanel'
+import ParallelPlanView from './components/ParallelPlanView'
+import RequirementForm from './components/RequirementForm'
 import LoadingSpinner from './components/LoadingSpinner'
 import SplitPane from './components/SplitPane/SplitPane'
 import KanbanBoard from './components/KanbanBoard/KanbanBoard'
@@ -401,6 +406,10 @@ function AppContent() {
             />
           </div>
           <AgentPanel projectDir={currentProject || undefined} />
+          <div style={{ padding: '0 1rem' }}>
+            <WorkersPanel projectDir={currentProject || undefined} />
+            <RequirementForm projectDir={currentProject || undefined} />
+          </div>
         </div>
       ) : status?.run_id ? (
         <SplitPane
@@ -428,6 +437,15 @@ function AppContent() {
                   onRunStarted={handleRunStarted}
                 />
               )}
+
+              <div className="grid">
+                <div className="col-2">
+                  <DryRunPanel projectDir={currentProject || undefined} />
+                </div>
+                <div className="col-2">
+                  <DoctorPanel projectDir={currentProject || undefined} />
+                </div>
+              </div>
 
               <ControlPanel
                 currentTaskId={status?.current_task_id}
@@ -457,6 +475,8 @@ function AppContent() {
               <CostBreakdown projectDir={currentProject || undefined} />
 
               <DependencyGraph projectDir={currentProject || undefined} />
+
+              <ParallelPlanView projectDir={currentProject || undefined} />
 
               <div className="grid">
                 <div className="col-2">
@@ -503,6 +523,15 @@ function AppContent() {
             />
           )}
 
+          <div className="grid">
+            <div className="col-2">
+              <DryRunPanel projectDir={currentProject || undefined} />
+            </div>
+            <div className="col-2">
+              <DoctorPanel projectDir={currentProject || undefined} />
+            </div>
+          </div>
+
           <ControlPanel
             currentTaskId={status?.current_task_id}
             currentPhaseId={status?.current_phase_id}
@@ -531,6 +560,8 @@ function AppContent() {
           <CostBreakdown projectDir={currentProject || undefined} />
 
           <DependencyGraph projectDir={currentProject || undefined} />
+
+          <ParallelPlanView projectDir={currentProject || undefined} />
 
           <div className="grid">
             <div className="col-2">
