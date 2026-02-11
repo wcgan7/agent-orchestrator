@@ -1,23 +1,37 @@
-# Documentation Map
+# Docs Index (v3)
 
-This directory currently contains a mix of active plans, v2 baseline specs, legacy runtime guides, and historical implementation notes.
+## Core
 
-## Primary Sources (Current Direction)
+- `ORCHESTRATOR_FIRST_REVAMP_PLAN.md`: execution plan and implementation log.
 
-- [`ORCHESTRATOR_FIRST_REVAMP_PLAN.md`](ORCHESTRATOR_FIRST_REVAMP_PLAN.md) - Canonical orchestrator-first big-bang revamp blueprint.
+## Operating Model
 
-## Baseline Specs (Current Code, Pre-Revamp)
+- Orchestrator-first control plane.
+- Task-centric execution lifecycle.
+- Human-review default with strict quality gate.
 
-- [`UNIFIED_TASK_ORCHESTRATION_SPEC.md`](UNIFIED_TASK_ORCHESTRATION_SPEC.md) - Implemented v2 orchestration contract in the current codebase.
+## API Reference (high-level)
 
-## Legacy Runtime Guides (Pre-v3 Architecture)
+Base path: `/api/v3`
 
-- [`archive/legacy/README.md`](archive/legacy/README.md) - Archived runtime usage guides from the pre-v3 architecture.
+- `/projects`, `/projects/pinned`
+- `/tasks`, `/tasks/board`, `/tasks/{id}` and task actions
+- `/import/prd/preview`, `/import/prd/commit`, `/import/{job_id}`
+- `/quick-actions`, `/quick-actions/{id}/promote`
+- `/review-queue`, `/review/{task_id}/approve`, `/review/{task_id}/request-changes`
+- `/orchestrator/status`, `/orchestrator/control`
+- `/agents` and agent control endpoints
 
-These remain useful for the existing runtime, but will be rewritten as v3 implementation lands.
+WebSocket: `/ws` (v3 channels only)
 
-## Historical / Point-in-Time Notes
+## State Layout
 
-- [`archive/historical/README.md`](archive/historical/README.md) - Archived historical plans, reviews, and earlier roadmap snapshots.
+- `.prd_runner/v3/tasks.yaml`
+- `.prd_runner/v3/runs.yaml`
+- `.prd_runner/v3/review_cycles.yaml`
+- `.prd_runner/v3/agents.yaml`
+- `.prd_runner/v3/quick_actions.yaml`
+- `.prd_runner/v3/events.jsonl`
+- `.prd_runner/v3/config.yaml`
 
-These documents are retained for historical context and should not be treated as current product direction.
+Legacy state is archived on first v3 boot; no auto-migration.

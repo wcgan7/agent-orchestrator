@@ -170,7 +170,7 @@ export default function KanbanBoard({ projectDir }: Props) {
   const fetchBoard = useCallback(async () => {
     try {
       const resp = await fetch(
-        buildApiUrl('/api/v2/tasks/board', projectDir),
+        buildApiUrl('/api/v3/tasks/board', projectDir),
         { headers: buildAuthHeaders() }
       )
       if (resp.ok) {
@@ -202,7 +202,7 @@ export default function KanbanBoard({ projectDir }: Props) {
 
     try {
       await fetch(
-        buildApiUrl(`/api/v2/tasks/${draggedTaskId}/transition`, projectDir),
+        buildApiUrl(`/api/v3/tasks/${draggedTaskId}/transition`, projectDir),
         {
           method: 'POST',
           headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),

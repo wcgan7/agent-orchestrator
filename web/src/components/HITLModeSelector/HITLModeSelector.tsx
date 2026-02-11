@@ -195,7 +195,7 @@ export default function HITLModeSelector({ currentMode, onModeChange, projectDir
   const fetchModes = useCallback(async () => {
     try {
       const resp = await fetch(
-        buildApiUrl('/api/v2/collaboration/modes', projectDir),
+        buildApiUrl('/api/v3/collaboration/modes', projectDir),
         { headers: buildAuthHeaders() }
       )
       if (resp.ok) {

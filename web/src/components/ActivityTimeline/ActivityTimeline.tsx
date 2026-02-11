@@ -48,7 +48,7 @@ export default function ActivityTimeline({ taskId, projectDir }: Props) {
   const fetchActivity = useCallback(async () => {
     try {
       const resp = await fetch(
-        buildApiUrl(`/api/v2/collaboration/timeline/${taskId}`, projectDir),
+        buildApiUrl(`/api/v3/collaboration/timeline/${taskId}`, projectDir),
         { headers: buildAuthHeaders() }
       )
 

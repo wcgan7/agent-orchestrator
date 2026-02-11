@@ -108,10 +108,10 @@ export default function CostBreakdown({ projectDir }: Props) {
   const fetchData = async () => {
     try {
       const [agentsRes, tasksRes] = await Promise.all([
-        fetch(buildApiUrl('/api/v2/agents', projectDir), {
+        fetch(buildApiUrl('/api/v3/agents', projectDir), {
           headers: buildAuthHeaders(),
         }),
-        fetch(buildApiUrl('/api/v2/tasks/board', projectDir), {
+        fetch(buildApiUrl('/api/v3/tasks/board', projectDir), {
           headers: buildAuthHeaders(),
         }),
       ])

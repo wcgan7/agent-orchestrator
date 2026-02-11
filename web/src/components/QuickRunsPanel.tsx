@@ -54,7 +54,7 @@ export default function QuickRunsPanel({ projectDir }: Props) {
   const fetchQuickRuns = useCallback(async (isRefresh = false) => {
     try {
       if (isRefresh) setRefreshing(true)
-      const response = await fetch(buildApiUrl('/api/v2/quick-runs', projectDir, { limit: 25 }), {
+      const response = await fetch(buildApiUrl('/api/v3/quick-runs', projectDir, { limit: 25 }), {
         headers: buildAuthHeaders(),
       })
       if (!response.ok) {
@@ -82,7 +82,7 @@ export default function QuickRunsPanel({ projectDir }: Props) {
   const handlePromote = async (quickRunId: string) => {
     try {
       setPromoting(quickRunId)
-      const response = await fetch(buildApiUrl(`/api/v2/quick-runs/${quickRunId}/promote`, projectDir), {
+      const response = await fetch(buildApiUrl(`/api/v3/quick-runs/${quickRunId}/promote`, projectDir), {
         method: 'POST',
         headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({

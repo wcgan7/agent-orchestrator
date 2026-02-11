@@ -1,6 +1,6 @@
 /**
  * Online users indicator — shows a dot with count of currently active users.
- * Fetches from /api/v2/collaboration/presence on mount and on WebSocket events.
+ * Fetches from /api/v3/collaboration/presence on mount and on WebSocket events.
  */
 
 import { useState, useEffect, useCallback } from 'react'
@@ -20,7 +20,7 @@ export default function OnlineUsers({ projectDir }: { projectDir?: string }) {
   const fetchPresence = useCallback(async () => {
     try {
       const resp = await fetch(
-        buildApiUrl('/api/v2/collaboration/presence', projectDir),
+        buildApiUrl('/api/v3/collaboration/presence', projectDir),
         { headers: buildAuthHeaders() }
       )
       if (resp.ok) {

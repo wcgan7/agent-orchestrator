@@ -471,3 +471,57 @@ Review findings and fixes:
 
 Outstanding for future phases:
 - Stabilization pass to align docs/CLI contracts and run combined backend/frontend verification is covered in Phase 4.
+
+### Phase 4 (Stabilization and Release) - Complete
+
+Status: `COMPLETE`
+
+Completed:
+- Introduced UI-first minimal CLI implementation:
+  - new entrypoint module: `src/feature_prd_runner/cli_v3.py`,
+  - supported commands:
+    - `server`
+    - `project pin/list/unpin`
+    - `task create/list/run`
+    - `quick-action`
+    - `orchestrator status/control`.
+- Switched package script entrypoint to minimal CLI:
+  - `feature-prd-runner = feature_prd_runner.cli_v3:main`.
+- Rewrote root docs for orchestrator-first positioning:
+  - `README.md`
+  - `docs/README.md`.
+- Added CI gate tests:
+  - Python runtime floor (`>=3.10`),
+  - UI runtime sources must use `/api/v3/*` endpoints.
+- Added end-to-end backend scenario tests for the revamp contract.
+
+Testing completed:
+- Backend suites:
+  - `tests/test_v3_backend_phase1.py`
+  - `tests/test_v3_orchestrator_phase2.py`
+  - `tests/test_cli_v3.py`
+  - `tests/test_revamp_ci_gates.py`
+  - `tests/test_v3_e2e_phase4.py`
+  - Result: `25 passed`.
+- Frontend suites:
+  - `web/src/App.defaultView.test.tsx`
+  - `web/src/App.accessibility.test.tsx`
+  - Result: `5 passed`.
+- Frontend build:
+  - `npm --prefix web run build` passed.
+
+Full revamp-plan gap review cycles:
+- Review cycle 1 identified gaps:
+  - missing explicit CI gate for non-v3 UI endpoints,
+  - missing explicit E2E scenarios for pinned repo -> run -> review -> approve, PRD dependency order, quick-action promotion, request-changes reopen.
+  - Fixes applied: CI gate tests + dedicated E2E coverage.
+- Review cycle 2 identified gaps:
+  - frontend regression test did not assert websocket-driven refresh behavior,
+  - project pinning UI test did not verify selector persistence visibility.
+  - Fixes applied: websocket refresh test + project selector persistence assertion.
+- Review cycle 3:
+  - no remaining contract gaps found against this revamp plan.
+
+Release readiness:
+- Breaking reset behavior implemented and documented.
+- Runtime is v3-first and legacy runtime wiring is removed.

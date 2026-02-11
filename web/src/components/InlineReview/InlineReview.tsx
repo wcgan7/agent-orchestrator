@@ -377,7 +377,7 @@ export default function InlineReview({ taskId, filePath, diff, projectDir, onCom
   const fetchComments = useCallback(async () => {
     try {
       const resp = await fetch(
-        buildApiUrl(`/api/v2/collaboration/comments/${taskId}`, projectDir, { file_path: filePath }),
+        buildApiUrl(`/api/v3/collaboration/comments/${taskId}`, projectDir, { file_path: filePath }),
         { headers: buildAuthHeaders() }
       )
       if (resp.ok) {
@@ -398,7 +398,7 @@ export default function InlineReview({ taskId, filePath, diff, projectDir, onCom
     setSubmitting(true)
     try {
       await fetch(
-        buildApiUrl('/api/v2/collaboration/comments', projectDir),
+        buildApiUrl('/api/v3/collaboration/comments', projectDir),
         {
           method: 'POST',
           headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -425,7 +425,7 @@ export default function InlineReview({ taskId, filePath, diff, projectDir, onCom
     setSubmitting(true)
     try {
       await fetch(
-        buildApiUrl('/api/v2/collaboration/comments', projectDir),
+        buildApiUrl('/api/v3/collaboration/comments', projectDir),
         {
           method: 'POST',
           headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -449,7 +449,7 @@ export default function InlineReview({ taskId, filePath, diff, projectDir, onCom
 
   const handleResolve = async (commentId: string) => {
     await fetch(
-      buildApiUrl(`/api/v2/collaboration/comments/${commentId}/resolve`, projectDir),
+      buildApiUrl(`/api/v3/collaboration/comments/${commentId}/resolve`, projectDir),
       { method: 'POST', headers: buildAuthHeaders() }
     )
     fetchComments()

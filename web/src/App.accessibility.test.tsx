@@ -24,6 +24,7 @@ class MockWebSocket {
 }
 
 function installFetchMock() {
+  const projects = [{ id: 'p1', path: '/tmp/repo', source: 'pinned', is_git: true }]
   global.fetch = vi.fn().mockImplementation((url, init) => {
     const u = String(url)
     if (u.includes('/api/v3/tasks/board')) {
@@ -39,10 +40,11 @@ function installFetchMock() {
       return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
     }
     if (u.includes('/api/v3/projects') && (init?.method || 'GET') === 'GET') {
-      return Promise.resolve({ ok: true, json: async () => ({ projects: [{ id: 'p1', path: '/tmp/repo', source: 'pinned', is_git: true }] }) })
+      return Promise.resolve({ ok: true, json: async () => ({ projects }) })
     }
     if (u.includes('/api/v3/projects/pinned') && (init?.method || 'GET') === 'POST') {
-      return Promise.resolve({ ok: true, json: async () => ({ project: { id: 'p2', path: '/abs/path' } }) })
+      projects.push({ id: 'p2', path: '/abs/path', source: 'pinned', is_git: false })
+      return Promise.resolve({ ok: true, json: async () => ({ project: { id: 'p2', path: '/abs/path', source: 'pinned', is_git: false } }) })
     }
     return Promise.resolve({ ok: true, json: async () => ({}) })
   }) as unknown as typeof fetch
@@ -93,6 +95,10 @@ describe('App navigation and settings flows', () => {
         expect.stringContaining('/api/v3/projects/pinned'),
         expect.objectContaining({ method: 'POST' }),
       )
+    })
+
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: /abs\/path/i })).toBeInTheDocument()
     })
   })
 })

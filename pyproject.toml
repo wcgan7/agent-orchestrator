@@ -44,7 +44,7 @@ strict = true
 ignore_missing_imports = true
 
 [project.scripts]
-feature-prd-runner = "feature_prd_runner.runner:main"
+feature-prd-runner = "feature_prd_runner.cli_v3:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

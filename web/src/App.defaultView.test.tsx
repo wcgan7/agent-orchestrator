@@ -80,4 +80,21 @@ describe('App default route', () => {
       expect(screen.getByRole('button', { name: /Quick Action/i })).toBeInTheDocument()
     })
   })
+
+  it('refreshes surfaces when websocket events arrive', async () => {
+    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
+    render(<App />)
+
+    await waitFor(() => {
+      expect(mockedFetch).toHaveBeenCalled()
+    })
+    const baselineCalls = mockedFetch.mock.calls.length
+
+    expect(MockWebSocket.instances.length).toBeGreaterThan(0)
+    MockWebSocket.instances[0].dispatch('message')
+
+    await waitFor(() => {
+      expect(mockedFetch.mock.calls.length).toBeGreaterThan(baselineCalls)
+    })
+  })
 })

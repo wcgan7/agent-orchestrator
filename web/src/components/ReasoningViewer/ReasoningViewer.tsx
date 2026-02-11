@@ -48,7 +48,7 @@ export default function ReasoningViewer({ taskId, projectDir }: Props) {
   const fetchReasoning = useCallback(async () => {
     try {
       const resp = await fetch(
-        buildApiUrl(`/api/v2/agents/reasoning/${taskId}`, projectDir),
+        buildApiUrl(`/api/v3/agents/reasoning/${taskId}`, projectDir),
         { headers: buildAuthHeaders() }
       )
       if (resp.ok) {

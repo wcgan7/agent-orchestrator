@@ -142,8 +142,8 @@ describe('TaskLauncher', () => {
       expect(mockFetch).toHaveBeenCalledTimes(2)
     })
 
-    expect(mockFetch.mock.calls[0][0]).toContain('/api/v2/quick-runs')
-    expect(mockFetch.mock.calls[1][0]).toContain('/api/v2/quick-runs/qrun-123/promote')
+    expect(mockFetch.mock.calls[0][0]).toContain('/api/v3/quick-runs')
+    expect(mockFetch.mock.calls[1][0]).toContain('/api/v3/quick-runs/qrun-123/promote')
 
     const promoteBody = JSON.parse(mockFetch.mock.calls[1][1].body)
     expect(promoteBody.title).toContain('Add audit logging for API errors')
