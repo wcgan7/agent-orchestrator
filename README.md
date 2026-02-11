@@ -59,7 +59,7 @@ uv pip install -e .
 
 ## Tests
 
-Python unit tests (840 tests):
+Python unit tests (901 tests):
 
 ```bash
 python -m pip install -e ".[test]"
@@ -213,6 +213,25 @@ POST   /api/v2/tasks/{id}/move     # Move between statuses
 GET    /api/v2/tasks/board         # Kanban board view
 ```
 
+### Operational API
+
+The web dashboard exposes operational endpoints that mirror CLI commands:
+
+```
+GET    /api/tasks/{id}/explain         # Why is this task blocked?
+GET    /api/tasks/{id}/inspect         # Full task state snapshot
+GET    /api/tasks/{id}/trace           # Event history for task
+GET    /api/tasks/{id}/logs            # Task-specific logs (filterable by step)
+POST   /api/tasks/{id}/correct         # Send structured correction to agent
+POST   /api/requirements               # Inject a new requirement
+GET    /api/dry-run                    # Preview next action (no writes)
+GET    /api/doctor                     # Diagnostic checks (git, state, schema)
+GET    /api/workers                    # List worker providers and routing
+POST   /api/workers/{name}/test        # Test a worker provider
+GET    /api/metrics/export             # Export metrics as CSV or HTML
+GET    /api/v2/tasks/execution-order   # Parallel execution batches
+```
+
 ### Smart Scheduling
 
 The scheduler assigns tasks to agents based on:
@@ -288,7 +307,7 @@ The `NotificationCenter` component in the dashboard shows a notification feed wi
 
 ## Web Dashboard
 
-A React/TypeScript dashboard for monitoring and controlling the orchestrator.
+A React/TypeScript dashboard for monitoring and controlling the orchestrator. The web UI has full feature parity with the CLI — every CLI command has a corresponding web interface.
 
 ```bash
 # Start the backend server
@@ -324,11 +343,18 @@ Access the dashboard at http://localhost:3000
 | **ActivityTimeline** | Unified event chronology |
 | **LiveLog** | Real-time log streaming via WebSocket |
 | **BreakpointsPanel** | Breakpoint management |
-| **TaskLauncher** | Quick task creation dialog |
+| **TaskLauncher** | Quick task creation with advanced options (language, parallelism, limits, worker) |
 | **ControlPanel** | Run control actions (retry, skip, resume, stop) |
 | **Chat** | Live collaboration messaging |
 | **ProjectSelector** | Multi-project switching |
 | **Login** | Authentication |
+| **ExplainModal** | "Why blocked?" explanation for stuck tasks |
+| **DryRunPanel** | Preview next action without writing |
+| **DoctorPanel** | System health diagnostics (git, state, schema, codex) |
+| **WorkersPanel** | Worker provider list with inline test buttons |
+| **CorrectionForm** | Structured correction sender for agent tasks |
+| **RequirementForm** | Structured requirement injector with priority |
+| **ParallelPlanView** | Execution batch swim lanes for parallel planning |
 
 ### Frontend Architecture
 

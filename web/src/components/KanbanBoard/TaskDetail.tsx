@@ -2,14 +2,15 @@
  * Task detail slide-over panel with collaboration features.
  */
 
-import { useState } from 'react'
-import { buildApiUrl, buildAuthHeaders } from '../../api'
+import { useState, useEffect } from 'react'
+import { buildApiUrl, buildAuthHeaders, fetchInspect, fetchExplain, fetchTaskLogs, fetchTrace } from '../../api'
 import FeedbackPanel from '../FeedbackPanel/FeedbackPanel'
 import ActivityTimeline from '../ActivityTimeline/ActivityTimeline'
 import ReasoningViewer from '../ReasoningViewer/ReasoningViewer'
+import CorrectionForm from '../CorrectionForm'
 import './KanbanBoard.css'
 
-type DetailTab = 'details' | 'feedback' | 'activity' | 'reasoning'
+type DetailTab = 'details' | 'feedback' | 'activity' | 'reasoning' | 'inspect' | 'logs' | 'trace'
 
 interface TaskData {
   id: string
@@ -134,6 +135,24 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
           >
             Reasoning
           </button>
+          <button
+            className={`detail-tab ${activeTab === 'inspect' ? 'active' : ''}`}
+            onClick={() => setActiveTab('inspect')}
+          >
+            Inspect
+          </button>
+          <button
+            className={`detail-tab ${activeTab === 'logs' ? 'active' : ''}`}
+            onClick={() => setActiveTab('logs')}
+          >
+            Logs
+          </button>
+          <button
+            className={`detail-tab ${activeTab === 'trace' ? 'active' : ''}`}
+            onClick={() => setActiveTab('trace')}
+          >
+            Trace
+          </button>
         </div>
 
         <div className="task-detail-body">
@@ -143,6 +162,12 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
             <ActivityTimeline taskId={task.id} projectDir={projectDir} />
           ) : activeTab === 'reasoning' ? (
             <ReasoningViewer taskId={task.id} projectDir={projectDir} />
+          ) : activeTab === 'inspect' ? (
+            <InspectTab taskId={task.id} projectDir={projectDir} />
+          ) : activeTab === 'logs' ? (
+            <LogsTab taskId={task.id} projectDir={projectDir} />
+          ) : activeTab === 'trace' ? (
+            <TraceTab taskId={task.id} projectDir={projectDir} />
           ) : editing ? (
             <div className="task-detail-edit">
               <input
@@ -288,6 +313,14 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
                 <div className="task-detail-section task-detail-error">
                   <h3>Error</h3>
                   <pre>{task.error}</pre>
+                  <ExplainButton taskId={task.id} projectDir={projectDir} />
+                </div>
+              )}
+
+              {/* Correction form for blocked/errored tasks */}
+              {(task.error || task.status === 'blocked' || task.blocked_by.length > 0) && (
+                <div className="task-detail-section">
+                  <CorrectionForm taskId={task.id} projectDir={projectDir} />
                 </div>
               )}
 
@@ -308,6 +341,202 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
           )}
         </div>
       </div>
+    </div>
+  )
+}
+
+// --- Sub-components for new tabs ---
+
+function ExplainButton({ taskId, projectDir }: { taskId: string; projectDir?: string }) {
+  const [explanation, setExplanation] = useState<string | null>(null)
+  const [loading, setLoading] = useState(false)
+
+  const handleClick = async () => {
+    setLoading(true)
+    try {
+      const data = await fetchExplain(taskId, projectDir)
+      setExplanation(data.explanation)
+    } catch {
+      setExplanation('Failed to load explanation')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div style={{ marginTop: '0.5rem' }}>
+      {explanation ? (
+        <pre style={{ fontSize: '0.8rem', whiteSpace: 'pre-wrap', background: 'var(--bg-secondary, #f9fafb)', padding: '0.5rem', borderRadius: '4px' }}>
+          {explanation}
+        </pre>
+      ) : (
+        <button className="btn-edit" onClick={handleClick} disabled={loading}>
+          {loading ? 'Loading...' : 'Why blocked?'}
+        </button>
+      )}
+    </div>
+  )
+}
+
+function InspectTab({ taskId, projectDir }: { taskId: string; projectDir?: string }) {
+  const [data, setData] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetchInspect(taskId, projectDir)
+      .then(setData)
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false))
+  }, [taskId, projectDir])
+
+  if (loading) return <div>Loading inspection data...</div>
+  if (error) return <div style={{ color: '#dc2626' }}>{error}</div>
+  if (!data) return <div>No data available</div>
+
+  return (
+    <div style={{ fontSize: '0.85rem' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+        <tbody>
+          {[
+            ['Lifecycle', data.lifecycle],
+            ['Step', data.step],
+            ['Status', data.status],
+            ['Worker Attempts', data.worker_attempts],
+            ['Last Error', data.last_error || '-'],
+            ['Error Type', data.last_error_type || '-'],
+          ].map(([key, val]) => (
+            <tr key={key} style={{ borderBottom: '1px solid var(--border-color, #e5e7eb)' }}>
+              <td style={{ padding: '0.5rem', fontWeight: 500, width: '40%' }}>{key}</td>
+              <td style={{ padding: '0.5rem', fontFamily: 'var(--font-mono, monospace)', fontSize: '0.8rem' }}>{val}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {data.context && data.context.length > 0 && (
+        <div style={{ marginTop: '1rem' }}>
+          <strong>Context</strong>
+          <ul style={{ margin: '0.5rem 0', paddingLeft: '1.25rem' }}>
+            {data.context.map((c: string, i: number) => <li key={i}>{c}</li>)}
+          </ul>
+        </div>
+      )}
+      {data.metadata && Object.keys(data.metadata).length > 0 && (
+        <div style={{ marginTop: '1rem' }}>
+          <strong>Metadata</strong>
+          <pre style={{ fontSize: '0.8rem', background: 'var(--bg-secondary, #f9fafb)', padding: '0.5rem', borderRadius: '4px', overflow: 'auto' }}>
+            {JSON.stringify(data.metadata, null, 2)}
+          </pre>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function LogsTab({ taskId, projectDir }: { taskId: string; projectDir?: string }) {
+  const [logs, setLogs] = useState<Record<string, string[]>>({})
+  const [step, setStep] = useState<string>('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setLoading(true)
+    fetchTaskLogs(taskId, projectDir, step || undefined, 200)
+      .then((data) => setLogs(data.logs || {}))
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false))
+  }, [taskId, projectDir, step])
+
+  return (
+    <div style={{ fontSize: '0.85rem' }}>
+      <div style={{ marginBottom: '0.75rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+        <label style={{ fontWeight: 500 }}>Step filter:</label>
+        <select value={step} onChange={(e) => setStep(e.target.value)} style={{ padding: '0.25rem 0.5rem', borderRadius: '4px', border: '1px solid var(--border-color, #e5e7eb)' }}>
+          <option value="">All</option>
+          <option value="plan_impl">Plan/Impl</option>
+          <option value="implement">Implement</option>
+          <option value="verify">Verify</option>
+          <option value="review">Review</option>
+          <option value="commit">Commit</option>
+        </select>
+      </div>
+      {loading ? (
+        <div>Loading logs...</div>
+      ) : error ? (
+        <div style={{ color: '#dc2626' }}>{error}</div>
+      ) : Object.keys(logs).length === 0 ? (
+        <div style={{ color: 'var(--text-secondary, #6b7280)' }}>No logs found for this task</div>
+      ) : (
+        Object.entries(logs).map(([filename, lines]) => (
+          <div key={filename} style={{ marginBottom: '1rem' }}>
+            <div style={{ fontWeight: 600, marginBottom: '0.25rem' }}>{filename}</div>
+            <pre style={{
+              fontFamily: 'var(--font-mono, monospace)',
+              fontSize: '0.75rem',
+              background: 'var(--bg-secondary, #f9fafb)',
+              padding: '0.75rem',
+              borderRadius: '6px',
+              border: '1px solid var(--border-color, #e5e7eb)',
+              overflow: 'auto',
+              maxHeight: '300px',
+              whiteSpace: 'pre-wrap',
+            }}>
+              {lines.join('\n') || '(empty)'}
+            </pre>
+          </div>
+        ))
+      )}
+    </div>
+  )
+}
+
+function TraceTab({ taskId, projectDir }: { taskId: string; projectDir?: string }) {
+  const [events, setEvents] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setLoading(true)
+    fetchTrace(taskId, projectDir, 100)
+      .then((data) => setEvents(Array.isArray(data) ? data : []))
+      .catch((err) => setError(err.message))
+      .finally(() => setLoading(false))
+  }, [taskId, projectDir])
+
+  if (loading) return <div>Loading event history...</div>
+  if (error) return <div style={{ color: '#dc2626' }}>{error}</div>
+  if (events.length === 0) return <div style={{ color: 'var(--text-secondary, #6b7280)' }}>No events found for this task</div>
+
+  return (
+    <div style={{ fontSize: '0.85rem' }}>
+      <div style={{ marginBottom: '0.5rem', color: 'var(--text-secondary, #6b7280)' }}>
+        {events.length} event{events.length !== 1 ? 's' : ''}
+      </div>
+      {events.map((event, i) => {
+        const eventType = event.event_type || 'unknown'
+        const timestamp = event.timestamp || ''
+        const isFail = eventType.includes('fail') || eventType.includes('error') || eventType.includes('violation')
+        const isPass = eventType.includes('pass') || eventType === 'task_completed'
+        return (
+          <div key={i} style={{
+            padding: '0.5rem 0.75rem',
+            borderLeft: `3px solid ${isFail ? '#dc2626' : isPass ? '#16a34a' : '#3b82f6'}`,
+            marginBottom: '0.5rem',
+            background: 'var(--bg-secondary, #f9fafb)',
+            borderRadius: '0 4px 4px 0',
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '0.5rem' }}>
+              <strong>{eventType}</strong>
+              <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary, #6b7280)' }}>{timestamp}</span>
+            </div>
+            {event.run_id && <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary, #6b7280)' }}>Run: {event.run_id}</div>}
+            {event.error_type && <div style={{ fontSize: '0.8rem', color: '#dc2626' }}>Error: {event.error_type}</div>}
+            {event.error_detail && <div style={{ fontSize: '0.75rem', color: '#991b1b', marginTop: '0.25rem' }}>{String(event.error_detail).slice(0, 150)}</div>}
+            {event.block_reason && <div style={{ fontSize: '0.8rem' }}>Reason: {event.block_reason}</div>}
+            {event.passed !== undefined && <div style={{ color: event.passed ? '#16a34a' : '#dc2626' }}>{event.passed ? 'Passed' : 'Failed'}</div>}
+          </div>
+        )
+      })}
     </div>
   )
 }

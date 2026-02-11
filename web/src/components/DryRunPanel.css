@@ -1,0 +1,90 @@
+.dry-run-panel {
+  margin-top: 1rem;
+}
+
+.dry-run-trigger {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.dry-run-result {
+  background: var(--bg-secondary, #f9fafb);
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 8px;
+  padding: 1rem;
+}
+
+.dry-run-next {
+  margin-bottom: 1rem;
+}
+
+.dry-run-next h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.9rem;
+}
+
+.dry-run-next-card {
+  background: var(--bg-primary, #fff);
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 6px;
+  padding: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.dry-run-next-card code {
+  font-family: var(--font-mono, monospace);
+  background: var(--bg-secondary, #f3f4f6);
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  font-size: 0.8rem;
+}
+
+.dry-run-flags {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 1rem;
+}
+
+.dry-run-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+
+.dry-run-flag.active {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.dry-run-flag.inactive {
+  background: var(--bg-secondary, #f3f4f6);
+  color: var(--text-secondary, #6b7280);
+}
+
+.dry-run-warnings,
+.dry-run-errors {
+  margin-top: 0.75rem;
+}
+
+.dry-run-warnings h4,
+.dry-run-errors h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.85rem;
+}
+
+.dry-run-warnings li {
+  color: #b45309;
+  font-size: 0.85rem;
+}
+
+.dry-run-errors li {
+  color: #dc2626;
+  font-size: 0.85rem;
+}

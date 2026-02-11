@@ -60,3 +60,116 @@ export function buildWsUrl(pathname: string, projectDir?: string): string {
   return url.toString()
 }
 
+// --- Feature gap API helpers ---
+
+export async function fetchExplain(taskId: string, projectDir?: string) {
+  const res = await fetch(buildApiUrl(`/api/tasks/${taskId}/explain`, projectDir), {
+    headers: buildAuthHeaders(),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
+export async function fetchInspect(taskId: string, projectDir?: string) {
+  const res = await fetch(buildApiUrl(`/api/tasks/${taskId}/inspect`, projectDir), {
+    headers: buildAuthHeaders(),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
+export async function fetchTrace(taskId: string, projectDir?: string, limit?: number) {
+  const res = await fetch(
+    buildApiUrl(`/api/tasks/${taskId}/trace`, projectDir, { limit }),
+    { headers: buildAuthHeaders() },
+  )
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
+export async function fetchDryRun(projectDir?: string, prdFile?: string) {
+  const res = await fetch(buildApiUrl('/api/dry-run', projectDir, { prd_file: prdFile }), {
+    headers: buildAuthHeaders(),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
+export async function fetchDoctor(projectDir?: string, checkCodex?: boolean) {
+  const res = await fetch(buildApiUrl('/api/doctor', projectDir, { check_codex: checkCodex }), {
+    headers: buildAuthHeaders(),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
+export async function fetchWorkers(projectDir?: string) {
+  const res = await fetch(buildApiUrl('/api/workers', projectDir), {
+    headers: buildAuthHeaders(),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
+export async function testWorker(workerName: string, projectDir?: string) {
+  const res = await fetch(buildApiUrl(`/api/workers/${workerName}/test`, projectDir), {
+    method: 'POST',
+    headers: buildAuthHeaders(),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
+export async function sendCorrection(
+  taskId: string,
+  correction: { issue: string; file_path?: string; suggested_fix?: string },
+  projectDir?: string,
+) {
+  const res = await fetch(buildApiUrl(`/api/tasks/${taskId}/correct`, projectDir), {
+    method: 'POST',
+    headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(correction),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
+export async function sendRequirement(
+  requirement: { requirement: string; task_id?: string; priority?: string },
+  projectDir?: string,
+) {
+  const res = await fetch(buildApiUrl('/api/requirements', projectDir), {
+    method: 'POST',
+    headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify(requirement),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
+export async function fetchTaskLogs(
+  taskId: string,
+  projectDir?: string,
+  step?: string,
+  lines?: number,
+) {
+  const res = await fetch(
+    buildApiUrl(`/api/tasks/${taskId}/logs`, projectDir, { step, lines }),
+    { headers: buildAuthHeaders() },
+  )
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+
+export function getMetricsExportUrl(projectDir?: string, format: string = 'csv') {
+  return buildApiUrl('/api/metrics/export', projectDir, { format })
+}
+
+export async function fetchExecutionOrder(projectDir?: string) {
+  const res = await fetch(buildApiUrl('/api/v2/tasks/execution-order', projectDir), {
+    headers: buildAuthHeaders(),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  return res.json()
+}
+

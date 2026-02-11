@@ -2,6 +2,8 @@
  * Compact task card for the Kanban board.
  */
 
+import { useState } from 'react'
+import ExplainModal from '../ExplainModal'
 import './KanbanBoard.css'
 
 interface TaskData {
@@ -39,52 +41,71 @@ const PRIORITY_COLORS: Record<string, string> = {
 
 interface Props {
   task: TaskData
+  projectDir?: string
   onClick: () => void
   onDragStart: () => void
 }
 
-export function TaskCard({ task, onClick, onDragStart }: Props) {
-  const isBlocked = task.blocked_by.length > 0
+export function TaskCard({ task, projectDir, onClick, onDragStart }: Props) {
+  const isBlocked = task.blocked_by.length > 0 || task.status === 'blocked'
   const hasError = !!task.error
   const typeIcon = TYPE_ICONS[task.task_type] || '?'
   const priorityColor = PRIORITY_COLORS[task.priority] || PRIORITY_COLORS.P2
+  const [showExplain, setShowExplain] = useState(false)
 
   return (
-    <div
-      className={`task-card ${isBlocked ? 'task-card-blocked' : ''} ${hasError ? 'task-card-error' : ''}`}
-      draggable
-      onClick={onClick}
-      onDragStart={(e) => {
-        e.dataTransfer.setData('text/plain', task.id)
-        onDragStart()
-      }}
-    >
-      <div className="task-card-priority-bar" style={{ backgroundColor: priorityColor }} />
-      <div className="task-card-content">
-        <div className="task-card-top">
-          <span className={`task-card-type task-card-type-${task.task_type}`} title={task.task_type}>
-            {typeIcon}
-          </span>
-          <span className="task-card-id">{task.id.slice(-8)}</span>
-          {task.effort && <span className="task-card-effort">{task.effort}</span>}
-        </div>
-        <div className="task-card-title">{task.title}</div>
-        <div className="task-card-bottom">
-          <div className="task-card-labels">
-            {task.labels.slice(0, 3).map((label) => (
-              <span key={label} className="task-card-label">{label}</span>
-            ))}
+    <>
+      <div
+        className={`task-card ${isBlocked ? 'task-card-blocked' : ''} ${hasError ? 'task-card-error' : ''}`}
+        draggable
+        onClick={onClick}
+        onDragStart={(e) => {
+          e.dataTransfer.setData('text/plain', task.id)
+          onDragStart()
+        }}
+      >
+        <div className="task-card-priority-bar" style={{ backgroundColor: priorityColor }} />
+        <div className="task-card-content">
+          <div className="task-card-top">
+            <span className={`task-card-type task-card-type-${task.task_type}`} title={task.task_type}>
+              {typeIcon}
+            </span>
+            <span className="task-card-id">{task.id.slice(-8)}</span>
+            {task.effort && <span className="task-card-effort">{task.effort}</span>}
           </div>
-          <div className="task-card-meta">
-            {isBlocked && <span className="task-card-blocked-icon" title="Blocked">&#128274;</span>}
-            {task.assignee && (
-              <span className="task-card-assignee" title={task.assignee}>
-                {task.assignee.slice(0, 2).toUpperCase()}
-              </span>
-            )}
+          <div className="task-card-title">{task.title}</div>
+          <div className="task-card-bottom">
+            <div className="task-card-labels">
+              {task.labels.slice(0, 3).map((label) => (
+                <span key={label} className="task-card-label">{label}</span>
+              ))}
+            </div>
+            <div className="task-card-meta">
+              {isBlocked && (
+                <button
+                  className="task-card-explain-btn"
+                  title="Why blocked?"
+                  onClick={(e) => { e.stopPropagation(); setShowExplain(true) }}
+                >
+                  &#128274;?
+                </button>
+              )}
+              {task.assignee && (
+                <span className="task-card-assignee" title={task.assignee}>
+                  {task.assignee.slice(0, 2).toUpperCase()}
+                </span>
+              )}
+            </div>
           </div>
         </div>
       </div>
-    </div>
+      {showExplain && (
+        <ExplainModal
+          taskId={task.id}
+          projectDir={projectDir}
+          onClose={() => setShowExplain(false)}
+        />
+      )}
+    </>
   )
 }

@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { buildApiUrl, buildAuthHeaders } from '../api'
+import { buildApiUrl, buildAuthHeaders, getMetricsExportUrl } from '../api'
 import { useChannel } from '../contexts/WebSocketContext'
 import EmptyState from './EmptyState'
 import './MetricsPanel.css'
@@ -99,9 +99,47 @@ export default function MetricsPanel({ projectDir }: Props) {
       metrics.lines_removed > 0 ||
       metrics.wall_time_seconds > 0)
 
+  const [showExport, setShowExport] = useState(false)
+
   return (
     <div className="card">
-      <h2>Metrics</h2>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h2>Metrics</h2>
+        {hasAnyMetrics && (
+          <div style={{ position: 'relative' }}>
+            <button
+              className="btn"
+              style={{ fontSize: '0.8rem', padding: '0.25rem 0.5rem' }}
+              onClick={() => setShowExport(!showExport)}
+            >
+              Export
+            </button>
+            {showExport && (
+              <div style={{
+                position: 'absolute', right: 0, top: '100%', marginTop: '0.25rem',
+                background: 'var(--bg-primary, #fff)', border: '1px solid var(--border-color, #e5e7eb)',
+                borderRadius: '6px', boxShadow: '0 4px 12px rgba(0,0,0,0.1)', zIndex: 10,
+                minWidth: '100px',
+              }}>
+                <a
+                  href={getMetricsExportUrl(projectDir, 'csv')}
+                  style={{ display: 'block', padding: '0.5rem 0.75rem', fontSize: '0.8rem', textDecoration: 'none', color: 'inherit' }}
+                  onClick={() => setShowExport(false)}
+                >
+                  CSV
+                </a>
+                <a
+                  href={getMetricsExportUrl(projectDir, 'html')}
+                  style={{ display: 'block', padding: '0.5rem 0.75rem', fontSize: '0.8rem', textDecoration: 'none', color: 'inherit', borderTop: '1px solid var(--border-color, #e5e7eb)' }}
+                  onClick={() => setShowExport(false)}
+                >
+                  HTML
+                </a>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {!metrics || !hasAnyMetrics ? (
         <EmptyState

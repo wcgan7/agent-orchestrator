@@ -1,0 +1,86 @@
+.doctor-panel {
+  margin-top: 1rem;
+}
+
+.doctor-trigger {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.doctor-checks {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.doctor-check {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  background: var(--bg-secondary, #f9fafb);
+  border: 1px solid var(--border-color, #e5e7eb);
+}
+
+.doctor-check-icon {
+  font-size: 1rem;
+  flex-shrink: 0;
+}
+
+.doctor-check-icon.pass { color: #16a34a; }
+.doctor-check-icon.fail { color: #dc2626; }
+.doctor-check-icon.skip { color: #9ca3af; }
+
+.doctor-check-name {
+  font-weight: 500;
+  min-width: 100px;
+}
+
+.doctor-check-detail {
+  color: var(--text-secondary, #6b7280);
+  font-size: 0.8rem;
+}
+
+.doctor-messages {
+  margin-top: 1rem;
+}
+
+.doctor-messages h4 {
+  margin: 0 0 0.25rem;
+  font-size: 0.85rem;
+}
+
+.doctor-messages ul {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.doctor-messages li {
+  font-size: 0.85rem;
+  margin-bottom: 0.25rem;
+}
+
+.doctor-messages.warnings li { color: #b45309; }
+.doctor-messages.errors li { color: #dc2626; }
+
+.doctor-summary {
+  margin-top: 1rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.doctor-summary.pass {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.doctor-summary.fail {
+  background: #fee2e2;
+  color: #991b1b;
+}
