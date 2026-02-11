@@ -135,14 +135,14 @@ def _build_run_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--language",
         type=str,
-        choices=["auto", "python", "typescript", "javascript", "go", "rust"],
+        choices=["auto", "python", "typescript", "javascript", "nextjs", "go", "rust"],
         default="auto",
         help="Project language. If 'auto' (default), detected from manifest files.",
     )
     parser.add_argument(
         "--verify-profile",
         type=str,
-        choices=["none", "python", "typescript", "javascript", "go", "rust"],
+        choices=["none", "python", "typescript", "javascript", "nextjs", "go", "rust"],
         default="none",
         help="Verification preset (default: none). If 'none' and --language is set, uses language-appropriate profile.",
     )
@@ -2340,7 +2340,7 @@ def _build_example_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--language",
         type=str,
-        choices=["python", "typescript", "javascript", "go", "rust"],
+        choices=["python", "typescript", "javascript", "nextjs", "go", "rust"],
         default="python",
         help="Project language (default: python)",
     )
@@ -2728,6 +2728,155 @@ main();
 describe("main", () => {
   it("should run without error", () => {
     expect(() => main()).not.toThrow();
+  });
+});
+""")
+
+        elif language == "nextjs":
+            config_content = """# Feature PRD Runner Configuration
+
+# Project language
+language: nextjs
+verify_profile: nextjs
+
+# Verification commands
+test_command: npm test
+lint_command: npx next lint
+typecheck_command: npx next build
+format_command: npx prettier --check .
+
+# Ensure dependencies
+ensure_deps: install
+
+# Worker configuration
+codex_command: codex exec -
+
+# Git configuration
+new_branch: feature/user-authentication
+
+# Retry configuration
+max_task_attempts: 10
+max_review_attempts: 3
+stop_on_blocking_issues: true
+"""
+
+            # Create package.json
+            package_json = {
+                "name": "auth-example",
+                "version": "0.1.0",
+                "private": True,
+                "description": "Example Next.js authentication system",
+                "scripts": {
+                    "dev": "next dev",
+                    "build": "next build",
+                    "start": "next start",
+                    "test": "jest",
+                    "lint": "next lint",
+                    "format:check": "prettier --check ."
+                },
+                "dependencies": {
+                    "next": "^14.0.0",
+                    "react": "^18.2.0",
+                    "react-dom": "^18.2.0"
+                },
+                "devDependencies": {
+                    "typescript": "^5.0.0",
+                    "@types/react": "^18.2.0",
+                    "@types/node": "^20.0.0",
+                    "jest": "^29.0.0",
+                    "@testing-library/react": "^14.0.0",
+                    "@testing-library/jest-dom": "^6.0.0",
+                    "prettier": "^3.0.0"
+                }
+            }
+            import json
+            (output_dir / "package.json").write_text(json.dumps(package_json, indent=2) + "\n")
+
+            # Create next.config.js
+            (output_dir / "next.config.js").write_text("""/** @type {import('next').NextConfig} */
+const nextConfig = {};
+
+module.exports = nextConfig;
+""")
+
+            # Create tsconfig.json
+            (output_dir / "tsconfig.json").write_text(json.dumps({
+                "compilerOptions": {
+                    "target": "es5",
+                    "lib": ["dom", "dom.iterable", "esnext"],
+                    "allowJs": True,
+                    "skipLibCheck": True,
+                    "strict": True,
+                    "noEmit": True,
+                    "esModuleInterop": True,
+                    "module": "esnext",
+                    "moduleResolution": "bundler",
+                    "resolveJsonModule": True,
+                    "isolatedModules": True,
+                    "jsx": "preserve",
+                    "incremental": True,
+                    "plugins": [{"name": "next"}],
+                    "paths": {"@/*": ["./*"]}
+                },
+                "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx"],
+                "exclude": ["node_modules"]
+            }, indent=2) + "\n")
+
+            # Create app directory (App Router)
+            app_dir = output_dir / "app"
+            app_dir.mkdir()
+
+            (app_dir / "layout.tsx").write_text("""export const metadata = {
+  title: "Auth Example",
+  description: "Example Next.js authentication app",
+};
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  );
+}
+""")
+
+            (app_dir / "page.tsx").write_text("""export default function Home() {
+  return (
+    <main>
+      <h1>Hello from Feature PRD Runner example!</h1>
+    </main>
+  );
+}
+""")
+
+            # Create API route
+            api_dir = app_dir / "api" / "hello"
+            api_dir.mkdir(parents=True)
+
+            (api_dir / "route.ts").write_text("""import { NextResponse } from "next/server";
+
+export async function GET() {
+  return NextResponse.json({ message: "Hello from Feature PRD Runner!" });
+}
+""")
+
+            # Create tests
+            test_dir = output_dir / "__tests__"
+            test_dir.mkdir()
+
+            (test_dir / "page.test.tsx").write_text("""import { render, screen } from "@testing-library/react";
+import Home from "../app/page";
+
+describe("Home", () => {
+  it("renders the heading", () => {
+    render(<Home />);
+    expect(
+      screen.getByText("Hello from Feature PRD Runner example!")
+    ).toBeInTheDocument();
   });
 });
 """)

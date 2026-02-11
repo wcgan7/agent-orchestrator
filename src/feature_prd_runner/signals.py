@@ -620,6 +620,56 @@ def extract_tsc_repo_paths(text: str, project_dir: Path) -> list[str]:
     return sorted(out)
 
 
+# Next.js build output format:
+# ./app/page.tsx:12:5
+# Type error: ...
+# or embedded tsc-style errors
+_NEXT_BUILD_PATH_RE = re.compile(
+    r"(?m)^\.?/?(?P<path>[^\s:]+\.(?:tsx|ts|jsx|js)):(?P<line>\d+):(?P<col>\d+)\s*$"
+)
+
+
+def extract_next_build_repo_paths(text: str, project_dir: Path) -> list[str]:
+    """Extract repo file paths from ``next build`` output.
+
+    Parses formats:
+    - ``./app/page.tsx:12:5`` (Next.js type-error locations)
+    - Embedded tsc-style errors (delegated to ``extract_tsc_repo_paths``)
+
+    Args:
+        text: Raw ``next build`` output text.
+        project_dir: Repository root directory.
+
+    Returns:
+        List of repo-relative paths with build errors.
+    """
+    if not text:
+        return []
+
+    root = project_dir.resolve()
+    out: set[str] = set()
+
+    for match in _NEXT_BUILD_PATH_RE.finditer(text):
+        raw_path = match.group("path").strip()
+        if "node_modules" in raw_path:
+            continue
+
+        rel = raw_path.replace("\\", "/").lstrip("./")
+        candidate = (root / rel).resolve()
+        try:
+            candidate.relative_to(root)
+        except Exception:
+            continue
+        if candidate.is_file():
+            out.add(candidate.relative_to(root).as_posix())
+
+    # Also pick up any embedded tsc-style errors
+    tsc_paths = extract_tsc_repo_paths(text, project_dir)
+    out.update(tsc_paths)
+
+    return sorted(out)
+
+
 # Prettier output format (check mode):
 # Checking formatting...
 # [warn] src/utils.ts
@@ -756,11 +806,11 @@ def get_test_parser(command: str, language: str) -> PathExtractor:
 
     # Infer from npm/yarn/pnpm test for JS/TS projects
     if any(runner in cmd for runner in ["npm test", "yarn test", "pnpm test", "npm run test"]):
-        if language in ("typescript", "javascript"):
+        if language in ("typescript", "javascript", "nextjs"):
             return extract_jest_failed_test_files
 
     # Default based on language
-    if language in ("typescript", "javascript"):
+    if language in ("typescript", "javascript", "nextjs"):
         return extract_jest_failed_test_files
     return extract_failed_test_files  # Python default
 
@@ -778,6 +828,8 @@ def get_lint_parser(command: str, language: str) -> PathExtractor:
     cmd = (command or "").strip().lower()
 
     # Explicit tool detection from command
+    if "next lint" in cmd:
+        return extract_eslint_repo_paths  # next lint wraps ESLint
     if "eslint" in cmd:
         return extract_eslint_repo_paths
     if "ruff" in cmd:
@@ -786,7 +838,7 @@ def get_lint_parser(command: str, language: str) -> PathExtractor:
         return extract_eslint_repo_paths  # Similar format
 
     # Default based on language
-    if language in ("typescript", "javascript"):
+    if language in ("typescript", "javascript", "nextjs"):
         return extract_eslint_repo_paths
     return extract_ruff_repo_paths  # Python default
 
@@ -804,6 +856,8 @@ def get_typecheck_parser(command: str, language: str) -> PathExtractor:
     cmd = (command or "").strip().lower()
 
     # Explicit tool detection from command
+    if "next build" in cmd:
+        return extract_next_build_repo_paths
     if "tsc" in cmd:
         return extract_tsc_repo_paths
     if "mypy" in cmd:
@@ -812,7 +866,7 @@ def get_typecheck_parser(command: str, language: str) -> PathExtractor:
         return extract_mypy_repo_paths  # Similar format
 
     # Default based on language
-    if language == "typescript":
+    if language in ("typescript", "nextjs"):
         return extract_tsc_repo_paths
     return extract_mypy_repo_paths  # Python default
 
@@ -838,7 +892,7 @@ def get_format_parser(command: str, language: str) -> PathExtractor:
         return extract_eslint_repo_paths  # Similar format
 
     # Default based on language
-    if language in ("typescript", "javascript"):
+    if language in ("typescript", "javascript", "nextjs"):
         return extract_prettier_repo_paths
     return extract_ruff_repo_paths  # Python default
 
@@ -852,6 +906,6 @@ def get_traceback_parser(language: str) -> PathExtractor:
     Returns:
         A function that extracts file paths from stack traces.
     """
-    if language in ("typescript", "javascript"):
+    if language in ("typescript", "javascript", "nextjs"):
         return extract_js_stacktrace_repo_paths
     return extract_traceback_repo_paths  # Python default

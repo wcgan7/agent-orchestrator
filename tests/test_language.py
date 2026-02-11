@@ -271,6 +271,144 @@ class TestGetIgnoredPaths:
             assert ".git/" in paths
 
 
+class TestDetectLanguageNextJs:
+    """Tests for Next.js detection in detect_language function."""
+
+    def test_detects_nextjs_from_next_dependency(self, tmp_path: Path) -> None:
+        """Detect Next.js when 'next' is in dependencies."""
+        package_json = tmp_path / "package.json"
+        package_json.write_text(json.dumps({
+            "name": "test-project",
+            "dependencies": {"next": "^14.0.0", "react": "^18.0.0"},
+            "devDependencies": {"typescript": "^5.0.0"}
+        }))
+
+        assert detect_language(tmp_path) == "nextjs"
+
+    def test_detects_nextjs_from_next_dev_dependency(self, tmp_path: Path) -> None:
+        """Detect Next.js when 'next' is in devDependencies."""
+        package_json = tmp_path / "package.json"
+        package_json.write_text(json.dumps({
+            "name": "test-project",
+            "devDependencies": {"next": "^14.0.0", "typescript": "^5.0.0"}
+        }))
+
+        assert detect_language(tmp_path) == "nextjs"
+
+    def test_detects_nextjs_from_next_config_js(self, tmp_path: Path) -> None:
+        """Detect Next.js from next.config.js file."""
+        package_json = tmp_path / "package.json"
+        package_json.write_text(json.dumps({"name": "test-project"}))
+        (tmp_path / "next.config.js").write_text("module.exports = {};")
+
+        assert detect_language(tmp_path) == "nextjs"
+
+    def test_detects_nextjs_from_next_config_ts(self, tmp_path: Path) -> None:
+        """Detect Next.js from next.config.ts file."""
+        package_json = tmp_path / "package.json"
+        package_json.write_text(json.dumps({"name": "test-project"}))
+        (tmp_path / "next.config.ts").write_text("export default {};")
+
+        assert detect_language(tmp_path) == "nextjs"
+
+    def test_detects_nextjs_from_next_config_mjs(self, tmp_path: Path) -> None:
+        """Detect Next.js from next.config.mjs file."""
+        package_json = tmp_path / "package.json"
+        package_json.write_text(json.dumps({"name": "test-project"}))
+        (tmp_path / "next.config.mjs").write_text("export default {};")
+
+        assert detect_language(tmp_path) == "nextjs"
+
+    def test_nextjs_priority_over_typescript(self, tmp_path: Path) -> None:
+        """Next.js detection takes priority over TypeScript."""
+        package_json = tmp_path / "package.json"
+        package_json.write_text(json.dumps({
+            "name": "test-project",
+            "dependencies": {"next": "^14.0.0", "react": "^18.0.0"},
+            "devDependencies": {"typescript": "^5.0.0"}
+        }))
+        (tmp_path / "tsconfig.json").write_text("{}")
+
+        assert detect_language(tmp_path) == "nextjs"
+
+    def test_detects_nextjs_from_malformed_package_json_with_next_config(self, tmp_path: Path) -> None:
+        """Detect Next.js from next.config.js when package.json is malformed."""
+        package_json = tmp_path / "package.json"
+        package_json.write_text("{ invalid json }")
+        (tmp_path / "next.config.js").write_text("module.exports = {};")
+
+        assert detect_language(tmp_path) == "nextjs"
+
+    def test_malformed_package_json_without_next_config_returns_javascript(self, tmp_path: Path) -> None:
+        """Malformed package.json without next.config falls back to javascript."""
+        package_json = tmp_path / "package.json"
+        package_json.write_text("{ invalid json }")
+
+        assert detect_language(tmp_path) == "javascript"
+
+
+class TestNextJsDefaults:
+    """Tests for Next.js default commands and configuration."""
+
+    def test_verify_commands(self) -> None:
+        """Check Next.js default verify commands."""
+        defaults = get_default_verify_commands("nextjs")
+        assert defaults["test_command"] == "npm test"
+        assert defaults["lint_command"] == "npx next lint"
+        assert defaults["format_command"] == "npx prettier --check ."
+        assert defaults["typecheck_command"] == "npx next build"
+
+    def test_deps_command(self) -> None:
+        """Check Next.js default deps command."""
+        assert get_default_deps_command("nextjs") == "npm install"
+
+    def test_ignored_paths(self) -> None:
+        """Check Next.js ignored paths include framework-specific dirs."""
+        paths = get_ignored_paths("nextjs")
+        assert "node_modules/" in paths
+        assert ".next/" in paths
+        assert ".vercel/" in paths
+        assert "out/" in paths
+        assert ".prd_runner/" in paths  # common path
+        assert ".git/" in paths  # common path
+
+    def test_verify_profile(self) -> None:
+        """Check Next.js verify profile."""
+        assert get_verify_profile_for_language("nextjs") == "nextjs"
+
+
+class TestNextJsDetectors:
+    """Tests for Next.js-specific detector functions."""
+
+    def test_detect_test_framework_npm_test(self) -> None:
+        """detect_test_framework infers Jest for nextjs with npm test."""
+        assert detect_test_framework("npm test", "nextjs") == "jest"
+
+    def test_detect_test_framework_jest(self) -> None:
+        """detect_test_framework detects jest for nextjs."""
+        assert detect_test_framework("jest --coverage", "nextjs") == "jest"
+
+    def test_detect_test_framework_vitest(self) -> None:
+        """detect_test_framework detects vitest for nextjs."""
+        assert detect_test_framework("vitest run", "nextjs") == "vitest"
+
+    def test_detect_linter_next_lint(self) -> None:
+        """detect_linter detects 'next lint' as eslint."""
+        assert detect_linter("npx next lint", "nextjs") == "eslint"
+
+    def test_detect_linter_eslint(self) -> None:
+        """detect_linter still detects eslint for nextjs."""
+        assert detect_linter("npx eslint .", "nextjs") == "eslint"
+
+    def test_detect_typechecker_next_build(self) -> None:
+        """detect_typechecker detects 'next build' as tsc."""
+        assert detect_typechecker("npx next build", "nextjs") == "tsc"
+
+    def test_detect_typechecker_tsc(self) -> None:
+        """detect_typechecker still detects tsc for nextjs."""
+        assert detect_typechecker("npx tsc --noEmit", "nextjs") == "tsc"
+
+
 class TestGetVerifyProfileForLanguage:
     """Tests for get_verify_profile_for_language function."""
 
@@ -279,5 +417,6 @@ class TestGetVerifyProfileForLanguage:
         assert get_verify_profile_for_language("python") == "python"
         assert get_verify_profile_for_language("typescript") == "typescript"
         assert get_verify_profile_for_language("javascript") == "javascript"
+        assert get_verify_profile_for_language("nextjs") == "nextjs"
         assert get_verify_profile_for_language("go") == "go"
         assert get_verify_profile_for_language("unknown") == "none"

@@ -272,6 +272,17 @@ def run_verify_action(
             if any(p.exists() and p.read_text(errors="replace").find("mypy") != -1 for p in candidates):
                 typecheck_command = "mypy ."
 
+    # Apply nextjs profile defaults (opt-in).
+    if verify_profile == "nextjs":
+        if not lint_command:
+            lint_command = "npx next lint"
+        if not format_command:
+            format_command = "npx prettier --check ."
+        if not test_command:
+            test_command = "npm test"
+        if not typecheck_command:
+            typecheck_command = "npx next build"
+
     # Ruff helper modes.
     ruff_needed = any(
         isinstance(cmd, str) and cmd.strip().startswith("ruff")

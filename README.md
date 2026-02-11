@@ -363,6 +363,7 @@ The runner supports multiple programming languages with optimized verification o
 |------------|-----------------|------------------|------------------|--------------|
 | Python     | pytest          | ruff             | ruff             | mypy         |
 | TypeScript | jest, vitest    | eslint           | prettier         | tsc          |
+| Next.js    | jest, vitest    | next lint        | prettier         | next build   |
 | JavaScript | jest, vitest    | eslint           | prettier         | -            |
 | Go         | go test         | golangci-lint    | gofmt            | -            |
 | Rust       | cargo test      | clippy           | cargo fmt        | -            |
@@ -370,6 +371,7 @@ The runner supports multiple programming languages with optimized verification o
 ### Language Detection
 
 The runner auto-detects your project language from manifest files:
+- `package.json` with `next` dependency or `next.config.*` → Next.js
 - `package.json` with TypeScript dependency → TypeScript
 - `package.json` without TypeScript → JavaScript
 - `pyproject.toml`, `setup.py`, `requirements.txt` → Python
@@ -401,6 +403,30 @@ verify_profile: typescript
 test_command: npm test
 lint_command: npx eslint .
 typecheck_command: npx tsc --noEmit
+format_command: npx prettier --check .
+
+ensure_deps: install
+```
+
+### Next.js Quick Start
+
+```bash
+# Auto-detected from package.json with next dependency
+feature-prd-runner run my-feature.md
+
+# Or explicitly
+feature-prd-runner run my-feature.md --language nextjs --verify-profile nextjs
+```
+
+Configure in `.prd_runner/config.yaml`:
+
+```yaml
+language: nextjs
+verify_profile: nextjs
+
+test_command: npm test
+lint_command: npx next lint
+typecheck_command: npx next build
 format_command: npx prettier --check .
 
 ensure_deps: install

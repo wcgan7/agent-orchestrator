@@ -64,7 +64,7 @@ def get_workers_config(config: dict[str, Any]) -> dict[str, Any]:
 
 
 # Valid language values that can be specified in config
-VALID_LANGUAGES = {"python", "typescript", "javascript", "go", "rust", "auto"}
+VALID_LANGUAGES = {"python", "typescript", "javascript", "nextjs", "go", "rust", "auto"}
 
 
 def get_language_config(config: dict[str, Any]) -> str | None:

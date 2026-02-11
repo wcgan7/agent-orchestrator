@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Literal
 
 # Supported language identifiers
-Language = Literal["python", "typescript", "javascript", "go", "rust", "unknown"]
+Language = Literal["python", "typescript", "javascript", "nextjs", "go", "rust", "unknown"]
 
 # Supported test framework identifiers
 TestFramework = Literal[
@@ -63,7 +63,7 @@ def detect_language(project_dir: Path) -> Language:
     """
     project_dir = Path(project_dir).resolve()
 
-    # Check for Node.js/TypeScript projects
+    # Check for Node.js/TypeScript/Next.js projects
     package_json = project_dir / "package.json"
     if package_json.exists():
         try:
@@ -71,6 +71,14 @@ def detect_language(project_dir: Path) -> Language:
             dev_deps = data.get("devDependencies", {})
             deps = data.get("dependencies", {})
             all_deps = {**deps, **dev_deps}
+
+            # Check for Next.js (before TypeScript — Next.js projects also have typescript)
+            if "next" in all_deps:
+                return "nextjs"
+
+            # Check for next.config.* as additional Next.js indicator
+            if any((project_dir / f"next.config.{ext}").exists() for ext in ("js", "ts", "mjs")):
+                return "nextjs"
 
             # Check for TypeScript
             if "typescript" in all_deps:
@@ -82,7 +90,9 @@ def detect_language(project_dir: Path) -> Language:
 
             return "javascript"
         except (json.JSONDecodeError, OSError):
-            # Malformed package.json, still likely a JS project
+            # Malformed package.json — check for next.config.* before defaulting to JS
+            if any((project_dir / f"next.config.{ext}").exists() for ext in ("js", "ts", "mjs")):
+                return "nextjs"
             return "javascript"
 
     # Check for Python projects
@@ -137,7 +147,7 @@ def detect_test_framework(command: str, language: Language) -> TestFramework:
     # Check for npm/yarn/pnpm test which might run jest/vitest/mocha
     if any(runner in cmd for runner in ["npm test", "yarn test", "pnpm test", "npm run test"]):
         # Infer from language
-        if language in ("typescript", "javascript"):
+        if language in ("typescript", "javascript", "nextjs"):
             return "jest"  # Most common default
 
     # Rust test (check before Go since "cargo test" contains "go test" substring)
@@ -173,7 +183,9 @@ def detect_linter(command: str, language: Language) -> Linter:
     if "pylint" in cmd:
         return "pylint"
 
-    # JavaScript/TypeScript linters
+    # JavaScript/TypeScript/Next.js linters
+    if "next lint" in cmd:
+        return "eslint"  # next lint wraps ESLint
     if "eslint" in cmd:
         return "eslint"
     if "biome" in cmd:
@@ -210,7 +222,9 @@ def detect_typechecker(command: str, language: Language) -> TypeChecker:
     if "pyright" in cmd:
         return "pyright"
 
-    # TypeScript type checker
+    # TypeScript/Next.js type checker
+    if "next build" in cmd:
+        return "tsc"  # next build includes type checking
     if "tsc" in cmd:
         return "tsc"
 
@@ -239,6 +253,12 @@ def get_default_verify_commands(language: Language) -> dict[str, str | None]:
             "lint_command": "npx eslint .",
             "format_command": "npx prettier --check .",
             "typecheck_command": "npx tsc --noEmit",
+        },
+        "nextjs": {
+            "test_command": "npm test",
+            "lint_command": "npx next lint",
+            "format_command": "npx prettier --check .",
+            "typecheck_command": "npx next build",
         },
         "javascript": {
             "test_command": "npm test",
@@ -280,6 +300,7 @@ def get_default_deps_command(language: Language) -> str | None:
     commands: dict[Language, str | None] = {
         "python": 'python -m pip install -e ".[test]"',
         "typescript": "npm install",
+        "nextjs": "npm install",
         "javascript": "npm install",
         "go": "go mod download",
         "rust": "cargo build",
@@ -341,6 +362,22 @@ def get_ignored_paths(language: Language) -> list[str]:
             ".tsbuildinfo",
             "*.tsbuildinfo",
         ],
+        "nextjs": [
+            "node_modules/",
+            "dist/",
+            "build/",
+            ".next/",
+            ".nuxt/",
+            ".vercel/",
+            "out/",
+            "coverage/",
+            ".jest_cache/",
+            ".turbo/",
+            "*.js.map",
+            "*.d.ts.map",
+            ".tsbuildinfo",
+            "*.tsbuildinfo",
+        ],
         "javascript": [
             "node_modules/",
             "dist/",
@@ -373,6 +410,7 @@ def get_verify_profile_for_language(language: Language) -> str:
     profiles: dict[Language, str] = {
         "python": "python",
         "typescript": "typescript",
+        "nextjs": "nextjs",
         "javascript": "javascript",
         "go": "go",
         "rust": "rust",
