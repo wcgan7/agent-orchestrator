@@ -494,23 +494,23 @@ Common options:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                     Web Dashboard (React)                    │
-│  KanbanBoard · AgentCards · CommandPalette · NotificationCenter │
-├─────────────────────────────────────────────────────────────┤
-│                  FastAPI Server + WebSocket Hub              │
-│  REST API · Real-time channels · Auth · Presence tracking   │
-├──────────┬──────────┬────────────┬──────────────────────────┤
-│  Task    │  Agent   │  Pipeline  │  Collaboration           │
-│  Engine  │  Pool    │  Engine    │  Layer                   │
-│          │          │            │                          │
-│  CRUD    │  6 roles │  8 templates│  Feedback · Comments    │
-│  Priority│  Spawn   │  18 steps  │  HITL modes · Reasoning │
-│  Deps    │  Schedule│  Conditions│  Timeline · Presence     │
-│  Labels  │  Handoff │  Retries   │  Notifications           │
-├──────────┴──────────┴────────────┴──────────────────────────┤
-│              File-based YAML persistence + FileLock          │
-└─────────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────────────┐
+│                       Web Dashboard (React)                       │
+│  KanbanBoard · AgentCards · CommandPalette · NotificationCenter   │
+├───────────────────────────────────────────────────────────────────┤
+│                    FastAPI Server + WebSocket Hub                  │
+│  REST API · Real-time channels · Auth · Presence tracking         │
+├──────────────┬────────────┬──────────────┬────────────────────────┤
+│  Task        │  Agent     │  Pipeline    │  Collaboration         │
+│  Engine      │  Pool      │  Engine      │  Layer                 │
+│              │            │              │                        │
+│  CRUD        │  6 roles   │  8 templates │  Feedback · Comments   │
+│  Priority    │  Spawn     │  18 steps    │  HITL modes · Reasoning│
+│  Deps        │  Schedule  │  Conditions  │  Timeline · Presence   │
+│  Labels      │  Handoff   │  Retries     │  Notifications         │
+├──────────────┴────────────┴──────────────┴────────────────────────┤
+│                File-based YAML persistence + FileLock             │
+└───────────────────────────────────────────────────────────────────┘
 ```
 
 **Key packages:**
