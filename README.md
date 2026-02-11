@@ -498,7 +498,7 @@ Common options:
 │                       Web Dashboard (React)                       │
 │  KanbanBoard · AgentCards · CommandPalette · NotificationCenter   │
 ├───────────────────────────────────────────────────────────────────┤
-│                    FastAPI Server + WebSocket Hub                  │
+│                   FastAPI Server + WebSocket Hub                   │
 │  REST API · Real-time channels · Auth · Presence tracking         │
 ├──────────────┬────────────┬──────────────┬────────────────────────┤
 │  Task        │  Agent     │  Pipeline    │  Collaboration         │
