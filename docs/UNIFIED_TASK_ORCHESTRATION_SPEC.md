@@ -149,6 +149,10 @@ Events:
 - `task.created`, `task.updated`, `task.claimed`, `task.step_started`, `task.step_completed`, `task.blocked`, `task.completed`
 - `quick_run.started`, `quick_run.completed`, `quick_run.failed`
 
+Implemented event APIs:
+- `GET /api/v2/tasks/events/recent`
+- `GET /api/v2/tasks/{id}/events`
+
 ## 7) UX Rules
 
 - Tasks is default landing page.
@@ -177,18 +181,19 @@ Events:
 ### Backend
 - [x] Enforce dependency guard for `ready` and `in_progress` transitions.
 - [x] Expose state-machine metadata endpoint for UI/test contract checks.
-- [ ] Add orchestrator adapter to consume `TaskEngine.get_ready_tasks()`.
-- [ ] Add atomic claim API/path for `ready -> in_progress`.
-- [ ] Add `POST /api/v2/tasks/{id}/run`.
-- [ ] Add retry/cancel endpoints and policies.
-- [ ] Persist runtime step/task events from pipeline execution.
+- [x] Add orchestrator adapter to consume `TaskEngine.get_ready_tasks()`.
+  - Current rollout is flag-gated via `FEATURE_PRD_USE_V2_TASKS=true`.
+- [x] Add atomic claim API/path for `ready -> in_progress`.
+- [x] Add `POST /api/v2/tasks/{id}/run`.
+- [x] Add retry/cancel endpoints and policies.
+- [x] Persist runtime step/task events from pipeline execution.
 - [ ] Add PRD import preview/commit endpoints.
 - [x] Add quick-run promote endpoint.
 
 ### Frontend
 - [x] Rename `Quick Task` to `Quick Action`.
 - [x] Add clear one-off helper text and promotion toggle.
-- [ ] Add `Run Now` in task detail view.
+- [x] Add `Run Now` in task detail view.
 - [ ] Make Tasks the default landing route/view.
 - [ ] Make Execution a monitor/control surface for active queue/workers.
 - [ ] Add blocked-task explainers and unblock shortcuts.

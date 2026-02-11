@@ -95,6 +95,7 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
   const [taskType, setTaskType] = useState(task.task_type)
   const [saving, setSaving] = useState(false)
   const [activeTab, setActiveTab] = useState<DetailTab>('summary')
+  const [actionError, setActionError] = useState<string | null>(null)
 
   const handleSave = async () => {
     setSaving(true)
@@ -116,7 +117,7 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
 
   const handleTransition = async (newStatus: string) => {
     try {
-      await fetch(
+      const response = await fetch(
         buildApiUrl(`/api/v2/tasks/${task.id}/transition`, projectDir),
         {
           method: 'POST',
@@ -124,9 +125,81 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
           body: JSON.stringify({ status: newStatus }),
         }
       )
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        setActionError(data?.detail || `Failed to transition task (${response.status})`)
+        return
+      }
+      setActionError(null)
       onUpdated()
     } catch {
-      // transition failed
+      setActionError('Transition failed due to a network or server error')
+    }
+  }
+
+  const handleRunNow = async () => {
+    try {
+      const response = await fetch(
+        buildApiUrl(`/api/v2/tasks/${task.id}/run`, projectDir),
+        {
+          method: 'POST',
+          headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ claimer: 'manual_ui', assignee_type: 'agent' }),
+        }
+      )
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        setActionError(data?.detail || `Failed to start task (${response.status})`)
+        return
+      }
+      setActionError(null)
+      onUpdated()
+    } catch {
+      setActionError('Run request failed due to a network or server error')
+    }
+  }
+
+  const handleRetry = async () => {
+    try {
+      const response = await fetch(
+        buildApiUrl(`/api/v2/tasks/${task.id}/retry`, projectDir),
+        {
+          method: 'POST',
+          headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ reason: 'manual_retry_from_task_detail' }),
+        }
+      )
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        setActionError(data?.detail || `Failed to retry task (${response.status})`)
+        return
+      }
+      setActionError(null)
+      onUpdated()
+    } catch {
+      setActionError('Retry request failed due to a network or server error')
+    }
+  }
+
+  const handleCancelTask = async () => {
+    try {
+      const response = await fetch(
+        buildApiUrl(`/api/v2/tasks/${task.id}/cancel`, projectDir),
+        {
+          method: 'POST',
+          headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ reason: 'manual_cancel_from_task_detail' }),
+        }
+      )
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        setActionError(data?.detail || `Failed to cancel task (${response.status})`)
+        return
+      }
+      setActionError(null)
+      onUpdated()
+    } catch {
+      setActionError('Cancel request failed due to a network or server error')
     }
   }
 
@@ -239,30 +312,42 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
 
           {activeTab === 'summary' && (
             <Stack spacing={2} sx={{ mt: 2 }}>
+              {actionError && (
+                <Alert severity="error">{actionError}</Alert>
+              )}
               <Box>
                 <Typography variant="overline" color="text.secondary">Status</Typography>
                 <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap" sx={{ mt: 0.5 }}>
                   <Chip size="small" color={STATUS_COLORS[task.status] || 'default'} label={task.status} />
                   <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap">
                     {task.status === 'backlog' && (
-                      <Button size="small" variant="outlined" onClick={() => handleTransition('ready')}>Move to Ready</Button>
+                      <>
+                        <Button size="small" variant="outlined" onClick={() => handleTransition('ready')}>Move to Ready</Button>
+                        <Button size="small" variant="contained" onClick={handleRunNow}>Run Now</Button>
+                      </>
                     )}
                     {task.status === 'ready' && (
-                      <Button size="small" variant="outlined" onClick={() => handleTransition('in_progress')}>Start</Button>
+                      <Button size="small" variant="contained" onClick={handleRunNow}>Run Now</Button>
                     )}
                     {task.status === 'in_progress' && (
                       <>
                         <Button size="small" variant="outlined" onClick={() => handleTransition('in_review')}>Send to Human Review</Button>
                       </>
                     )}
+                    {task.status === 'blocked' && (
+                      <>
+                        <Button size="small" variant="contained" onClick={handleRunNow}>Run Now</Button>
+                        <Button size="small" variant="outlined" onClick={handleRetry}>Retry</Button>
+                        <Button size="small" color="error" variant="outlined" onClick={handleCancelTask}>Cancel</Button>
+                      </>
+                    )}
                     {task.status === 'in_review' && (
                       <>
                         <Button size="small" variant="outlined" onClick={() => handleTransition('done')}>Approve</Button>
                         <Button size="small" variant="outlined" onClick={() => handleTransition('in_progress')}>Request Changes</Button>
+                        <Button size="small" variant="outlined" onClick={handleRetry}>Retry</Button>
+                        <Button size="small" color="error" variant="outlined" onClick={handleCancelTask}>Cancel</Button>
                       </>
-                    )}
-                    {task.status === 'blocked' && (
-                      <Button size="small" variant="outlined" onClick={() => handleTransition('ready')}>Unblock</Button>
                     )}
                   </Stack>
                 </Stack>

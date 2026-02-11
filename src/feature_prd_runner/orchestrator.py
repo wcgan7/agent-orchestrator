@@ -115,6 +115,8 @@ from .git_utils import _git_changed_files
 from .constants import IGNORED_REVIEW_PATH_PREFIXES
 from .validation import validate_phase_plan_schema, validate_task_queue_schema
 from .workers import WorkersRuntimeConfig, get_workers_runtime_config
+from .task_engine.engine import TaskEngine
+from .task_engine.model import TaskStatus
 
 
 def _sanitize_branch_fragment(value: str) -> str:
@@ -171,6 +173,170 @@ def _step_suffix(task_type: str, task_step: str) -> str:
     elif step_str == TaskStep.COMMIT.value:
         return "-commit"
     return ""
+
+
+def _v2_tasks_enabled() -> bool:
+    return os.getenv("FEATURE_PRD_USE_V2_TASKS", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+def _build_v2_task_prompt(task: Any) -> str:
+    """Build a worker prompt from a v2 task object."""
+    lines: list[str] = [f"Task: {task.title}"]
+    if task.description:
+        lines.append("")
+        lines.append(task.description.strip())
+    if task.acceptance_criteria:
+        lines.append("")
+        lines.append("Acceptance criteria:")
+        for idx, item in enumerate(task.acceptance_criteria, start=1):
+            lines.append(f"{idx}. {item}")
+    if task.context_files:
+        lines.append("")
+        lines.append("Focus files:")
+        for path in task.context_files:
+            lines.append(f"- {path}")
+    lines.append("")
+    lines.append("Implement the task safely, run relevant checks, and summarize outcomes.")
+    return "\n".join(lines)
+
+
+def _run_next_v2_task(
+    *,
+    project_dir: Path,
+    state_dir: Path,
+    run_state: dict[str, Any],
+    shift_minutes: int,
+    heartbeat_seconds: int,
+    heartbeat_grace_seconds: int,
+    override_agents: bool,
+) -> bool:
+    """Claim and execute one v2 task. Returns True if a task was handled."""
+    allow_auto_approve_review = os.getenv("FEATURE_PRD_AUTO_APPROVE_REVIEW", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    engine = TaskEngine(state_dir, allow_auto_approve_review=allow_auto_approve_review)
+    ready_tasks = engine.get_ready_tasks()
+    if not ready_tasks:
+        return False
+
+    candidate = ready_tasks[0]
+    run_id = f"v2-{candidate.id}-{uuid.uuid4().hex[:8]}"
+    claimed = engine.claim_task(
+        candidate.id,
+        claimer="orchestrator_v2",
+        assignee_type="agent",
+        run_id=run_id,
+    )
+    if claimed is None:
+        return False
+
+    run_state.update(
+        {
+            "status": "running",
+            "current_task_id": claimed.id,
+            "current_phase_id": None,
+            "run_id": run_id,
+            "last_error": None,
+            "updated_at": _now_iso(),
+        }
+    )
+
+    engine.update_task(claimed.id, {"current_step": "implement", "error": None, "error_type": None})
+    engine.record_event(
+        claimed.id,
+        "task.step_started",
+        step="implement",
+        run_id=run_id,
+        source="orchestrator_v2",
+    )
+
+    prompt = _build_v2_task_prompt(claimed)
+    context = {"files": claimed.context_files} if claimed.context_files else None
+    success, error_message = execute_custom_prompt(
+        user_prompt=prompt,
+        project_dir=project_dir,
+        override_agents=override_agents,
+        context=context,
+        shift_minutes=shift_minutes,
+        heartbeat_seconds=heartbeat_seconds,
+        heartbeat_grace_seconds=heartbeat_grace_seconds,
+        then_continue=False,
+    )
+
+    if success:
+        engine.record_event(
+            claimed.id,
+            "task.step_completed",
+            step="implement",
+            outcome="success",
+            run_id=run_id,
+            source="orchestrator_v2",
+        )
+        target = TaskStatus.DONE if allow_auto_approve_review else TaskStatus.IN_REVIEW
+        engine.transition_task(claimed.id, target.value)
+        if allow_auto_approve_review:
+            engine.record_event(
+                claimed.id,
+                "task.completed",
+                run_id=run_id,
+                source="orchestrator_v2",
+            )
+        else:
+            engine.record_event(
+                claimed.id,
+                "task.awaiting_human_review",
+                run_id=run_id,
+                source="orchestrator_v2",
+            )
+        run_state.update(
+            {
+                "status": "idle" if allow_auto_approve_review else "blocked",
+                "current_task_id": None if allow_auto_approve_review else claimed.id,
+                "current_phase_id": None,
+                "run_id": None if allow_auto_approve_review else run_id,
+                "last_error": None if allow_auto_approve_review else "Awaiting human review",
+                "updated_at": _now_iso(),
+            }
+        )
+    else:
+        engine.record_event(
+            claimed.id,
+            "task.step_failed",
+            step="implement",
+            outcome="failed",
+            run_id=run_id,
+            error=error_message or "Task execution failed",
+            source="orchestrator_v2",
+        )
+        engine.update_task(
+            claimed.id,
+            {
+                "current_step": "implement",
+                "error": error_message or "Task execution failed",
+                "error_type": "EXECUTION_FAILED",
+            },
+        )
+        engine.transition_task(claimed.id, TaskStatus.BLOCKED.value)
+        engine.record_event(
+            claimed.id,
+            "task.blocked",
+            run_id=run_id,
+            reason=error_message or "Task execution failed",
+            source="orchestrator_v2",
+        )
+        run_state.update(
+            {
+                "status": "blocked",
+                "current_task_id": claimed.id,
+                "current_phase_id": None,
+                "run_id": run_id,
+                "last_error": error_message or "Task execution failed",
+                "updated_at": _now_iso(),
+            }
+        )
+    return True
 
 
 def _gate_before_step(step: TaskStep) -> Optional[GateType]:
@@ -1112,6 +1278,24 @@ def run_feature_prd(
                         _save_data(paths["task_queue"], queue)
                         logger.info("Auto-resumed blocked dependency tasks to resolve deadlock")
                         continue
+                    if _v2_tasks_enabled():
+                        try:
+                            handled_v2 = _run_next_v2_task(
+                                project_dir=project_dir,
+                                state_dir=paths["state_dir"],
+                                run_state=run_state,
+                                shift_minutes=shift_minutes,
+                                heartbeat_seconds=heartbeat_seconds,
+                                heartbeat_grace_seconds=heartbeat_grace_seconds,
+                                override_agents=override_agents,
+                            )
+                        except Exception as e:
+                            logger.exception("V2 task adapter failed: {}", e)
+                            handled_v2 = False
+                        if handled_v2:
+                            _save_data(paths["run_state"], run_state)
+                            logger.info("Handled one v2 task via orchestrator adapter")
+                            continue
                     run_state.update(
                         {
                             "status": "idle",

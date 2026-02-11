@@ -7,8 +7,10 @@ updates, board grouping, migration).
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import defaultdict, deque
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -57,6 +59,54 @@ class TaskEngine:
     def __init__(self, state_dir: Path, allow_auto_approve_review: bool = False) -> None:
         self.store = TaskStore(state_dir)
         self.allow_auto_approve_review = allow_auto_approve_review
+        self._state_dir = state_dir
+        self._events_path = state_dir / "artifacts" / "task_events_v2.jsonl"
+
+    def _emit_event(self, event_type: str, task: Task, **details: Any) -> None:
+        """Append a v2 task runtime event."""
+        try:
+            self._events_path.parent.mkdir(parents=True, exist_ok=True)
+            payload: dict[str, Any] = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "type": event_type,
+                "task_id": task.id,
+                "status": task.status.value,
+            }
+            if details:
+                payload["details"] = details
+            with self._events_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload) + "\n")
+        except Exception:
+            logger.exception("Failed to append task event %s for %s", event_type, task.id)
+
+    def get_recent_events(self, limit: int = 100) -> list[dict[str, Any]]:
+        if limit < 1:
+            return []
+        if not self._events_path.exists():
+            return []
+        lines = self._events_path.read_text(encoding="utf-8").splitlines()
+        selected = lines[-limit:]
+        events: list[dict[str, Any]] = []
+        for line in selected:
+            try:
+                payload = json.loads(line)
+                if isinstance(payload, dict):
+                    events.append(payload)
+            except Exception:
+                continue
+        return events
+
+    def get_task_events(self, task_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        events = self.get_recent_events(limit=max(limit * 5, limit))
+        filtered = [e for e in events if str(e.get("task_id")) == task_id]
+        return filtered[-limit:]
+
+    def record_event(self, task_id: str, event_type: str, **details: Any) -> bool:
+        task = self.get_task(task_id)
+        if task is None:
+            return False
+        self._emit_event(event_type, task, **details)
+        return True
 
     # ------------------------------------------------------------------
     # CRUD
@@ -110,6 +160,7 @@ class TaskEngine:
                     parent.children_ids.append(task.id)
                     parent.touch()
                     tx.dirty = True
+            self._emit_event("task.created", task, source=task.source.value, priority=task.priority.value)
 
         logger.info("Created task %s: %s", task.id, title)
         return task
@@ -187,6 +238,14 @@ class TaskEngine:
     # Status transitions
     # ------------------------------------------------------------------
 
+    def _unresolved_blockers(self, tx: Any, task: Task) -> list[str]:
+        unresolved: list[str] = []
+        for dep_id in task.blocked_by:
+            dep = tx.get(dep_id)
+            if dep is not None and not dep.is_terminal:
+                unresolved.append(dep_id)
+        return unresolved
+
     def transition_task(self, task_id: str, new_status: str) -> Optional[Task]:
         """Move a task to a new status, enforcing valid transitions."""
         target = TaskStatus(new_status)
@@ -207,11 +266,7 @@ class TaskEngine:
             # Dependency guard for frozen state machine:
             # do not allow entering runnable states while blockers remain unresolved.
             if target in {TaskStatus.READY, TaskStatus.IN_PROGRESS}:
-                unresolved = []
-                for dep_id in task.blocked_by:
-                    dep = tx.get(dep_id)
-                    if dep is not None and not dep.is_terminal:
-                        unresolved.append(dep_id)
+                unresolved = self._unresolved_blockers(tx, task)
                 if unresolved:
                     raise ValueError(
                         f"Cannot transition {task.id} to {target.value}; unresolved blockers: {unresolved}"
@@ -222,6 +277,105 @@ class TaskEngine:
             if target == TaskStatus.DONE:
                 self._unblock_dependents(tx, task_id)
             tx.dirty = True
+            self._emit_event("task.transitioned", task, target=target.value)
+            return task
+
+    def claim_task(
+        self,
+        task_id: str,
+        *,
+        claimer: str = "orchestrator",
+        assignee_type: str = "agent",
+        run_id: Optional[str] = None,
+    ) -> Optional[Task]:
+        """Atomically claim a task for execution (move to in_progress).
+
+        This is the execution-safe path used by M2 orchestration entry points.
+        """
+        with self.store.transaction() as tx:
+            task = tx.get(task_id)
+            if task is None:
+                return None
+
+            if task.status in {TaskStatus.DONE, TaskStatus.CANCELLED}:
+                raise ValueError(f"Task {task.id} is terminal ({task.status.value}) and cannot be claimed")
+            if task.status == TaskStatus.IN_REVIEW:
+                raise ValueError(f"Task {task.id} is awaiting human review and cannot be claimed")
+            if task.status == TaskStatus.IN_PROGRESS:
+                raise ValueError(f"Task {task.id} is already in progress")
+
+            unresolved = self._unresolved_blockers(tx, task)
+            if unresolved:
+                raise ValueError(
+                    f"Task {task.id} cannot be claimed; unresolved blockers: {unresolved}"
+                )
+
+            if task.status in {TaskStatus.BACKLOG, TaskStatus.BLOCKED}:
+                task.transition(TaskStatus.READY)
+
+            task.transition(TaskStatus.IN_PROGRESS)
+            task.current_agent_id = claimer
+            if not task.assignee:
+                task.assignee = claimer
+                task.assignee_type = assignee_type
+            task.metadata = dict(task.metadata or {})
+            task.metadata["claimed_by"] = claimer
+            task.metadata["claimed_via"] = "task_engine.claim_task"
+            if run_id:
+                if run_id not in task.run_ids:
+                    task.run_ids.append(run_id)
+                task.metadata["current_run_id"] = run_id
+            tx.dirty = True
+            self._emit_event("task.claimed", task, claimer=claimer, run_id=run_id)
+            return task
+
+    def retry_task(self, task_id: str, reason: Optional[str] = None) -> Optional[Task]:
+        """Requeue a task to READY and increment retry counter."""
+        with self.store.transaction() as tx:
+            task = tx.get(task_id)
+            if task is None:
+                return None
+
+            if task.status == TaskStatus.IN_PROGRESS:
+                raise ValueError(f"Task {task.id} is currently in progress and cannot be retried")
+            if task.status == TaskStatus.DONE:
+                raise ValueError(f"Task {task.id} is done; reopen before retry")
+            if task.status == TaskStatus.CANCELLED:
+                raise ValueError(f"Task {task.id} is cancelled; restore before retry")
+
+            unresolved = self._unresolved_blockers(tx, task)
+            if unresolved:
+                raise ValueError(
+                    f"Task {task.id} cannot be retried; unresolved blockers: {unresolved}"
+                )
+
+            task.retry_count = int(task.retry_count or 0) + 1
+            task.error = None
+            task.error_type = None
+            task.transition(TaskStatus.READY)
+            task.metadata = dict(task.metadata or {})
+            task.metadata["last_retry_reason"] = reason or "manual_retry"
+            tx.dirty = True
+            self._emit_event("task.retried", task, reason=reason or "manual_retry")
+            return task
+
+    def cancel_task(self, task_id: str, reason: Optional[str] = None) -> Optional[Task]:
+        """Cancel a task (operational override)."""
+        with self.store.transaction() as tx:
+            task = tx.get(task_id)
+            if task is None:
+                return None
+            if task.status == TaskStatus.CANCELLED:
+                return task
+            if task.status == TaskStatus.DONE:
+                raise ValueError(f"Task {task.id} is done and cannot be cancelled")
+
+            task.transition(TaskStatus.CANCELLED)
+            task.metadata = dict(task.metadata or {})
+            if reason:
+                task.metadata["cancel_reason"] = reason
+            tx.dirty = True
+            self._emit_event("task.cancelled", task, reason=reason or "manual_cancel")
             return task
 
     def assign_task(self, task_id: str, assignee: str, assignee_type: str = "agent") -> Optional[Task]:

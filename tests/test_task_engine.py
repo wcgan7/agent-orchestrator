@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pytest
 from pathlib import Path
 
@@ -300,6 +301,84 @@ class TestStatusTransitions:
 
         with pytest.raises(ValueError, match="unresolved blockers"):
             engine.transition_task(task.id, "in_progress")
+
+
+class TestClaimTask:
+    def test_claim_ready_moves_to_in_progress(self, engine: TaskEngine) -> None:
+        task = engine.create_task(title="Claim me")
+        engine.transition_task(task.id, "ready")
+        claimed = engine.claim_task(task.id, claimer="orchestrator")
+        assert claimed is not None
+        assert claimed.status == TaskStatus.IN_PROGRESS
+        assert claimed.current_agent_id == "orchestrator"
+
+    def test_claim_backlog_promotes_then_claims(self, engine: TaskEngine) -> None:
+        task = engine.create_task(title="Backlog claim")
+        claimed = engine.claim_task(task.id, claimer="manual_ui")
+        assert claimed is not None
+        assert claimed.status == TaskStatus.IN_PROGRESS
+        assert claimed.assignee == "manual_ui"
+
+    def test_claim_fails_with_unresolved_blockers(self, engine: TaskEngine) -> None:
+        blocker = engine.create_task(title="Blocker")
+        blocked = engine.create_task(title="Blocked")
+        engine.add_dependency(blocked.id, blocker.id)
+        with pytest.raises(ValueError, match="unresolved blockers"):
+            engine.claim_task(blocked.id)
+
+    def test_claim_fails_when_in_review(self, engine: TaskEngine) -> None:
+        task = engine.create_task(title="Needs human gate")
+        engine.transition_task(task.id, "ready")
+        engine.transition_task(task.id, "in_progress")
+        engine.transition_task(task.id, "in_review")
+        with pytest.raises(ValueError, match="awaiting human review"):
+            engine.claim_task(task.id)
+
+
+class TestRetryCancelAndEvents:
+    def test_retry_task_moves_to_ready_and_increments_counter(self, engine: TaskEngine) -> None:
+        task = engine.create_task(title="Retry me")
+        engine.transition_task(task.id, "ready")
+        engine.transition_task(task.id, "in_progress")
+        engine.transition_task(task.id, "blocked")
+        retried = engine.retry_task(task.id, reason="manual")
+        assert retried is not None
+        assert retried.status == TaskStatus.READY
+        assert retried.retry_count == 1
+        assert retried.error is None
+
+    def test_cancel_task_sets_cancelled(self, engine: TaskEngine) -> None:
+        task = engine.create_task(title="Cancel me")
+        cancelled = engine.cancel_task(task.id, reason="no longer needed")
+        assert cancelled is not None
+        assert cancelled.status == TaskStatus.CANCELLED
+
+    def test_task_events_are_persisted(self, engine: TaskEngine, state_dir: Path) -> None:
+        task = engine.create_task(title="Eventful")
+        engine.transition_task(task.id, "ready")
+        engine.claim_task(task.id, claimer="test-suite", run_id="run-test-1")
+        events = engine.get_recent_events(limit=20)
+        assert events
+        event_types = [e.get("type") for e in events]
+        assert "task.created" in event_types
+        assert "task.transitioned" in event_types
+        assert "task.claimed" in event_types
+
+        events_file = state_dir / "artifacts" / "task_events_v2.jsonl"
+        assert events_file.exists()
+        parsed_lines = [json.loads(line) for line in events_file.read_text().splitlines() if line.strip()]
+        assert len(parsed_lines) >= len(events)
+
+    def test_record_event_and_task_event_filter(self, engine: TaskEngine) -> None:
+        t1 = engine.create_task(title="Task one")
+        t2 = engine.create_task(title="Task two")
+        assert engine.record_event(t1.id, "task.custom_marker", marker="alpha")
+        assert engine.record_event(t2.id, "task.custom_marker", marker="beta")
+        assert not engine.record_event("missing-task", "task.custom_marker")
+
+        task1_events = engine.get_task_events(t1.id, limit=10)
+        assert task1_events
+        assert all(e.get("task_id") == t1.id for e in task1_events)
 
 
 # ---------------------------------------------------------------------------
