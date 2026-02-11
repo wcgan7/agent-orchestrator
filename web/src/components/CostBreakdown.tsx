@@ -40,203 +40,6 @@ type TabId = 'agent' | 'task' | 'step'
 
 const PIPELINE_STEPS = ['plan', 'implement', 'verify', 'review', 'commit'] as const
 const BUDGET_WARNING_THRESHOLD = 0.8
-const COST_BREAKDOWN_STYLES = `
-.cost-breakdown-content {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-4);
-}
-
-.cost-breakdown-summary {
-  display: grid;
-  grid-template-columns: 1fr 1fr 1fr;
-  gap: var(--spacing-3);
-}
-
-.cost-breakdown-summary-card {
-  padding: var(--spacing-3);
-  background: var(--color-bg-secondary);
-  border-radius: var(--radius-sm);
-  text-align: center;
-}
-
-.cost-breakdown-summary-value {
-  font-size: var(--text-2xl);
-  font-weight: var(--font-bold);
-  color: var(--color-text-primary);
-}
-
-.cost-breakdown-summary-label {
-  font-size: var(--text-xs);
-  color: var(--color-text-secondary);
-  margin-top: var(--spacing-1);
-}
-
-.cost-breakdown-warnings {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-2);
-}
-
-.cost-breakdown-warning {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-2);
-  padding: var(--spacing-2) var(--spacing-3);
-  background: var(--color-warning-50);
-  border-left: 3px solid var(--color-warning-500);
-  border-radius: var(--radius-sm);
-  font-size: var(--text-sm);
-  color: var(--color-text-primary);
-}
-
-.cost-breakdown-warning-icon {
-  color: var(--color-warning-500);
-  font-size: var(--text-lg);
-  flex-shrink: 0;
-}
-
-.cost-breakdown-tabs {
-  display: flex;
-  gap: var(--spacing-1);
-  border-bottom: 1px solid var(--color-border-default);
-  padding-bottom: 0;
-}
-
-.cost-breakdown-tab {
-  padding: var(--spacing-2) var(--spacing-3);
-  border: none;
-  background: none;
-  font-size: var(--text-sm);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-  transition: all var(--transition-base);
-}
-
-.cost-breakdown-tab:hover {
-  color: var(--color-text-primary);
-}
-
-.cost-breakdown-tab.active {
-  color: var(--color-primary-500);
-  border-bottom-color: var(--color-primary-500);
-  font-weight: var(--font-semibold);
-}
-
-.cost-breakdown-tab-content {
-  min-height: 100px;
-}
-
-.cost-breakdown-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-3);
-}
-
-.cost-breakdown-empty {
-  font-size: var(--text-sm);
-  color: var(--color-text-secondary);
-  text-align: center;
-  padding: var(--spacing-4);
-}
-
-.cost-breakdown-row {
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-2);
-}
-
-.cost-breakdown-row-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--spacing-2);
-}
-
-.cost-breakdown-row-name {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-2);
-}
-
-.cost-breakdown-agent-name {
-  font-weight: var(--font-semibold);
-  color: var(--color-text-primary);
-  font-size: var(--text-sm);
-}
-
-.cost-breakdown-agent-role {
-  font-size: var(--text-xs);
-  color: var(--color-text-muted);
-  padding: 1px var(--spacing-2);
-  background: var(--color-bg-secondary);
-  border-radius: var(--radius-full);
-}
-
-.cost-breakdown-type-name {
-  font-weight: var(--font-semibold);
-  color: var(--color-text-primary);
-  font-size: var(--text-sm);
-  text-transform: capitalize;
-}
-
-.cost-breakdown-type-count {
-  font-size: var(--text-xs);
-  color: var(--color-text-muted);
-}
-
-.cost-breakdown-step-name {
-  font-weight: var(--font-semibold);
-  color: var(--color-text-primary);
-  font-size: var(--text-sm);
-  text-transform: capitalize;
-}
-
-.cost-breakdown-row-stats {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-3);
-}
-
-.cost-breakdown-stat-tokens {
-  font-size: var(--text-xs);
-  color: var(--color-text-secondary);
-}
-
-.cost-breakdown-stat-cost {
-  font-size: var(--text-sm);
-  font-weight: var(--font-semibold);
-  color: var(--color-text-primary);
-}
-
-.cost-breakdown-stat-time {
-  font-size: var(--text-xs);
-  color: var(--color-text-muted);
-}
-
-.cost-breakdown-bar-track {
-  width: 100%;
-  height: 6px;
-  background: var(--color-bg-secondary);
-  border-radius: var(--radius-full);
-  overflow: hidden;
-}
-
-.cost-breakdown-bar-fill {
-  height: 100%;
-  background: var(--color-primary-500);
-  border-radius: var(--radius-full);
-  transition: width var(--transition-base);
-  min-width: 2px;
-}
-
-.cost-breakdown-bar-fill.warning {
-  background: var(--color-warning-500);
-}
-`
 
 const normalizeAgents = (value: unknown): AgentCost[] => {
   if (!Array.isArray(value)) return []
@@ -409,7 +212,6 @@ export default function CostBreakdown({ projectDir }: Props) {
 
   return (
     <Box>
-      <style>{COST_BREAKDOWN_STYLES}</style>
       <Typography variant="h2" sx={{ fontSize: '1.125rem', mb: 1.5 }}>Cost Breakdown</Typography>
 
       {loading ? (
@@ -429,17 +231,17 @@ export default function CostBreakdown({ projectDir }: Props) {
           size="sm"
         />
       ) : (
-        <Stack spacing={1.5} className="cost-breakdown-content">
-          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap" className="cost-breakdown-summary">
-            <Chip className="cost-breakdown-summary-card" label={`Total Cost ${formatCost(totalCost)}`} color="warning" variant="outlined" />
-            <Chip className="cost-breakdown-summary-card" label={`Total Tokens ${formatTokens(totalTokens)}`} color="info" variant="outlined" />
-            <Chip className="cost-breakdown-summary-card" label={`Avg Cost / Task ${formatCost(avgCostPerTask)}`} variant="outlined" />
+        <Stack spacing={1.5}>
+          <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+            <Chip sx={{ p: 0.5 }} label={`Total Cost ${formatCost(totalCost)}`} color="warning" variant="outlined" />
+            <Chip sx={{ p: 0.5 }} label={`Total Tokens ${formatTokens(totalTokens)}`} color="info" variant="outlined" />
+            <Chip sx={{ p: 0.5 }} label={`Avg Cost / Task ${formatCost(avgCostPerTask)}`} variant="outlined" />
           </Stack>
 
           {budgetWarnings.length > 0 && (
-            <Stack spacing={1} className="cost-breakdown-warnings">
+            <Stack spacing={1}>
               {budgetWarnings.map((agent) => (
-                <Alert key={agent.agent_id} className="cost-breakdown-warning" severity="warning">
+                <Alert key={agent.agent_id} severity="warning">
                   <strong>{agent.name}</strong> has used{' '}
                   {agent.budget_usd
                     ? `${Math.round((agent.cost_usd / agent.budget_usd) * 100)}%`
@@ -451,41 +253,40 @@ export default function CostBreakdown({ projectDir }: Props) {
           )}
 
           <Tabs
-            className="cost-breakdown-tabs"
             value={activeTab}
             onChange={(_, value: TabId) => setActiveTab(value)}
             variant="scrollable"
             allowScrollButtonsMobile
           >
-            <Tab className="cost-breakdown-tab" value="agent" label="By Agent" />
-            <Tab className="cost-breakdown-tab" value="task" label="By Task Type" />
-            <Tab className="cost-breakdown-tab" value="step" label="By Step" />
+            <Tab value="agent" label="By Agent" />
+            <Tab value="task" label="By Task Type" />
+            <Tab value="step" label="By Step" />
           </Tabs>
 
-          <Box className="cost-breakdown-tab-content">
+          <Box sx={{ minHeight: 100 }}>
             {activeTab === 'agent' && (
-              <Stack spacing={1} className="cost-breakdown-list">
+              <Stack spacing={1}>
                 {agents.length === 0 ? (
-                  <Typography className="cost-breakdown-empty" color="text.secondary">No agent data available</Typography>
+                  <Typography color="text.secondary" sx={{ textAlign: 'center', py: 2 }}>No agent data available</Typography>
                 ) : (
                   agents.slice().sort((a, b) => b.cost_usd - a.cost_usd).map((agent) => (
-                    <Box key={agent.agent_id} className="cost-breakdown-row">
-                      <Stack direction="row" justifyContent="space-between" className="cost-breakdown-row-header" sx={{ mb: 0.5 }}>
-                        <Stack direction="row" spacing={1} className="cost-breakdown-row-name">
-                          <Typography className="cost-breakdown-agent-name" fontWeight={600}>{agent.name}</Typography>
-                          {agent.role && <Typography className="cost-breakdown-agent-role" variant="caption" color="text.secondary">{agent.role}</Typography>}
+                    <Box key={agent.agent_id}>
+                      <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }} flexWrap="wrap" gap={1}>
+                        <Stack direction="row" spacing={1} alignItems="center">
+                          <Typography fontWeight={600} variant="body2">{agent.name}</Typography>
+                          {agent.role && <Chip size="small" variant="outlined" label={agent.role} />}
                         </Stack>
-                        <Stack direction="row" spacing={1} className="cost-breakdown-row-stats">
-                          <Typography className="cost-breakdown-stat-tokens" variant="caption">{formatTokens(agent.tokens_used)} tokens</Typography>
-                          <Typography className="cost-breakdown-stat-cost" variant="caption">{formatCost(agent.cost_usd)}</Typography>
-                          <Typography className="cost-breakdown-stat-time" variant="caption">{formatDuration(agent.elapsed_seconds)}</Typography>
+                        <Stack direction="row" spacing={1}>
+                          <Typography variant="caption">{formatTokens(agent.tokens_used)} tokens</Typography>
+                          <Typography variant="caption" fontWeight={600}>{formatCost(agent.cost_usd)}</Typography>
+                          <Typography variant="caption" color="text.secondary">{formatDuration(agent.elapsed_seconds)}</Typography>
                         </Stack>
                       </Stack>
                       <LinearProgress
-                        className="cost-breakdown-bar-track"
                         variant="determinate"
                         value={Math.min((agent.cost_usd / maxAgentCost) * 100, 100)}
                         color={agent.budget_usd && agent.cost_usd / agent.budget_usd >= BUDGET_WARNING_THRESHOLD ? 'warning' : 'info'}
+                        sx={{ height: 6, borderRadius: 6 }}
                       />
                     </Box>
                   ))
@@ -494,23 +295,23 @@ export default function CostBreakdown({ projectDir }: Props) {
             )}
 
             {activeTab === 'task' && (
-              <Stack spacing={1} className="cost-breakdown-list">
+              <Stack spacing={1}>
                 {taskTypeBreakdown.length === 0 ? (
-                  <Typography className="cost-breakdown-empty" color="text.secondary">No task data available</Typography>
+                  <Typography color="text.secondary" sx={{ textAlign: 'center', py: 2 }}>No task data available</Typography>
                 ) : (
                   taskTypeBreakdown.map((entry) => (
-                    <Box key={entry.type} className="cost-breakdown-row">
-                      <Stack direction="row" justifyContent="space-between" className="cost-breakdown-row-header" sx={{ mb: 0.5 }}>
-                        <Stack direction="row" spacing={1} className="cost-breakdown-row-name">
-                          <Typography className="cost-breakdown-type-name" fontWeight={600}>{entry.type}</Typography>
-                          <Typography className="cost-breakdown-type-count" variant="caption" color="text.secondary">{entry.count} tasks</Typography>
+                    <Box key={entry.type}>
+                      <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }} flexWrap="wrap" gap={1}>
+                        <Stack direction="row" spacing={1}>
+                          <Typography fontWeight={600} variant="body2" sx={{ textTransform: 'capitalize' }}>{entry.type}</Typography>
+                          <Typography variant="caption" color="text.secondary">{entry.count} tasks</Typography>
                         </Stack>
-                        <Stack direction="row" spacing={1} className="cost-breakdown-row-stats">
-                          <Typography className="cost-breakdown-stat-tokens" variant="caption">{formatTokens(entry.tokens)} tokens</Typography>
-                          <Typography className="cost-breakdown-stat-cost" variant="caption">{formatCost(entry.cost)}</Typography>
+                        <Stack direction="row" spacing={1}>
+                          <Typography variant="caption">{formatTokens(entry.tokens)} tokens</Typography>
+                          <Typography variant="caption" fontWeight={600}>{formatCost(entry.cost)}</Typography>
                         </Stack>
                       </Stack>
-                      <LinearProgress className="cost-breakdown-bar-track" variant="determinate" value={Math.min((entry.cost / maxTaskTypeCost) * 100, 100)} />
+                      <LinearProgress sx={{ height: 6, borderRadius: 6 }} variant="determinate" value={Math.min((entry.cost / maxTaskTypeCost) * 100, 100)} />
                     </Box>
                   ))
                 )}
@@ -518,23 +319,23 @@ export default function CostBreakdown({ projectDir }: Props) {
             )}
 
             {activeTab === 'step' && (
-              <Stack spacing={1} className="cost-breakdown-list">
+              <Stack spacing={1}>
                 {stepBreakdown.length === 0 ? (
-                  <Typography className="cost-breakdown-empty" color="text.secondary">No step data available</Typography>
+                  <Typography color="text.secondary" sx={{ textAlign: 'center', py: 2 }}>No step data available</Typography>
                 ) : (
                   stepBreakdown.map((entry) => (
-                    <Box key={entry.step} className="cost-breakdown-row">
-                      <Stack direction="row" justifyContent="space-between" className="cost-breakdown-row-header" sx={{ mb: 0.5 }}>
-                        <Stack direction="row" spacing={1} className="cost-breakdown-row-name">
-                          <Typography className="cost-breakdown-step-name" fontWeight={600}>{entry.step}</Typography>
-                          <Typography className="cost-breakdown-type-count" variant="caption" color="text.secondary">{entry.count} tasks</Typography>
+                    <Box key={entry.step}>
+                      <Stack direction="row" justifyContent="space-between" sx={{ mb: 0.5 }} flexWrap="wrap" gap={1}>
+                        <Stack direction="row" spacing={1}>
+                          <Typography fontWeight={600} variant="body2" sx={{ textTransform: 'capitalize' }}>{entry.step}</Typography>
+                          <Typography variant="caption" color="text.secondary">{entry.count} tasks</Typography>
                         </Stack>
-                        <Stack direction="row" spacing={1} className="cost-breakdown-row-stats">
-                          <Typography className="cost-breakdown-stat-tokens" variant="caption">{formatTokens(entry.tokens)} tokens</Typography>
-                          <Typography className="cost-breakdown-stat-cost" variant="caption">{formatCost(entry.cost)}</Typography>
+                        <Stack direction="row" spacing={1}>
+                          <Typography variant="caption">{formatTokens(entry.tokens)} tokens</Typography>
+                          <Typography variant="caption" fontWeight={600}>{formatCost(entry.cost)}</Typography>
                         </Stack>
                       </Stack>
-                      <LinearProgress className="cost-breakdown-bar-track" variant="determinate" value={Math.min((entry.cost / maxStepCost) * 100, 100)} />
+                      <LinearProgress sx={{ height: 6, borderRadius: 6 }} variant="determinate" value={Math.min((entry.cost / maxStepCost) * 100, 100)} />
                     </Box>
                   ))
                 )}

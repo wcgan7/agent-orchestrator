@@ -26,411 +26,6 @@ interface FileReviewProps {
   projectDir?: string
 }
 
-const FILE_REVIEW_STYLES = `
-.file-review {
-  background: var(--color-bg-primary);
-  border-radius: var(--radius-lg);
-  padding: var(--spacing-6);
-  box-shadow: var(--shadow-sm);
-  margin-bottom: var(--spacing-6);
-}
-
-.review-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: var(--spacing-6);
-  flex-wrap: wrap;
-  gap: var(--spacing-4);
-}
-
-.review-header h2 {
-  margin: 0;
-  font-size: var(--text-xl);
-}
-
-.review-stats {
-  display: flex;
-  gap: var(--spacing-4);
-  font-size: var(--text-sm);
-}
-
-.stat {
-  padding: var(--spacing-1) var(--spacing-3);
-  border-radius: var(--radius-xl);
-  font-weight: var(--font-semibold);
-}
-
-.stat.approved {
-  background: var(--color-success-100);
-  color: var(--color-success-700);
-}
-
-.stat.rejected {
-  background: var(--color-error-100);
-  color: var(--color-error-700);
-}
-
-.stat.pending {
-  background: var(--color-warning-100);
-  color: var(--color-warning-700);
-}
-
-.stat.total {
-  background: var(--color-primary-100);
-  color: var(--color-primary-700);
-}
-
-.loading,
-.error,
-.empty-state {
-  padding: var(--spacing-8);
-  text-align: center;
-  color: var(--color-text-secondary);
-}
-
-.error {
-  color: var(--color-error-500);
-}
-
-.review-container {
-  display: grid;
-  grid-template-columns: 300px 1fr;
-  gap: var(--spacing-6);
-  height: 600px;
-}
-
-.file-list {
-  border: 1px solid var(--color-border-default);
-  border-radius: var(--radius-lg);
-  overflow-y: auto;
-  background: var(--color-bg-secondary);
-}
-
-.file-item {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-3);
-  padding: var(--spacing-3);
-  border-bottom: 1px solid var(--color-border-default);
-  cursor: pointer;
-  transition: background var(--transition-base);
-  position: relative;
-}
-
-.file-item:hover {
-  background: var(--color-bg-tertiary);
-}
-
-.file-item.selected {
-  background: var(--color-primary-50);
-  border-left: 4px solid var(--color-primary-500);
-}
-
-.file-item.approved {
-  border-left: 4px solid var(--color-success-500);
-}
-
-.file-item.rejected {
-  border-left: 4px solid var(--color-error-500);
-}
-
-.file-status {
-  flex-shrink: 0;
-}
-
-.status-icon {
-  display: inline-block;
-  width: 24px;
-  height: 24px;
-  border-radius: var(--radius-sm);
-  color: var(--color-text-inverse);
-  font-weight: var(--font-bold);
-  text-align: center;
-  line-height: 24px;
-  font-size: var(--text-sm);
-}
-
-.file-info {
-  flex: 1;
-  min-width: 0;
-}
-
-.file-name {
-  font-size: var(--text-sm);
-  font-family: var(--font-mono);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-changes {
-  display: flex;
-  gap: var(--spacing-2);
-  font-size: var(--text-xs);
-  margin-top: var(--spacing-1);
-}
-
-.additions {
-  color: var(--color-success-700);
-  font-weight: var(--font-semibold);
-}
-
-.deletions {
-  color: var(--color-error-700);
-  font-weight: var(--font-semibold);
-}
-
-.review-badge {
-  position: absolute;
-  top: var(--spacing-2);
-  right: var(--spacing-2);
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: var(--text-xs);
-}
-
-.file-item.approved .review-badge {
-  background: var(--color-success-500);
-  color: var(--color-text-inverse);
-}
-
-.file-item.rejected .review-badge {
-  background: var(--color-error-500);
-  color: var(--color-text-inverse);
-}
-
-.file-detail {
-  border: 1px solid var(--color-border-default);
-  border-radius: var(--radius-lg);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.detail-header {
-  background: var(--color-bg-secondary);
-  padding: var(--spacing-4);
-  border-bottom: 1px solid var(--color-border-default);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: var(--spacing-2);
-}
-
-.file-path-header {
-  display: flex;
-  align-items: center;
-  gap: var(--spacing-3);
-}
-
-.status-badge {
-  padding: var(--spacing-1) var(--spacing-3);
-  border-radius: var(--radius-sm);
-  color: var(--color-text-inverse);
-  font-size: var(--text-xs);
-  font-weight: var(--font-semibold);
-  text-transform: uppercase;
-}
-
-.file-path {
-  font-family: var(--font-mono);
-  font-size: var(--text-sm);
-  font-weight: var(--font-semibold);
-}
-
-.change-stats {
-  display: flex;
-  gap: var(--spacing-4);
-}
-
-.diff-container {
-  flex: 1;
-  overflow-y: auto;
-  background: var(--color-bg-secondary);
-}
-
-.diff-view {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: var(--leading-snug);
-}
-
-.diff-line {
-  padding: 0 var(--spacing-3);
-  white-space: pre;
-  overflow-x: auto;
-}
-
-.diff-line.addition {
-  background: var(--color-success-50);
-  color: var(--color-text-primary);
-}
-
-.diff-line.deletion {
-  background: var(--color-error-50);
-  color: var(--color-text-primary);
-}
-
-.diff-line.hunk {
-  background: var(--color-primary-50);
-  color: var(--color-text-secondary);
-  font-weight: var(--font-semibold);
-}
-
-.no-diff {
-  padding: var(--spacing-8);
-  text-align: center;
-  color: var(--color-text-secondary);
-}
-
-.review-actions {
-  padding: var(--spacing-4);
-  border-top: 1px solid var(--color-border-default);
-  background: var(--color-bg-primary);
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-3);
-}
-
-.comment-input {
-  width: 100%;
-  padding: var(--spacing-3);
-  border: 1px solid var(--color-border-default);
-  border-radius: var(--radius-sm);
-  font-family: inherit;
-  font-size: var(--text-sm);
-  resize: vertical;
-}
-
-.comment-input:focus {
-  outline: none;
-  border-color: var(--color-primary-500);
-  box-shadow: 0 0 0 3px var(--color-primary-100);
-}
-
-.comment-input:disabled {
-  background: var(--color-bg-secondary);
-  cursor: not-allowed;
-}
-
-.action-buttons {
-  display: flex;
-  gap: var(--spacing-3);
-  justify-content: flex-end;
-}
-
-.approve-btn,
-.reject-btn {
-  padding: var(--spacing-3) var(--spacing-6);
-  border: none;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-sm);
-  font-weight: var(--font-semibold);
-  cursor: pointer;
-  transition: all var(--transition-base);
-}
-
-.approve-btn {
-  background: var(--color-success-500);
-  color: var(--color-text-inverse);
-}
-
-.approve-btn:hover:not(:disabled) {
-  background: var(--color-success-600);
-}
-
-.reject-btn {
-  background: var(--color-error-500);
-  color: var(--color-text-inverse);
-}
-
-.reject-btn:hover:not(:disabled) {
-  background: var(--color-error-600);
-}
-
-.approve-btn:disabled,
-.reject-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-.navigation-buttons {
-  padding: var(--spacing-4);
-  border-top: 1px solid var(--color-border-default);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background: var(--color-bg-tertiary);
-}
-
-.navigation-buttons button {
-  padding: var(--spacing-2) var(--spacing-4);
-  background: var(--color-primary-500);
-  color: var(--color-text-inverse);
-  border: none;
-  border-radius: var(--radius-sm);
-  font-size: var(--text-sm);
-  cursor: pointer;
-  transition: background var(--transition-base);
-}
-
-.navigation-buttons button:hover:not(:disabled) {
-  background: var(--color-primary-600);
-}
-
-.navigation-buttons button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-  background: var(--color-gray-400);
-}
-
-.file-counter {
-  font-size: var(--text-sm);
-  color: var(--color-text-secondary);
-}
-
-@media (max-width: 1024px) {
-  .review-container {
-    grid-template-columns: 1fr;
-    height: auto;
-  }
-
-  .file-list {
-    max-height: 300px;
-  }
-
-  .diff-container {
-    max-height: 400px;
-  }
-}
-
-@media (max-width: 768px) {
-  .review-header {
-    flex-direction: column;
-    align-items: flex-start;
-  }
-
-  .review-stats {
-    flex-wrap: wrap;
-  }
-
-  .action-buttons {
-    flex-direction: column;
-  }
-
-  .approve-btn,
-  .reject-btn {
-    width: 100%;
-  }
-}
-`
-
 const FileReview = ({ taskId, projectDir }: FileReviewProps) => {
   const [files, setFiles] = useState<FileChange[]>([])
   const [loading, setLoading] = useState(true)
@@ -528,10 +123,10 @@ const FileReview = ({ taskId, projectDir }: FileReviewProps) => {
   }
 
   const renderDiff = (diff: string) => {
-    if (!diff) return <div className="no-diff">No diff available</div>
+    if (!diff) return <Box className="no-diff" sx={{ p: 6, textAlign: 'center', color: 'text.secondary' }}>No diff available</Box>
 
     return (
-      <div className="diff-view">
+      <Box className="diff-view" sx={{ fontFamily: 'monospace', fontSize: '0.75rem', lineHeight: 1.4 }}>
         {diff.split('\n').map((line, idx) => {
           let className = 'diff-line'
           if (line.startsWith('+') && !line.startsWith('+++')) className += ' addition'
@@ -539,27 +134,44 @@ const FileReview = ({ taskId, projectDir }: FileReviewProps) => {
           else if (line.startsWith('@@')) className += ' hunk'
 
           return (
-            <div key={idx} className={className}>
+            <Box
+              key={idx}
+              className={className}
+              sx={{
+                px: 1.5,
+                whiteSpace: 'pre',
+                overflowX: 'auto',
+                bgcolor: className.includes('addition')
+                  ? 'success.light'
+                  : className.includes('deletion')
+                    ? 'error.light'
+                    : className.includes('hunk')
+                      ? 'info.light'
+                      : 'transparent',
+                color: className.includes('hunk') ? 'text.secondary' : 'text.primary',
+                fontWeight: className.includes('hunk') ? 600 : 400,
+              }}
+            >
               {line || ' '}
-            </div>
+            </Box>
           )
         })}
-      </div>
+      </Box>
     )
   }
 
   if (loading) {
     return (
-      <div className="file-review">
+      <Box className="file-review" sx={{ p: 3 }}>
         <Typography variant="h2" sx={{ fontSize: '1.125rem', mb: 1.5 }}>File Review</Typography>
         <LoadingSpinner label="Loading file changes..." />
-      </div>
+      </Box>
     )
   }
 
   if (error) {
     return (
-      <div className="file-review">
+      <Box className="file-review" sx={{ p: 3 }}>
         <Typography variant="h2" sx={{ fontSize: '1.125rem', mb: 1.5 }}>File Review</Typography>
         <EmptyState
           icon={<span>⚠️</span>}
@@ -567,13 +179,13 @@ const FileReview = ({ taskId, projectDir }: FileReviewProps) => {
           description={error}
           size="sm"
         />
-      </div>
+      </Box>
     )
   }
 
   if (files.length === 0) {
     return (
-      <div className="file-review">
+      <Box className="file-review" sx={{ p: 3 }}>
         <Typography variant="h2" sx={{ fontSize: '1.125rem', mb: 1.5 }}>File Review</Typography>
         <EmptyState
           icon={<span>📁</span>}
@@ -581,7 +193,7 @@ const FileReview = ({ taskId, projectDir }: FileReviewProps) => {
           description="File changes will appear here when they are ready for review."
           size="sm"
         />
-      </div>
+      </Box>
     )
   }
 
@@ -591,71 +203,134 @@ const FileReview = ({ taskId, projectDir }: FileReviewProps) => {
   const pendingCount = files.filter((f) => f.approved === null).length
 
   return (
-    <div className="file-review">
-      <style>{FILE_REVIEW_STYLES}</style>
+    <Box
+      className="file-review"
+      sx={{
+        background: 'background.paper',
+        borderRadius: 2,
+        p: 3,
+        boxShadow: 1,
+        mb: 3,
+      }}
+    >
       <Stack direction={{ xs: 'column', sm: 'row' }} justifyContent="space-between" alignItems={{ sm: 'center' }} className="review-header" spacing={1} sx={{ mb: 1.5 }}>
         <Typography variant="h2" sx={{ fontSize: '1.125rem' }}>File Review</Typography>
         <Stack direction="row" spacing={0.75} className="review-stats" useFlexGap flexWrap="wrap">
-          <Chip className="stat approved" size="small" color="success" variant="outlined" label={`✓ ${approvedCount}`} />
-          <Chip className="stat rejected" size="small" color="error" variant="outlined" label={`✗ ${rejectedCount}`} />
-          <Chip className="stat pending" size="small" color="warning" variant="outlined" label={`⏳ ${pendingCount}`} />
-          <Chip className="stat total" size="small" variant="outlined" label={`Total: ${files.length}`} />
+          <Chip size="small" color="success" variant="outlined" label={`✓ ${approvedCount}`} />
+          <Chip size="small" color="error" variant="outlined" label={`✗ ${rejectedCount}`} />
+          <Chip size="small" color="warning" variant="outlined" label={`⏳ ${pendingCount}`} />
+          <Chip size="small" variant="outlined" label={`Total: ${files.length}`} />
         </Stack>
       </Stack>
 
-      <div className="review-container">
-        <div className="file-list">
+      <Box
+        sx={{
+          display: 'grid',
+          gridTemplateColumns: { xs: '1fr', lg: '300px 1fr' },
+          gap: 3,
+          height: { xs: 'auto', lg: 600 },
+        }}
+      >
+        <Box className="file-list" sx={{ border: 1, borderColor: 'divider', borderRadius: 2, overflowY: 'auto', bgcolor: 'background.default', maxHeight: { xs: 300, lg: 'none' } }}>
           {files.map((file, idx) => (
             <Box
               key={file.file_path}
               className={`file-item ${idx === selectedFile ? 'selected' : ''} ${file.approved === true ? 'approved' : file.approved === false ? 'rejected' : ''}`}
               onClick={() => setSelectedFile(idx)}
               sx={{
-                border: 1,
-                borderColor: idx === selectedFile ? 'primary.main' : 'divider',
-                borderRadius: 1,
-                p: 1,
+                borderBottom: 1,
+                borderColor: 'divider',
+                p: 1.25,
                 cursor: 'pointer',
-                mb: 0.75,
-                bgcolor: idx === selectedFile ? 'action.selected' : 'background.default',
+                position: 'relative',
+                bgcolor: idx === selectedFile ? 'action.selected' : 'transparent',
+                borderLeft: `4px solid ${
+                  file.approved === true
+                    ? 'var(--mui-palette-success-main)'
+                    : file.approved === false
+                      ? 'var(--mui-palette-error-main)'
+                      : idx === selectedFile
+                        ? 'var(--mui-palette-primary-main)'
+                        : 'transparent'
+                }`,
+                '&:hover': {
+                  bgcolor: 'action.hover',
+                },
               }}
             >
               <Stack direction="row" spacing={1} alignItems="center">
                 <div className="file-status">
-                  <span className="status-icon" style={{ backgroundColor: getStatusColor(file.status) }}>
+                  <Box
+                    component="span"
+                    className="status-icon"
+                    sx={{
+                      display: 'inline-flex',
+                      width: 24,
+                      height: 24,
+                      borderRadius: 1,
+                      color: 'common.white',
+                      fontWeight: 700,
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '0.75rem',
+                    }}
+                    style={{ backgroundColor: getStatusColor(file.status) }}
+                  >
                     {getStatusIcon(file.status)}
-                  </span>
+                  </Box>
                 </div>
-                <div className="file-info" style={{ flex: 1 }}>
-                  <div className="file-name">{file.file_path}</div>
-                  <div className="file-changes">
-                    <span className="additions">+{file.additions}</span>
-                    <span className="deletions">-{file.deletions}</span>
-                  </div>
-                </div>
-                {file.approved !== null && <div className="review-badge">{file.approved ? '✓' : '✗'}</div>}
+                <Box className="file-info" sx={{ flex: 1, minWidth: 0 }}>
+                  <Typography className="file-name" variant="body2" sx={{ fontFamily: 'monospace', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {file.file_path}
+                  </Typography>
+                  <Box className="file-changes" sx={{ display: 'flex', gap: 1, fontSize: '0.75rem', mt: 0.25 }}>
+                    <Box component="span" className="additions" sx={{ color: 'success.dark', fontWeight: 600 }}>+{file.additions}</Box>
+                    <Box component="span" className="deletions" sx={{ color: 'error.dark', fontWeight: 600 }}>-{file.deletions}</Box>
+                  </Box>
+                </Box>
+                {file.approved !== null && (
+                  <Box
+                    className="review-badge"
+                    sx={{
+                      position: 'absolute',
+                      top: 8,
+                      right: 8,
+                      width: 24,
+                      height: 24,
+                      borderRadius: '50%',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      fontSize: '0.75rem',
+                      bgcolor: file.approved ? 'success.main' : 'error.main',
+                      color: 'common.white',
+                    }}
+                  >
+                    {file.approved ? '✓' : '✗'}
+                  </Box>
+                )}
               </Stack>
             </Box>
           ))}
-        </div>
+        </Box>
 
-        <div className="file-detail">
-          <Stack direction="row" justifyContent="space-between" alignItems="center" className="detail-header" sx={{ mb: 1 }}>
-            <div className="file-path-header">
-              <span className="status-badge" style={{ backgroundColor: getStatusColor(currentFile.status) }}>
+        <Box className="file-detail" sx={{ border: 1, borderColor: 'divider', borderRadius: 2, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" className="detail-header" sx={{ p: 2, bgcolor: 'action.hover', borderBottom: 1, borderColor: 'divider', gap: 1, flexWrap: 'wrap' }}>
+            <Box className="file-path-header" sx={{ display: 'flex', alignItems: 'center', gap: 1.5 }}>
+              <Box component="span" className="status-badge" sx={{ px: 1, py: 0.25, borderRadius: 1, color: 'common.white', fontSize: '0.7rem', fontWeight: 600, textTransform: 'uppercase' }} style={{ backgroundColor: getStatusColor(currentFile.status) }}>
                 {currentFile.status}
-              </span>
-              <span className="file-path">{currentFile.file_path}</span>
-            </div>
-            <div className="change-stats">
-              <span className="additions">+{currentFile.additions}</span>
-              <span className="deletions">-{currentFile.deletions}</span>
-            </div>
+              </Box>
+              <Typography component="span" className="file-path" sx={{ fontFamily: 'monospace', fontSize: '0.875rem', fontWeight: 600 }}>{currentFile.file_path}</Typography>
+            </Box>
+            <Box className="change-stats" sx={{ display: 'flex', gap: 2 }}>
+              <Box component="span" className="additions" sx={{ color: 'success.dark', fontWeight: 600 }}>+{currentFile.additions}</Box>
+              <Box component="span" className="deletions" sx={{ color: 'error.dark', fontWeight: 600 }}>-{currentFile.deletions}</Box>
+            </Box>
           </Stack>
 
-          <div className="diff-container">{renderDiff(currentFile.diff)}</div>
+          <Box className="diff-container" sx={{ flex: 1, overflowY: 'auto', bgcolor: 'background.default', maxHeight: { xs: 400, lg: 'none' } }}>{renderDiff(currentFile.diff)}</Box>
 
-          <div className="review-actions">
+          <Box className="review-actions" sx={{ p: 2, borderTop: 1, borderColor: 'divider', bgcolor: 'background.paper', display: 'flex', flexDirection: 'column', gap: 1.5 }}>
             <TextField
               className="comment-input"
               placeholder="Add optional comment..."
@@ -666,7 +341,7 @@ const FileReview = ({ taskId, projectDir }: FileReviewProps) => {
               minRows={2}
               fullWidth
             />
-            <Stack direction="row" spacing={1} className="action-buttons" sx={{ mt: 1 }}>
+            <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} className="action-buttons" sx={{ mt: 1, justifyContent: 'flex-end' }}>
               <Button
                 className="reject-btn"
                 variant="outlined"
@@ -686,9 +361,9 @@ const FileReview = ({ taskId, projectDir }: FileReviewProps) => {
                 {submitting === currentFile.file_path ? 'Processing...' : '✓ Approve'}
               </Button>
             </Stack>
-          </div>
+          </Box>
 
-          <div className="navigation-buttons">
+          <Box className="navigation-buttons" sx={{ p: 2, borderTop: 1, borderColor: 'divider', display: 'flex', justifyContent: 'space-between', alignItems: 'center', bgcolor: 'action.hover' }}>
             <Button
               onClick={() => setSelectedFile(Math.max(0, selectedFile - 1))}
               disabled={selectedFile === 0}
@@ -706,10 +381,10 @@ const FileReview = ({ taskId, projectDir }: FileReviewProps) => {
             >
               Next →
             </Button>
-          </div>
-        </div>
-      </div>
-    </div>
+          </Box>
+        </Box>
+      </Box>
+    </Box>
   )
 }
 

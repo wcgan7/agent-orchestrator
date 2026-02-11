@@ -28,15 +28,11 @@ import RunDashboard from './components/RunDashboard'
 import PhaseTimeline from './components/PhaseTimeline'
 import LiveLog from './components/LiveLog'
 import MetricsPanel from './components/MetricsPanel'
-import MetricsChart from './components/MetricsChart'
 import ControlPanel from './components/ControlPanel'
-import DependencyGraph from './components/DependencyGraph'
 import ApprovalGate from './components/ApprovalGate'
 import Chat from './components/Chat'
-import FileReview from './components/FileReview'
 import TasksPanel from './components/TasksPanel'
 import RunsPanel from './components/RunsPanel'
-import CostBreakdown from './components/CostBreakdown'
 import BreakpointsPanel from './components/BreakpointsPanel'
 import TaskLauncher from './components/TaskLauncher'
 import LoadingSpinner from './components/LoadingSpinner'
@@ -67,6 +63,10 @@ const RequirementForm = lazy(() => import('./components/RequirementForm'))
 const KanbanBoard = lazy(() => import('./components/KanbanBoard/KanbanBoard'))
 const AgentPanel = lazy(() => import('./components/AgentCard/AgentCard'))
 const HITLModeSelector = lazy(() => import('./components/HITLModeSelector/HITLModeSelector'))
+const MetricsChart = lazy(() => import('./components/MetricsChart'))
+const DependencyGraph = lazy(() => import('./components/DependencyGraph'))
+const FileReview = lazy(() => import('./components/FileReview'))
+const CostBreakdown = lazy(() => import('./components/CostBreakdown'))
 
 interface ProjectStatus {
   project_dir: string
