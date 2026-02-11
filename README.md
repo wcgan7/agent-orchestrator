@@ -1,13 +1,41 @@
 # Feature PRD Runner
 
-A standalone coordinator for long-running feature development driven by a PRD.
-It uses Codex CLI as the “worker” and keeps durable state in local files so runs
-can resume safely across restarts or interruptions.
+An AI engineering orchestrator that coordinates multiple specialized agents to execute software development tasks — from feature implementation to bug fixes, refactors, security audits, and more.
 
-This project is intentionally opinionated:
-- Phases are planned from the PRD.
-- Each phase is implemented with a file allowlist (derived from an implementation plan).
-- Each phase is verified, reviewed against acceptance criteria, then committed and pushed.
+Built on a dynamic task engine, configurable pipeline templates, and real-time collaboration features, it goes beyond single-agent PRD execution to provide a full-stack platform for AI-assisted engineering.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Web Dashboard (React)                    │
+│  KanbanBoard · AgentCards · CommandPalette · NotificationCenter │
+├─────────────────────────────────────────────────────────────┤
+│                  FastAPI Server + WebSocket Hub              │
+│  REST API · Real-time channels · Auth · Presence tracking   │
+├──────────┬──────────┬────────────┬──────────────────────────┤
+│  Task    │  Agent   │  Pipeline  │  Collaboration           │
+│  Engine  │  Pool    │  Engine    │  Layer                   │
+│          │          │            │                          │
+│  CRUD    │  6 roles │  8 templates│  Feedback · Comments    │
+│  Priority│  Spawn   │  18 steps  │  HITL modes · Reasoning │
+│  Deps    │  Schedule│  Conditions│  Timeline · Presence     │
+│  Labels  │  Handoff │  Retries   │  Notifications           │
+├──────────┴──────────┴────────────┴──────────────────────────┤
+│              File-based YAML persistence + FileLock          │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key packages:**
+
+| Package | Purpose |
+|---------|---------|
+| `task_engine/` | Task model, CRUD engine, dependency resolution, YAML store |
+| `agents/` | Agent registry (6 types), pool manager, scheduler, handoff/context bus |
+| `pipelines/` | Pipeline templates (8), step registry (18 steps), execution engine |
+| `collaboration/` | Feedback, review comments, HITL modes, reasoning traces, timeline |
+| `server/` | FastAPI app with REST + WebSocket APIs, auth, presence tracking |
+| `workers/` | Worker provider config (Codex, Ollama), diagnostics, runtime management |
 
 ## Requirements
 
@@ -31,7 +59,7 @@ uv pip install -e .
 
 ## Tests
 
-Python unit tests:
+Python unit tests (840 tests):
 
 ```bash
 python -m pip install -e ".[test]"
@@ -45,7 +73,7 @@ uv pip install -e ".[test]"
 pytest
 ```
 
-Web dashboard tests (Vitest):
+Web dashboard tests (101 tests, Vitest):
 
 ```bash
 cd web
@@ -92,9 +120,229 @@ from feature_prd_runner.orchestrator import run_feature_prd
 run_feature_prd(project_dir=Path("."), prd_path=Path("./docs/feature_prd.md"))
 ```
 
+## Multi-Agent Orchestration
+
+The orchestrator manages a pool of specialized agents, each with distinct roles, models, and capabilities.
+
+### Agent Types
+
+| Role | Description | Allowed Steps |
+|------|-------------|---------------|
+| **Implementer** | Writes code from plans | plan, plan_impl, implement, commit |
+| **Reviewer** | Reviews code quality | review |
+| **Researcher** | Gathers context and analyzes | gather, analyze, summarize, report |
+| **Tester** | Runs tests, writes test cases | verify, implement |
+| **Architect** | Plans high-level architecture | plan, plan_impl, analyze |
+| **Debugger** | Diagnoses failures, finds root causes | reproduce, diagnose, implement, verify |
+
+Each agent has configurable resource limits (token budgets, time budgets, cost caps, max retries), tool access permissions, and task affinity settings.
+
+### Agent Pool
+
+The agent pool manager handles:
+- **Spawning** agents on demand based on task requirements
+- **Health monitoring** with automatic restart on failure
+- **Task assignment** via the scheduler (priority-based with agent affinity)
+- **Agent-to-agent handoff** — structured context passing between agents (e.g., reviewer feedback flows directly to the implementer)
+- **Shared context bus** — agents can read each other's progress and artifacts without file-based intermediaries
+- **Pause/resume/terminate** controls via API and dashboard
+
+### Agent API
+
+```
+GET    /api/v2/agents              # List all agents with status
+POST   /api/v2/agents              # Spawn a new agent
+GET    /api/v2/agents/{id}         # Get agent details
+POST   /api/v2/agents/{id}/pause   # Pause agent
+POST   /api/v2/agents/{id}/resume  # Resume agent
+POST   /api/v2/agents/{id}/terminate  # Terminate agent
+GET    /api/v2/agents/types        # List agent type blueprints
+```
+
+## Pipeline Templates
+
+Tasks are executed through configurable pipeline templates. Each template defines a sequence of steps with conditions, retries, and agent role preferences.
+
+### Built-in Templates
+
+| Template | Steps | Use Case |
+|----------|-------|----------|
+| **feature** | Plan → Plan Impl → Implement → Verify → Review → Commit | New feature development |
+| **bug_fix** | Reproduce → Diagnose → Fix → Verify → Review → Commit | Bug fixes |
+| **refactor** | Analyze → Plan → Implement → Verify → Review → Commit | Code refactoring |
+| **research** | Gather → Analyze → Summarize → Report | Research tasks |
+| **docs** | Analyze Code → Write Docs → Review → Commit | Documentation |
+| **test** | Analyze Coverage → Write Tests → Run Tests → Review → Commit | Test writing |
+| **repo_review** | Scan → Analyze → Generate Tasks | Repository analysis |
+| **security_audit** | Scan Deps → Scan Code → Report → Generate Fix Tasks | Security scanning |
+
+### Pipeline Engine
+
+The engine resolves the correct template for a task, evaluates step conditions, and drives execution:
+- **Condition-based step skipping** — skip steps based on task type, change size, or previous step results
+- **Retry logic** — configurable retry limits per step
+- **HITL approval gates** — pause before plan, implement, or commit for human review
+- **Runtime modification** — insert or skip steps on a running pipeline
+- **Reasoning traces** — records agent thinking at each step for transparency
+- **Event notifications** — fires events for task completion, failure, approval needs, and budget warnings
+
+## Dynamic Task Engine
+
+Tasks are first-class entities with rich metadata, not just pipeline phases.
+
+### Task Model
+
+Each task has:
+- **Type**: feature, bug, refactor, research, review, test, docs
+- **Priority**: P0 (critical) through P3 (low)
+- **Status**: pending, in_progress, blocked, completed, failed, cancelled
+- **Labels, parent/child relationships, blockers**
+- **Acceptance criteria, context files, related tasks**
+- **Source tracking** (PRD import, repo review, manual, bug scan, etc.)
+
+### Task API
+
+```
+GET    /api/v2/tasks               # List tasks (filterable)
+POST   /api/v2/tasks               # Create task
+GET    /api/v2/tasks/{id}          # Get task details
+PUT    /api/v2/tasks/{id}          # Update task
+DELETE /api/v2/tasks/{id}          # Delete task
+POST   /api/v2/tasks/{id}/assign   # Assign to agent
+POST   /api/v2/tasks/{id}/move     # Move between statuses
+GET    /api/v2/tasks/board         # Kanban board view
+```
+
+### Smart Scheduling
+
+The scheduler assigns tasks to agents based on:
+- Priority ordering (P0 preempts P2)
+- Dependency graph resolution
+- Agent role affinity (review tasks go to reviewer agents)
+- Resource availability
+
+## Collaboration Features
+
+### Human-in-the-Loop (HITL) Modes
+
+Four collaboration modes control the level of human involvement:
+
+| Mode | Description |
+|------|-------------|
+| **Autopilot** | Agents work independently, humans observe |
+| **Supervised** | Agents work, gates pause for approval at key points |
+| **Collaborative** | Agents and humans work together, frequent checkpoints |
+| **Review Only** | Agents do all work, humans review before commit |
+
+Modes can be set globally (project-level) or per-task. The pipeline engine enforces approval gates based on the active mode.
+
+```
+GET    /api/v2/collaboration/modes              # List available modes
+PUT    /api/v2/collaboration/modes              # Set project mode
+PUT    /api/v2/collaboration/modes/task/{id}    # Set task-specific mode
+GET    /api/v2/collaboration/modes/task/{id}    # Get effective mode for task
+```
+
+### Structured Feedback
+
+Humans can provide typed, prioritized feedback on agent work:
+
+- **Feedback types**: general, requirement, style, performance, security, architecture
+- **Priority levels**: must, should, could, nice_to_have
+- **Feedback lifecycle**: active → addressed / dismissed
+- **Prompt injection**: active feedback is compiled into agent prompts
+- **Effectiveness tracking**: reports on feedback addressed vs. dismissed
+
+### Inline Review Comments
+
+Line-level commenting on code diffs, similar to GitHub PR reviews:
+- File + line number targeting
+- Threaded replies
+- Resolution tracking
+- Triggers review notifications
+
+### Activity Timeline
+
+Unified chronological view of all events for a task: feedback, comments, state changes, agent reasoning steps — aggregated from multiple stores.
+
+### Reasoning Viewer
+
+Agents record their step-by-step thinking during pipeline execution. The reasoning viewer exposes this for transparency and debugging.
+
+### User Management & Presence
+
+- User profiles with roles (admin, lead, developer, viewer)
+- Real-time online presence tracking
+- Last-seen timestamps
+
+## Real-Time Notifications
+
+The notification system pushes events from backend to frontend via WebSocket:
+
+- **Task lifecycle**: completed, failed, blocked
+- **Agent events**: spawned, error, terminated, auto-restarted
+- **Collaboration**: approval needed, review requested, mode changed
+- **Budget warnings**: agent approaching cost limit (80%+ threshold)
+
+The `NotificationCenter` component in the dashboard shows a notification feed with dismiss and clear-all controls.
+
+## Web Dashboard
+
+A React/TypeScript dashboard for monitoring and controlling the orchestrator.
+
+```bash
+# Start the backend server
+feature-prd-runner server --port 8080
+
+# In another terminal, start the frontend (requires Node.js 18+)
+cd web
+npm install
+npm run dev
+```
+
+Access the dashboard at http://localhost:3000
+
+### Dashboard Components
+
+| Component | Description |
+|-----------|-------------|
+| **RunDashboard** | Main view with run status, progress, and controls |
+| **KanbanBoard** | Drag-drop task board with slide-over detail view |
+| **AgentCard** | Agent panel with stream, controls, and overview subcomponents |
+| **CommandPalette** | Cmd+K fuzzy search across tasks, agents, and actions |
+| **NotificationCenter** | Real-time notification feed |
+| **PhaseTimeline** | Visual phase progress with dependencies |
+| **DependencyGraph** | Task dependency visualization |
+| **MetricsPanel** | API usage, costs, timing, code change metrics |
+| **CostBreakdown** | Per-agent and per-task cost analysis |
+| **ApprovalGate** | Approve/reject interface for HITL gates |
+| **FileReview** | File-by-file diff review |
+| **InlineReview** | Line-level code commenting |
+| **ReasoningViewer** | Agent step-by-step thinking viewer |
+| **HITLModeSelector** | Mode picker (autopilot/supervised/collaborative/review_only) |
+| **FeedbackPanel** | Structured feedback form and list |
+| **ActivityTimeline** | Unified event chronology |
+| **LiveLog** | Real-time log streaming via WebSocket |
+| **BreakpointsPanel** | Breakpoint management |
+| **TaskLauncher** | Quick task creation dialog |
+| **ControlPanel** | Run control actions (retry, skip, resume, stop) |
+| **Chat** | Live collaboration messaging |
+| **ProjectSelector** | Multi-project switching |
+| **Login** | Authentication |
+
+### Frontend Architecture
+
+- **React 18** with TypeScript and Vite
+- **Plain CSS** (no framework) with theme support (light/dark/system)
+- **WebSocket** for real-time updates (channels: runs, logs, agents, notifications)
+- **Contexts**: ThemeContext, WebSocketContext, ToastContext
+- **Testing**: Vitest + React Testing Library
+
+See [web/README.md](web/README.md) for detailed frontend setup and development instructions.
+
 ## Usage
 
-The runner is a small FSM with these steps:
+The runner core is a FSM with these steps:
 
 1. `PLAN`: derive phases from PRD + repo context.
 2. For each phase:
@@ -170,7 +418,7 @@ feature-prd-runner example --output ./my-go-project --language go
 
 ## Status
 
-Inspect the runner’s durable state without starting a run:
+Inspect the runner's durable state without starting a run:
 
 ```bash
 feature-prd-runner status --project-dir /path/to/your/project
@@ -181,39 +429,6 @@ For machine-readable output:
 ```bash
 feature-prd-runner status --project-dir /path/to/your/project --json
 ```
-
-## Web Dashboard
-
-Monitor and control runs through a modern web interface:
-
-```bash
-# Start the backend server
-feature-prd-runner server --port 8080
-
-# In another terminal, start the frontend (requires Node.js)
-cd web
-npm install
-npm run dev
-```
-
-Access the dashboard at http://localhost:3000
-
-**Features**:
-- Real-time run status and progress
-- Tasks and runs tables (per project)
-- Phase timeline with dependencies
-- Live log streaming via WebSocket
-- Metrics: API usage, costs, timing, code changes
-- Approval gates (approve/reject) and file-by-file review
-- Breakpoint management
-- Live collaboration chat (guidance/requirements/corrections)
-- Responsive design for mobile/desktop
-
-**Requirements**:
-- Backend: `pip install 'feature-prd-runner[server]'` (or `uv pip install 'feature-prd-runner[server]'`)
-- Frontend: Node.js 18+ and npm
-
-See [web/README.md](web/README.md) for detailed setup and development instructions.
 
 ## Dry Run
 
@@ -260,10 +475,10 @@ feature-prd-runner skip-step phase-1 --project-dir /path/to/your/project --step 
 ```
 
 Each step writes progress to durable files for easy resume. Verification evidence is
-recorded and fed into review prompts to avoid “not evidenced” failures.
+recorded and fed into review prompts to avoid "not evidenced" failures.
 
 If a review returns blocking issues, the runner routes back to `IMPLEMENT` with an
-“address review issues” banner and the implicated files.
+"address review issues" banner and the implicated files.
 
 ## CLI Options
 
@@ -286,7 +501,7 @@ Common options:
 - `--require-clean` / `--no-require-clean`: refuse to run if there are git changes outside `.prd_runner/` (default: True).
 - `--stop-on-blocking-issues` / `--no-stop-on-blocking-issues`: whether to stop when a phase is blocked.
 - `--resume-blocked` / `--no-resume-blocked`: whether to auto-resume the most recent blocked task.
-- `--custom-prompt "..."`: run a standalone “do this first” prompt once before continuing the normal cycle.
+- `--custom-prompt "..."`: run a standalone "do this first" prompt once before continuing the normal cycle.
 - `--simple-review` / `--no-simple-review`: toggle a simplified review schema.
 - `--commit` / `--no-commit`: enable/disable `git commit` in the `COMMIT` step (default: True).
 - `--push` / `--no-push`: enable/disable `git push` in the `COMMIT` step (default: True).
@@ -518,38 +733,7 @@ Errors include:
 - Actionable suggestions with commands
 - Quick fixes
 
-Example error output:
-```
-❌ Error: phase-1
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Error Type: test_failed
-Verification failed: 2 tests failed
-
-Root Cause:
-  Tests failed during verification.
-
-Files Involved:
-  1. tests/test_auth.py
-
-Suggested Actions:
-  [1] Review test failures
-      $ feature-prd-runner logs phase-1 --step verify
-
-  [2] Retry after reviewing
-      $ feature-prd-runner retry phase-1
-
-Quick Fixes:
-  • View full test output
-    $ cat .prd_runner/runs/*/tests_phase-1.log
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-See [docs/DEBUGGING.md](docs/DEBUGGING.md) for full documentation on:
-- All debugging commands
-- Error analysis features
-- Root cause identification
-- Programmatic access
-- Best practices
+See [docs/DEBUGGING.md](docs/DEBUGGING.md) for full documentation.
 
 ## Parallel Phase Execution
 
@@ -600,32 +784,7 @@ The parallel executor:
 - Executes independent phases in parallel
 - Tracks progress for all running phases
 
-**Example execution**:
-```
-Batch 1 (parallel): database-schema, frontend-components
-Batch 2: api-endpoints (waits for database-schema)
-Batch 3: integration (waits for both)
-```
-
-**Current Implementation Status**:
-- ✅ Dependency analysis with topological sort
-- ✅ Circular dependency detection
-- ✅ Execution plan visualization
-- ✅ Thread pool infrastructure
-- ✅ Full parallel execution (fully implemented!)
-- ✅ Thread-safe git operations
-- ✅ Thread-safe state management
-- ✅ Partial failure handling
-
-When `--parallel` is enabled, the system analyzes dependencies, creates an optimal execution plan, and **executes independent phases in parallel**. Each phase runs through its complete task lifecycle (plan_impl → implement → verify → review → commit) while maintaining thread safety for git operations and state updates.
-
-See [docs/PARALLEL_EXECUTION.md](docs/PARALLEL_EXECUTION.md) for:
-- Dependency resolution details
-- Configuration options
-- Examples and best practices
-- Progress tracking
-- Error handling
-- Troubleshooting
+See [docs/PARALLEL_EXECUTION.md](docs/PARALLEL_EXECUTION.md) for full documentation.
 
 ## Troubleshooting
 
@@ -638,27 +797,3 @@ See [docs/PARALLEL_EXECUTION.md](docs/PARALLEL_EXECUTION.md) for:
 - `state_reset_failed`: `--reset-state` could not archive `.prd_runner/`; close other runners/fix permissions, or move/delete it manually.
 - `prd_mismatch`: existing state was created for a different PRD (path or content); re-run with `--reset-state`.
 - `state_invalid`: `.prd_runner/phase_plan.yaml` or `.prd_runner/task_queue.yaml` has an invalid schema (duplicate ids, missing deps, etc.); fix it or re-run with `--reset-state`.
-
-## Testing
-
-### Python
-
-```bash
-python -m pip install -e ".[test]"
-python -m pytest
-```
-
-With `uv`:
-
-```bash
-uv pip install -e ".[test]"
-uv run pytest
-```
-
-### Web Dashboard (Frontend)
-
-```bash
-cd web
-npm install
-npm test
-```
