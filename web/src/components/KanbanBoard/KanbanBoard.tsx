@@ -477,6 +477,7 @@ export default function KanbanBoard({ projectDir }: Props) {
           projectDir={projectDir}
           onClose={() => setSelectedTask(null)}
           onUpdated={handleTaskUpdated}
+          onNavigateTask={(nextTask) => setSelectedTask(nextTask)}
         />
       )}
 

@@ -194,9 +194,9 @@ Implemented event APIs:
 - [x] Rename `Quick Task` to `Quick Action`.
 - [x] Add clear one-off helper text and promotion toggle.
 - [x] Add `Run Now` in task detail view.
-- [ ] Make Tasks the default landing route/view.
-- [ ] Make Execution a monitor/control surface for active queue/workers.
-- [ ] Add blocked-task explainers and unblock shortcuts.
+- [x] Make Tasks the default landing route/view.
+- [x] Make Execution a monitor/control surface for active queue/workers.
+- [x] Add blocked-task explainers and unblock shortcuts.
 
 ### Testing
 - [ ] E2E: create task -> ready -> orchestrator claim -> done.

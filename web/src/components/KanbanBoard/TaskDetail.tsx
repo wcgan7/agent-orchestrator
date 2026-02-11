@@ -7,6 +7,7 @@ import {
   Alert,
   Box,
   Button,
+  Card,
   Chip,
   Divider,
   Drawer,
@@ -68,6 +69,7 @@ interface Props {
   projectDir?: string
   onClose: () => void
   onUpdated: () => void
+  onNavigateTask?: (task: TaskData) => void
 }
 
 const STATUS_COLORS: Record<string, 'default' | 'info' | 'warning' | 'success' | 'error'> = {
@@ -87,7 +89,7 @@ const PRIORITY_COLORS: Record<string, string> = {
   P3: '#9ca3af',
 }
 
-export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
+export function TaskDetail({ task, projectDir, onClose, onUpdated, onNavigateTask }: Props) {
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(task.title)
   const [description, setDescription] = useState(task.description)
@@ -393,6 +395,14 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
 
           {activeTab === 'dependencies' && (
             <Stack spacing={2} sx={{ mt: 2 }}>
+              {(task.status === 'blocked' || task.blocked_by.length > 0) && (
+                <BlockedTaskAssistant
+                  task={task}
+                  projectDir={projectDir}
+                  onUpdated={onUpdated}
+                  onNavigateTask={onNavigateTask}
+                />
+              )}
               {(task.blocked_by.length > 0 || task.blocks.length > 0) ? (
                 <Box>
                   <Typography variant="overline" color="text.secondary">Dependencies</Typography>
@@ -442,6 +452,196 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
         </Box>
       </Stack>
     </Drawer>
+  )
+}
+
+function BlockedTaskAssistant({
+  task,
+  projectDir,
+  onUpdated,
+  onNavigateTask,
+}: {
+  task: TaskData
+  projectDir?: string
+  onUpdated: () => void
+  onNavigateTask?: (task: TaskData) => void
+}) {
+  const [blockerTasks, setBlockerTasks] = useState<TaskData[]>([])
+  const [loading, setLoading] = useState(false)
+  const [running, setRunning] = useState<string | null>(null)
+  const [loadingTaskId, setLoadingTaskId] = useState<string | null>(null)
+  const [assistantError, setAssistantError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let active = true
+    const loadBlockers = async () => {
+      if (task.blocked_by.length === 0) {
+        setBlockerTasks([])
+        return
+      }
+      setLoading(true)
+      setAssistantError(null)
+      try {
+        const results = await Promise.all(
+          task.blocked_by.map(async (id) => {
+            const response = await fetch(buildApiUrl(`/api/v2/tasks/${id}`, projectDir), {
+              headers: buildAuthHeaders(),
+            })
+            if (!response.ok) return null
+            const payload = await response.json()
+            return payload?.task || null
+          }),
+        )
+        if (!active) return
+        setBlockerTasks(results.filter(Boolean))
+      } catch {
+        if (!active) return
+        setAssistantError('Failed to load blocker details')
+      } finally {
+        if (active) setLoading(false)
+      }
+    }
+
+    loadBlockers()
+    return () => {
+      active = false
+    }
+  }, [task.id, task.blocked_by, projectDir])
+
+  const runBlocker = async (blockerId: string) => {
+    setRunning(blockerId)
+    setAssistantError(null)
+    try {
+      const response = await fetch(
+        buildApiUrl(`/api/v2/tasks/${blockerId}/run`, projectDir),
+        {
+          method: 'POST',
+          headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ claimer: 'manual_ui', assignee_type: 'agent' }),
+        },
+      )
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        setAssistantError(data?.detail || `Failed to run blocker (${response.status})`)
+        return
+      }
+      onUpdated()
+    } catch {
+      setAssistantError('Failed to run blocker due to a network or server error')
+    } finally {
+      setRunning(null)
+    }
+  }
+
+  const openBlocker = async (blockerId: string) => {
+    if (!onNavigateTask) return
+    setLoadingTaskId(blockerId)
+    setAssistantError(null)
+    try {
+      const response = await fetch(buildApiUrl(`/api/v2/tasks/${blockerId}`, projectDir), {
+        headers: buildAuthHeaders(),
+      })
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        setAssistantError(data?.detail || `Failed to load blocker (${response.status})`)
+        return
+      }
+      const payload = await response.json()
+      if (payload?.task) onNavigateTask(payload.task)
+    } catch {
+      setAssistantError('Failed to load blocker due to a network or server error')
+    } finally {
+      setLoadingTaskId(null)
+    }
+  }
+
+  const tryUnblockCurrent = async () => {
+    setAssistantError(null)
+    try {
+      const response = await fetch(
+        buildApiUrl(`/api/v2/tasks/${task.id}/retry`, projectDir),
+        {
+          method: 'POST',
+          headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
+          body: JSON.stringify({ reason: 'manual_unblock_shortcut' }),
+        },
+      )
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}))
+        setAssistantError(data?.detail || `Failed to unblock task (${response.status})`)
+        return
+      }
+      onUpdated()
+    } catch {
+      setAssistantError('Unblock request failed due to a network or server error')
+    }
+  }
+
+  return (
+    <Alert severity={task.status === 'blocked' ? 'warning' : 'info'} variant="outlined">
+      <Stack spacing={1.25}>
+        <Typography variant="subtitle2">
+          {task.status === 'blocked' ? 'Task is blocked' : 'Dependency blockers detected'}
+        </Typography>
+        <Typography variant="body2" color="text.secondary">
+          Resolve or run blocker tasks, then use Try Unblock to move this task back to ready.
+        </Typography>
+        {assistantError && <Alert severity="error">{assistantError}</Alert>}
+        <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+          <ExplainButton taskId={task.id} projectDir={projectDir} />
+          <Button size="small" variant="contained" onClick={tryUnblockCurrent}>
+            Try Unblock
+          </Button>
+        </Stack>
+
+        {loading ? (
+          <Typography variant="body2" color="text.secondary">Loading blocker details...</Typography>
+        ) : blockerTasks.length > 0 ? (
+          <Stack spacing={1}>
+            {blockerTasks.map((blocker) => (
+              <Card key={blocker.id} variant="outlined" sx={{ p: 1 }}>
+                <Stack spacing={0.5}>
+                  <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
+                    <Typography variant="body2" sx={{ fontWeight: 700 }}>{blocker.title}</Typography>
+                    <Chip size="small" label={blocker.status} color={STATUS_COLORS[blocker.status] || 'default'} />
+                    <Typography variant="caption" color="text.secondary" sx={{ fontFamily: '"IBM Plex Mono", monospace' }}>
+                      {blocker.id}
+                    </Typography>
+                  </Stack>
+                  {blocker.error && (
+                    <Typography variant="caption" color="error.main" sx={{ wordBreak: 'break-word' }}>
+                      {blocker.error}
+                    </Typography>
+                  )}
+                  <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => openBlocker(blocker.id)}
+                      disabled={!onNavigateTask || loadingTaskId === blocker.id}
+                    >
+                      {loadingTaskId === blocker.id ? 'Opening...' : 'Open'}
+                    </Button>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={() => runBlocker(blocker.id)}
+                      disabled={running === blocker.id}
+                    >
+                      {running === blocker.id ? 'Running...' : 'Run Blocker'}
+                    </Button>
+                  </Stack>
+                </Stack>
+              </Card>
+            ))}
+          </Stack>
+        ) : task.blocked_by.length > 0 ? (
+          <Typography variant="body2" color="text.secondary">
+            Blocker IDs: {task.blocked_by.join(', ')}
+          </Typography>
+        ) : null}
+      </Stack>
+    </Alert>
   )
 }
 
