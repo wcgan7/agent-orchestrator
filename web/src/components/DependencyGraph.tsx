@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import {
   ReactFlow,
   Node,
@@ -12,6 +12,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { buildApiUrl, buildAuthHeaders } from '../api'
+import { useChannel } from '../contexts/WebSocketContext'
 import EmptyState from './EmptyState'
 import './DependencyGraph.css'
 
@@ -63,9 +64,11 @@ export default function DependencyGraph({ projectDir }: Props) {
 
   useEffect(() => {
     fetchPhases()
-    const interval = setInterval(fetchPhases, 10000) // Poll every 10 seconds
-    return () => clearInterval(interval)
   }, [projectDir])
+
+  useChannel('phases', useCallback(() => {
+    fetchPhases()
+  }, [projectDir]))
 
   useEffect(() => {
     if (phases.length > 0) {

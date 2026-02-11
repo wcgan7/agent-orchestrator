@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { buildApiUrl, buildAuthHeaders } from '../api'
+import { useChannel } from '../contexts/WebSocketContext'
 import EmptyState from './EmptyState'
 import LoadingSpinner from './LoadingSpinner'
 import './RunsPanel.css'
@@ -75,9 +76,11 @@ export default function RunsPanel({ projectDir, currentRunId }: Props) {
 
   useEffect(() => {
     fetchRuns()
-    const interval = setInterval(fetchRuns, 10000)
-    return () => clearInterval(interval)
   }, [projectDir])
+
+  useChannel('runs', useCallback(() => {
+    fetchRuns()
+  }, [projectDir]))
 
   const fetchRuns = async () => {
     try {

@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts'
 import { buildApiUrl, buildAuthHeaders } from '../api'
+import { useChannel } from '../contexts/WebSocketContext'
 import './MetricsChart.css'
 
 interface RunMetrics {
@@ -46,9 +47,11 @@ export default function MetricsChart({ projectDir }: Props) {
 
   useEffect(() => {
     fetchMetrics()
-    const interval = setInterval(fetchMetrics, 10000) // Poll every 10 seconds
-    return () => clearInterval(interval)
   }, [projectDir])
+
+  useChannel('metrics', useCallback(() => {
+    fetchMetrics()
+  }, [projectDir]))
 
   const fetchMetrics = async () => {
     try {

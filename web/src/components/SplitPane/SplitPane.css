@@ -1,0 +1,42 @@
+/* SplitPane Component Styles */
+
+.split-pane {
+  display: flex;
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+.split-left,
+.split-right {
+  overflow: auto;
+  height: 100%;
+  min-width: 0; /* allow flex children to shrink below content size */
+}
+
+/* Drag handle ------------------------------------------------------------- */
+
+.split-handle {
+  flex-shrink: 0;
+  width: 4px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background var(--transition-fast);
+  position: relative;
+  z-index: 1;
+}
+
+/* Invisible hit-area (wider than the visual bar for easier grabbing) */
+.split-handle::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -4px;
+  right: -4px;
+}
+
+.split-handle:hover,
+.split-handle-active {
+  background: var(--color-primary-400);
+}

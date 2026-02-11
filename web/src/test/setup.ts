@@ -41,6 +41,21 @@ const localStorageMock = {
 
 global.localStorage = localStorageMock as Storage
 
+// JSDOM doesn't implement matchMedia (needed by ThemeContext)
+Object.defineProperty(window, 'matchMedia', {
+  writable: true,
+  value: (query: string) => ({
+    matches: false,
+    media: query,
+    onchange: null,
+    addListener: () => {},
+    removeListener: () => {},
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    dispatchEvent: () => false,
+  }),
+})
+
 // JSDOM doesn't implement ResizeObserver (needed by @xyflow/react)
 class ResizeObserverMock {
   observe() {}

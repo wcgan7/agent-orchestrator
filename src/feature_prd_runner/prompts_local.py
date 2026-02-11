@@ -20,6 +20,36 @@ Repository rules (AGENTS.md):
 """
 
 
+def _human_feedback_block(task_id: str) -> str:
+    """Inject active human feedback for a task into the prompt.
+
+    Returns an empty string if no feedback store is available or no feedback exists.
+    """
+    try:
+        from .collaboration.feedback import FeedbackStore
+
+        # Try to get the store from the FastAPI app state (runtime)
+        # This import pattern lets prompts work with or without the server
+        import sys
+        store = None
+        if "feature_prd_runner.server.api" in sys.modules:
+            api_mod = sys.modules["feature_prd_runner.server.api"]
+            app = getattr(api_mod, "app", None)
+            if app and hasattr(app, "state") and hasattr(app.state, "feedback_store"):
+                store = app.state.feedback_store
+
+        if store is None:
+            return ""
+
+        instructions = store.get_prompt_instructions(task_id)
+        if not instructions:
+            return ""
+
+        return f"\n## Human Guidance\n{instructions}\n"
+    except Exception:
+        return ""
+
+
 def build_local_plan_prompt(
     *,
     prd_path: Path,
@@ -29,8 +59,10 @@ def build_local_plan_prompt(
     repo_file_list: str,
     agents_text: str,
     user_prompt: Optional[str],
+    project_dir: Optional[str] = None,
 ) -> str:
     user_block = f"\nSpecial instructions:\n{user_prompt}\n" if user_prompt else ""
+    feedback_block = _human_feedback_block(project_dir or str(prd_path)) if (project_dir or prd_path) else ""
     return f"""You are planning phases for a new feature.
 
 You DO NOT have filesystem access. Do NOT claim to have edited files. Instead, return JSON only.
@@ -41,6 +73,7 @@ Inputs:
 {prd_text}
 {user_block}
 {_agents_rules_block(agents_text)}
+{feedback_block}
 Repository file list (partial):
 {repo_file_list}
 
@@ -139,6 +172,7 @@ Global/phase test command: {test_block}
 {expansion_block}
 {user_block}
 {_agents_rules_block(agents_text)}
+{_human_feedback_block(phase_id)}
 Repository file list (partial):
 {repo_file_list}
 
@@ -236,6 +270,7 @@ Acceptance criteria:
 {acceptance_block}
 {user_block}
 {_agents_rules_block(agents_text)}
+{_human_feedback_block(phase.get("id", ""))}
 
 Implementation plan (JSON excerpt):
 {impl_plan_text}
@@ -304,6 +339,7 @@ Additional context from previous runs:
 {context_block}
 {user_block}
 {_agents_rules_block(agents_text)}
+{_human_feedback_block(task.get("id", ""))}
 
 Implementation plan file path: {impl_plan_path}
 Implementation plan content:

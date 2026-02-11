@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import './App.css'
 import RunDashboard from './components/RunDashboard'
 import PhaseTimeline from './components/PhaseTimeline'
@@ -14,10 +14,20 @@ import Chat from './components/Chat'
 import FileReview from './components/FileReview'
 import TasksPanel from './components/TasksPanel'
 import RunsPanel from './components/RunsPanel'
+import CostBreakdown from './components/CostBreakdown'
 import BreakpointsPanel from './components/BreakpointsPanel'
 import TaskLauncher from './components/TaskLauncher'
 import LoadingSpinner from './components/LoadingSpinner'
+import SplitPane from './components/SplitPane/SplitPane'
+import KanbanBoard from './components/KanbanBoard/KanbanBoard'
+import AgentPanel from './components/AgentCard/AgentCard'
+import CommandPalette, { useCommandPalette, Command } from './components/CommandPalette/CommandPalette'
+import HITLModeSelector from './components/HITLModeSelector/HITLModeSelector'
+import NotificationCenter from './components/NotificationCenter/NotificationCenter'
+import OnlineUsers from './components/OnlineUsers'
 import { ToastProvider } from './contexts/ToastContext'
+import { WebSocketProvider, useChannel } from './contexts/WebSocketContext'
+import { ThemeProvider, useTheme } from './contexts/ThemeContext'
 
 interface ProjectStatus {
   project_dir: string
@@ -40,9 +50,45 @@ interface AuthStatus {
   username: string | null
 }
 
+type ViewTab = 'dashboard' | 'board' | 'agents'
+
 const STORAGE_KEY_PROJECT = 'feature-prd-runner-selected-project'
 const STORAGE_KEY_TOKEN = 'feature-prd-runner-auth-token'
 const STORAGE_KEY_USERNAME = 'feature-prd-runner-username'
+const STORAGE_KEY_VIEW = 'feature-prd-runner-view'
+
+function ThemeToggle() {
+  const { theme, setTheme } = useTheme()
+
+  return (
+    <div className="theme-toggle-group">
+      <button
+        className={`theme-btn ${theme === 'light' ? 'active' : ''}`}
+        onClick={() => setTheme('light')}
+        title="Light mode"
+        aria-label="Light mode"
+      >
+        &#x2600;
+      </button>
+      <button
+        className={`theme-btn ${theme === 'dark' ? 'active' : ''}`}
+        onClick={() => setTheme('dark')}
+        title="Dark mode"
+        aria-label="Dark mode"
+      >
+        &#x263E;
+      </button>
+      <button
+        className={`theme-btn ${theme === 'system' ? 'active' : ''}`}
+        onClick={() => setTheme('system')}
+        title="System preference"
+        aria-label="System preference"
+      >
+        &#x2699;
+      </button>
+    </div>
+  )
+}
 
 function AppContent() {
   const [status, setStatus] = useState<ProjectStatus | null>(null)
@@ -54,6 +100,18 @@ function AppContent() {
     return localStorage.getItem(STORAGE_KEY_PROJECT)
   })
   const [showLauncher, setShowLauncher] = useState(false)
+  const [activeView, setActiveView] = useState<ViewTab>(() => {
+    return (localStorage.getItem(STORAGE_KEY_VIEW) as ViewTab) || 'dashboard'
+  })
+  const [hitlMode, setHitlMode] = useState('autopilot')
+
+  const { effectiveTheme, toggleTheme } = useTheme()
+  const { isOpen: paletteOpen, open: openPalette, close: closePalette } = useCommandPalette()
+
+  // Persist active view
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_VIEW, activeView)
+  }, [activeView])
 
   // Check auth status on mount
   useEffect(() => {
@@ -64,10 +122,14 @@ function AppContent() {
   useEffect(() => {
     if (authChecked && isAuthenticated()) {
       fetchStatus()
-      const interval = setInterval(fetchStatus, 5000)
-      return () => clearInterval(interval)
     }
   }, [currentProject, authChecked])
+
+  useChannel('status', useCallback(() => {
+    if (authChecked && isAuthenticated()) {
+      fetchStatus()
+    }
+  }, [currentProject, authChecked]))
 
   const checkAuthStatus = async () => {
     try {
@@ -76,25 +138,15 @@ function AppContent() {
         const data = await response.json()
         setAuthStatus(data)
 
-        // If auth is disabled, we're automatically authenticated
         if (!data.enabled) {
           setAuthChecked(true)
           return
         }
 
-        // Check if we have a stored token
-        const token = localStorage.getItem(STORAGE_KEY_TOKEN)
-        if (token) {
-          // Token exists, assume authenticated for now
-          // (could add token validation here)
-          setAuthChecked(true)
-        } else {
-          setAuthChecked(true)
-        }
+        setAuthChecked(true)
       }
     } catch (err) {
       console.error('Failed to check auth status:', err)
-      // On error, assume no auth required
       setAuthStatus({ enabled: false, authenticated: true, username: null })
       setAuthChecked(true)
     }
@@ -161,9 +213,60 @@ function AppContent() {
 
   const handleRunStarted = (_runId: string) => {
     setShowLauncher(false)
-    // Refresh status to show the new run
     fetchStatus()
   }
+
+  // Command palette commands
+  const commands: Command[] = useMemo(() => [
+    {
+      id: 'nav-board',
+      label: 'Go to Task Board',
+      category: 'Navigation',
+      icon: '&#x25A6;',
+      shortcut: 'B',
+      action: () => setActiveView('board'),
+    },
+    {
+      id: 'nav-dashboard',
+      label: 'Go to Dashboard',
+      category: 'Navigation',
+      icon: '&#x25A3;',
+      shortcut: 'D',
+      action: () => setActiveView('dashboard'),
+    },
+    {
+      id: 'nav-agents',
+      label: 'Go to Agents',
+      category: 'Navigation',
+      icon: '&#x2699;',
+      shortcut: 'A',
+      action: () => setActiveView('agents'),
+    },
+    {
+      id: 'toggle-theme',
+      label: `Switch to ${effectiveTheme === 'light' ? 'Dark' : 'Light'} Mode`,
+      category: 'Settings',
+      icon: effectiveTheme === 'light' ? '&#x263E;' : '&#x2600;',
+      shortcut: 'T',
+      action: toggleTheme,
+    },
+    {
+      id: 'toggle-launcher',
+      label: showLauncher ? 'Hide Task Launcher' : 'Launch New Run',
+      category: 'Actions',
+      icon: '&#x25B6;',
+      shortcut: 'L',
+      action: () => { setActiveView('dashboard'); setShowLauncher(!showLauncher) },
+    },
+    {
+      id: 'refresh',
+      label: 'Refresh Status',
+      category: 'Actions',
+      icon: '&#x21BB;',
+      shortcut: 'R',
+      action: fetchStatus,
+    },
+  ], [effectiveTheme, toggleTheme, showLauncher])
 
   // Show login page if auth is enabled and not authenticated
   if (!authChecked) {
@@ -202,6 +305,7 @@ function AppContent() {
               currentProject={currentProject}
               onProjectChange={handleProjectChange}
             />
+            <ThemeToggle />
             {authStatus?.enabled && (
               <button onClick={handleLogout} className="btn-logout">
                 Logout
@@ -232,6 +336,26 @@ function AppContent() {
       <header className="header">
         <div className="header-left">
           <h1 className="header-title">Feature PRD Runner</h1>
+          <nav className="header-nav">
+            <button
+              className={`nav-tab ${activeView === 'board' ? 'active' : ''}`}
+              onClick={() => setActiveView('board')}
+            >
+              Task Board
+            </button>
+            <button
+              className={`nav-tab ${activeView === 'dashboard' ? 'active' : ''}`}
+              onClick={() => setActiveView('dashboard')}
+            >
+              Dashboard
+            </button>
+            <button
+              className={`nav-tab ${activeView === 'agents' ? 'active' : ''}`}
+              onClick={() => setActiveView('agents')}
+            >
+              Agents
+            </button>
+          </nav>
         </div>
         <div className="header-center">
           <ProjectSelector
@@ -240,6 +364,16 @@ function AppContent() {
           />
         </div>
         <div className="header-right">
+          <button
+            className="cmd-k-btn"
+            onClick={openPalette}
+            title="Command Palette (Cmd+K)"
+          >
+            <kbd>&#x2318;K</kbd>
+          </button>
+          <OnlineUsers projectDir={currentProject || undefined} />
+          <NotificationCenter />
+          <ThemeToggle />
           {username && <span className="header-username">{username}</span>}
           <div className="status-badge" data-status={status?.status}>
             {status?.status || 'unknown'}
@@ -252,85 +386,192 @@ function AppContent() {
         </div>
       </header>
 
-      <div className="container">
-        <RunDashboard status={status} />
-
-        {/* Task Launcher Section */}
-        <div className="launcher-toggle-section">
-          <button
-            onClick={() => setShowLauncher(!showLauncher)}
-            className={`btn-launcher-toggle ${showLauncher ? 'active' : ''}`}
-          >
-            {showLauncher ? 'Hide Task Launcher' : 'Launch New Run'}
-          </button>
+      {/* Main content area */}
+      {activeView === 'board' ? (
+        <div className="main-content">
+          <KanbanBoard projectDir={currentProject || undefined} />
         </div>
+      ) : activeView === 'agents' ? (
+        <div className="main-content main-content-scroll">
+          <div className="agents-header-bar">
+            <HITLModeSelector
+              currentMode={hitlMode}
+              onModeChange={setHitlMode}
+              projectDir={currentProject || undefined}
+            />
+          </div>
+          <AgentPanel projectDir={currentProject || undefined} />
+        </div>
+      ) : status?.run_id ? (
+        <SplitPane
+          defaultLeftWidth={65}
+          minLeftWidth={40}
+          maxLeftWidth={80}
+          className="dashboard-split"
+          left={
+            <div className="container">
+              <RunDashboard status={status} />
 
-        {showLauncher && (
-          <TaskLauncher
-            projectDir={currentProject}
-            onRunStarted={handleRunStarted}
+              {/* Task Launcher Section */}
+              <div className="launcher-toggle-section">
+                <button
+                  onClick={() => setShowLauncher(!showLauncher)}
+                  className={`btn-launcher-toggle ${showLauncher ? 'active' : ''}`}
+                >
+                  {showLauncher ? 'Hide Task Launcher' : 'Launch New Run'}
+                </button>
+              </div>
+
+              {showLauncher && (
+                <TaskLauncher
+                  projectDir={currentProject}
+                  onRunStarted={handleRunStarted}
+                />
+              )}
+
+              <ControlPanel
+                currentTaskId={status?.current_task_id}
+                currentPhaseId={status?.current_phase_id}
+                status={status?.status}
+                projectDir={currentProject || undefined}
+              />
+
+              <ApprovalGate projectDir={currentProject || undefined} />
+
+              <FileReview
+                taskId={status?.current_task_id}
+                projectDir={currentProject || undefined}
+              />
+
+              <div className="grid">
+                <div className="col-2">
+                  <PhaseTimeline projectDir={currentProject || undefined} />
+                </div>
+                <div className="col-2">
+                  <MetricsPanel projectDir={currentProject || undefined} />
+                </div>
+              </div>
+
+              <MetricsChart projectDir={currentProject || undefined} />
+
+              <CostBreakdown projectDir={currentProject || undefined} />
+
+              <DependencyGraph projectDir={currentProject || undefined} />
+
+              <div className="grid">
+                <div className="col-2">
+                  <TasksPanel
+                    projectDir={currentProject || undefined}
+                    currentTaskId={status?.current_task_id}
+                  />
+                </div>
+                <div className="col-2">
+                  <RunsPanel
+                    projectDir={currentProject || undefined}
+                    currentRunId={status?.run_id}
+                  />
+                </div>
+              </div>
+
+              <BreakpointsPanel projectDir={currentProject || undefined} />
+            </div>
+          }
+          right={
+            <div className="split-log-panel">
+              <LiveLog runId={status.run_id} projectDir={currentProject || undefined} />
+            </div>
+          }
+        />
+      ) : (
+        <div className="container">
+          <RunDashboard status={status} />
+
+          {/* Task Launcher Section */}
+          <div className="launcher-toggle-section">
+            <button
+              onClick={() => setShowLauncher(!showLauncher)}
+              className={`btn-launcher-toggle ${showLauncher ? 'active' : ''}`}
+            >
+              {showLauncher ? 'Hide Task Launcher' : 'Launch New Run'}
+            </button>
+          </div>
+
+          {showLauncher && (
+            <TaskLauncher
+              projectDir={currentProject}
+              onRunStarted={handleRunStarted}
+            />
+          )}
+
+          <ControlPanel
+            currentTaskId={status?.current_task_id}
+            currentPhaseId={status?.current_phase_id}
+            status={status?.status}
+            projectDir={currentProject || undefined}
           />
-        )}
 
-        <ControlPanel
-          currentTaskId={status?.current_task_id}
-          currentPhaseId={status?.current_phase_id}
-          status={status?.status}
-          projectDir={currentProject || undefined}
-        />
+          <ApprovalGate projectDir={currentProject || undefined} />
 
-        <ApprovalGate projectDir={currentProject || undefined} />
+          <FileReview
+            taskId={status?.current_task_id}
+            projectDir={currentProject || undefined}
+          />
 
-        <FileReview
-          taskId={status?.current_task_id}
-          projectDir={currentProject || undefined}
-        />
-
-        <div className="grid">
-          <div className="col-2">
-            <PhaseTimeline projectDir={currentProject || undefined} />
+          <div className="grid">
+            <div className="col-2">
+              <PhaseTimeline projectDir={currentProject || undefined} />
+            </div>
+            <div className="col-2">
+              <MetricsPanel projectDir={currentProject || undefined} />
+            </div>
           </div>
-          <div className="col-2">
-            <MetricsPanel projectDir={currentProject || undefined} />
+
+          <MetricsChart projectDir={currentProject || undefined} />
+
+          <CostBreakdown projectDir={currentProject || undefined} />
+
+          <DependencyGraph projectDir={currentProject || undefined} />
+
+          <div className="grid">
+            <div className="col-2">
+              <TasksPanel
+                projectDir={currentProject || undefined}
+                currentTaskId={status?.current_task_id}
+              />
+            </div>
+            <div className="col-2">
+              <RunsPanel
+                projectDir={currentProject || undefined}
+                currentRunId={status?.run_id}
+              />
+            </div>
           </div>
+
+          <BreakpointsPanel projectDir={currentProject || undefined} />
         </div>
-
-        <MetricsChart projectDir={currentProject || undefined} />
-
-        <DependencyGraph projectDir={currentProject || undefined} />
-
-        <div className="grid">
-          <div className="col-2">
-            <TasksPanel
-              projectDir={currentProject || undefined}
-              currentTaskId={status?.current_task_id}
-            />
-          </div>
-          <div className="col-2">
-            <RunsPanel
-              projectDir={currentProject || undefined}
-              currentRunId={status?.run_id}
-            />
-          </div>
-        </div>
-
-        <BreakpointsPanel projectDir={currentProject || undefined} />
-
-        {status?.run_id && (
-          <LiveLog runId={status.run_id} projectDir={currentProject || undefined} />
-        )}
-      </div>
+      )}
 
       <Chat runId={status?.run_id} projectDir={currentProject || undefined} />
+
+      {/* Command Palette */}
+      <CommandPalette
+        commands={commands}
+        isOpen={paletteOpen}
+        onClose={closePalette}
+      />
     </div>
   )
 }
 
 function App() {
   return (
-    <ToastProvider>
-      <AppContent />
-    </ToastProvider>
+    <ThemeProvider>
+      <ToastProvider>
+        <WebSocketProvider>
+          <AppContent />
+        </WebSocketProvider>
+      </ToastProvider>
+    </ThemeProvider>
   )
 }
 

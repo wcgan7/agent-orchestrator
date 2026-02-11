@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { buildApiUrl, buildAuthHeaders } from '../api'
+import { useChannel } from '../contexts/WebSocketContext'
 import EmptyState from './EmptyState'
 import LoadingSpinner from './LoadingSpinner'
 
@@ -50,9 +51,11 @@ export default function PhaseTimeline({ projectDir }: Props) {
 
   useEffect(() => {
     fetchPhases()
-    const interval = setInterval(fetchPhases, 5000)
-    return () => clearInterval(interval)
   }, [projectDir])
+
+  useChannel('phases', useCallback(() => {
+    fetchPhases()
+  }, [projectDir]))
 
   const fetchPhases = async () => {
     try {

@@ -1,5 +1,6 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { buildApiUrl, buildAuthHeaders } from '../api'
+import { useChannel } from '../contexts/WebSocketContext'
 import EmptyState from './EmptyState'
 import './MetricsPanel.css'
 
@@ -46,9 +47,11 @@ export default function MetricsPanel({ projectDir }: Props) {
 
   useEffect(() => {
     fetchMetrics()
-    const interval = setInterval(fetchMetrics, 10000) // Poll every 10 seconds
-    return () => clearInterval(interval)
   }, [projectDir])
+
+  useChannel('metrics', useCallback(() => {
+    fetchMetrics()
+  }, [projectDir]))
 
   const fetchMetrics = async () => {
     try {

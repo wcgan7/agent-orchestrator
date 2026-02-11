@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import './Chat.css'
 import { buildApiUrl, buildAuthHeaders } from '../api'
+import { useChannel } from '../contexts/WebSocketContext'
 
 interface ChatMessage {
   id: string
@@ -35,10 +36,13 @@ const Chat = ({ runId, projectDir }: ChatProps) => {
   useEffect(() => {
     if (isOpen) {
       fetchMessages()
-      const interval = setInterval(fetchMessages, 3000)
-      return () => clearInterval(interval)
     }
   }, [runId, projectDir, isOpen])
+
+  // Real-time updates via WebSocket instead of polling
+  useChannel('notifications', useCallback((_event: string, _data: any) => {
+    if (isOpen) fetchMessages()
+  }, [isOpen]))
 
   useEffect(() => {
     scrollToBottom()

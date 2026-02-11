@@ -699,16 +699,7 @@ describe('Integration Tests', () => {
   })
 
   describe('Real-time Updates', () => {
-    it('polls for new approval requests', async () => {
-      let callCount = 0
-      const originalSetInterval = global.setInterval
-      const originalClearInterval = global.clearInterval
-      global.setInterval = ((cb: any) => {
-        if (typeof cb === 'function') cb()
-        return 0 as any
-      }) as any
-      global.clearInterval = (() => {}) as any
-
+    it('fetches and displays approval requests on mount', async () => {
       global.fetch = vi.fn().mockImplementation((url) => {
         const urlString = url.toString()
         if (urlString.includes('/api/auth/status')) {
@@ -739,13 +730,6 @@ describe('Integration Tests', () => {
         }
 
         if (urlString.includes('/api/approvals')) {
-          callCount++
-          if (callCount === 1) {
-            return Promise.resolve({
-              ok: true,
-              json: async () => [],
-            })
-          }
           return Promise.resolve({
             ok: true,
             json: async () => [
@@ -775,8 +759,11 @@ describe('Integration Tests', () => {
         expect(screen.getByText(/new approval/i)).toBeInTheDocument()
       })
 
-      global.setInterval = originalSetInterval
-      global.clearInterval = originalClearInterval
+      // Verify the approvals endpoint was called (initial fetch)
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/approvals'),
+        expect.anything()
+      )
     })
   })
 })

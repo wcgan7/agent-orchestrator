@@ -1,0 +1,159 @@
+/* ========================================================================
+   HITL Mode Selector
+   ======================================================================== */
+
+.hitl-selector {
+  position: relative;
+}
+
+.hitl-current {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  padding: var(--spacing-2) var(--spacing-3);
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color var(--transition-fast);
+}
+
+.hitl-current:hover {
+  border-color: var(--color-primary-400);
+}
+
+.hitl-icon {
+  font-size: var(--text-base);
+}
+
+.hitl-current-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.hitl-current-name {
+  display: block;
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: var(--color-text-primary);
+}
+
+.hitl-current-desc {
+  display: block;
+  font-size: var(--text-xs);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hitl-expand {
+  font-size: 10px;
+  color: var(--color-text-muted);
+}
+
+/* Options dropdown */
+.hitl-options {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 50;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  padding: var(--spacing-1);
+  max-width: 360px;
+  min-width: 280px;
+}
+
+.hitl-option {
+  padding: var(--spacing-3);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: background var(--transition-fast);
+}
+
+.hitl-option:hover {
+  background: var(--color-bg-secondary);
+}
+
+.hitl-option.active {
+  background: color-mix(in srgb, var(--color-primary-100) 50%, transparent);
+  border-left: 3px solid var(--color-primary-500);
+}
+
+.hitl-option-header {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-2);
+  margin-bottom: var(--spacing-0-5);
+}
+
+.hitl-option-icon {
+  font-size: var(--text-base);
+}
+
+.hitl-option-name {
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: var(--color-text-primary);
+}
+
+.hitl-active-badge {
+  margin-left: auto;
+  font-size: 10px;
+  padding: 1px var(--spacing-1-5);
+  background: var(--color-primary-500);
+  color: white;
+  border-radius: var(--radius-sm);
+}
+
+.hitl-option-desc {
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--spacing-1);
+}
+
+.hitl-option-gates {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-1);
+  flex-wrap: wrap;
+  margin-bottom: var(--spacing-1);
+}
+
+.gates-label {
+  font-size: 10px;
+  color: var(--color-text-muted);
+}
+
+.gate-badge {
+  font-size: 10px;
+  padding: 1px var(--spacing-1);
+  background: var(--color-warning-100);
+  color: var(--color-warning-700);
+  border-radius: var(--radius-sm);
+}
+
+.hitl-option-flags {
+  display: flex;
+  gap: var(--spacing-1);
+}
+
+.flag-badge {
+  font-size: 10px;
+  padding: 1px var(--spacing-1);
+  border-radius: var(--radius-sm);
+}
+
+.flag-unattended {
+  background: var(--color-success-100);
+  color: var(--color-success-700);
+}
+
+.flag-reasoning {
+  background: var(--color-info-100);
+  color: var(--color-info-700);
+}

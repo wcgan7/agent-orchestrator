@@ -1723,6 +1723,120 @@ Write the generated PRD to the file: {generated_prd_path}"""
         else:
             return 0.0
 
+    # ------------------------------------------------------------------
+    # Multiplexed WebSocket Hub
+    # ------------------------------------------------------------------
+    from .ws_hub import hub as _ws_hub, web_notifications as _web_notifications
+
+    @app.websocket("/ws")
+    async def ws_hub_endpoint(websocket: WebSocket) -> None:
+        """Single multiplexed WebSocket for all real-time state updates."""
+        await _ws_hub.handle_connection(websocket)
+
+    # Store hub on app state so other modules can broadcast
+    app.state.ws_hub = _ws_hub
+
+    # ------------------------------------------------------------------
+    # V2 Task Engine API
+    # ------------------------------------------------------------------
+    from ..task_engine.engine import TaskEngine as _TaskEngine
+    from .task_api import create_task_router
+
+    _engine_cache: dict[str, _TaskEngine] = {}
+
+    def _get_task_engine(project_dir_param: Optional[str] = None) -> _TaskEngine:
+        proj = _get_project_dir(project_dir_param)
+        state_dir = proj / ".prd_runner"
+        state_dir.mkdir(parents=True, exist_ok=True)
+        key = str(state_dir)
+        if key not in _engine_cache:
+            _engine_cache[key] = _TaskEngine(state_dir)
+        return _engine_cache[key]
+
+    app.include_router(create_task_router(_get_task_engine))
+
+    # ------------------------------------------------------------------
+    # V2 Agent Pool API
+    # ------------------------------------------------------------------
+    from ..agents.registry import AgentRegistry as _AgentRegistry
+    from ..agents.pool import AgentPool as _AgentPool
+    from .agent_api import create_agent_router
+
+    _agent_registry = _AgentRegistry()
+
+    def _agent_event_handler(aid: str, evt: str, data: dict) -> None:
+        """Handle agent pool events — broadcast via WebSocket + fire notifications."""
+        _ws_hub.broadcast_sync("agents", evt, {"agent_id": aid, **data})
+
+        if evt == "spawned":
+            _web_notifications.agent_spawned(aid, data.get("role", ""))
+        elif evt == "failed":
+            _web_notifications.agent_error(aid, data.get("error", "Unknown error"))
+        elif evt == "terminated":
+            _web_notifications._push("info", f"Agent terminated: {aid}", "Agent has been stopped.", "info")
+        elif evt == "auto_restarted":
+            retries = data.get("retries", 0)
+            _web_notifications._push("warning", f"Agent restarted: {aid}", f"Auto-restart attempt {retries}.", "warning")
+        elif evt == "progress":
+            # Check budget limits on progress updates
+            try:
+                agent = _agent_pool.get(aid)
+                if agent:
+                    atype = _agent_registry.get_type(agent.agent_type)
+                    if atype.limits.max_cost_usd > 0 and agent.cost_usd > 0:
+                        pct = (agent.cost_usd / atype.limits.max_cost_usd) * 100
+                        if pct >= 80:
+                            _web_notifications.budget_warning(aid, pct)
+            except Exception:
+                pass
+
+    _agent_pool = _AgentPool(
+        registry=_agent_registry,
+        on_agent_event=_agent_event_handler,
+    )
+
+    app.state.agent_registry = _agent_registry
+    app.state.agent_pool = _agent_pool
+
+    # Reasoning store (shared between agents and collaboration)
+    from ..collaboration.reasoning import ReasoningStore as _ReasoningStore
+    _reasoning_store = _ReasoningStore()
+    app.state.reasoning_store = _reasoning_store
+
+    app.include_router(create_agent_router(
+        get_pool=lambda: _agent_pool,
+        get_registry=lambda: _agent_registry,
+        get_reasoning_store=lambda: _reasoning_store,
+    ))
+
+    # ------------------------------------------------------------------
+    # V2 Collaboration API (Feedback, Comments, HITL Modes, Timeline)
+    # ------------------------------------------------------------------
+    from ..collaboration.feedback import FeedbackStore as _FeedbackStore
+    from ..collaboration.timeline import StateChangeStore as _StateChangeStore
+    from .collaboration_api import create_collaboration_router
+
+    _feedback_store = _FeedbackStore()
+    app.state.feedback_store = _feedback_store
+
+    _state_change_store = _StateChangeStore()
+    app.state.state_change_store = _state_change_store
+
+    from .users import UserStore as _UserStore, PresenceTracker as _PresenceTracker
+    _user_store = _UserStore()
+    _presence_tracker = _PresenceTracker()
+    app.state.user_store = _user_store
+    app.state.presence_tracker = _presence_tracker
+
+    app.include_router(create_collaboration_router(
+        get_feedback_store=lambda: _feedback_store,
+        get_reasoning_store=lambda: _reasoning_store,
+        get_user_store=lambda: _user_store,
+        get_presence=lambda: _presence_tracker,
+        get_state_change_store=lambda: _state_change_store,
+        get_web_notifications=lambda: _web_notifications,
+    ))
+
     return app
 
 

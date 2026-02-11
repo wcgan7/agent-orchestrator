@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { buildApiUrl, buildAuthHeaders } from '../api'
+import { useChannel } from '../contexts/WebSocketContext'
 import EmptyState from './EmptyState'
 import LoadingSpinner from './LoadingSpinner'
 import './BreakpointsPanel.css'
@@ -67,9 +68,11 @@ export default function BreakpointsPanel({ projectDir }: Props) {
 
   useEffect(() => {
     fetchBreakpoints()
-    const interval = setInterval(fetchBreakpoints, 5000)
-    return () => clearInterval(interval)
   }, [projectDir])
+
+  useChannel('breakpoints', useCallback(() => {
+    fetchBreakpoints()
+  }, [projectDir]))
 
   const fetchBreakpoints = async () => {
     try {

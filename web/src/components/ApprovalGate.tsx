@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import './ApprovalGate.css'
 import { buildApiUrl, buildAuthHeaders } from '../api'
+import { useChannel } from '../contexts/WebSocketContext'
 import { useToast } from '../contexts/ToastContext'
 import EmptyState from './EmptyState'
 import LoadingSpinner from './LoadingSpinner'
@@ -34,9 +35,11 @@ const ApprovalGate = ({ projectDir }: ApprovalGateProps) => {
 
   useEffect(() => {
     fetchApprovals()
-    const interval = setInterval(fetchApprovals, 5000)
-    return () => clearInterval(interval)
   }, [projectDir])
+
+  useChannel('approvals', useCallback(() => {
+    fetchApprovals()
+  }, [projectDir]))
 
   const fetchApprovals = async () => {
     try {

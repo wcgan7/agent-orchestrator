@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { buildApiUrl, buildAuthHeaders } from '../api'
+import { useChannel } from '../contexts/WebSocketContext'
 import EmptyState from './EmptyState'
 import LoadingSpinner from './LoadingSpinner'
 import './TasksPanel.css'
@@ -57,9 +58,11 @@ export default function TasksPanel({ projectDir, currentTaskId }: Props) {
 
   useEffect(() => {
     fetchTasks()
-    const interval = setInterval(fetchTasks, 5000)
-    return () => clearInterval(interval)
   }, [projectDir])
+
+  useChannel('tasks', useCallback(() => {
+    fetchTasks()
+  }, [projectDir]))
 
   const fetchTasks = async () => {
     try {
