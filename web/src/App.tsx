@@ -483,19 +483,23 @@ function AppContent() {
 
   if (!authChecked) {
     return (
-      <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
+      <Box component="main" sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
         <LoadingSpinner size="lg" label="Checking authentication..." />
       </Box>
     )
   }
 
   if (authStatus?.enabled && !isAuthenticated()) {
-    return <Login onLoginSuccess={handleLoginSuccess} />
+    return (
+      <Box component="main">
+        <Login onLoginSuccess={handleLoginSuccess} />
+      </Box>
+    )
   }
 
   if (loading) {
     return (
-      <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
+      <Box component="main" sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
         <Stack spacing={2} alignItems="center">
           <CircularProgress size={28} />
           <Typography color="text.secondary">Loading cockpit...</Typography>
@@ -506,7 +510,7 @@ function AppContent() {
 
   if (error) {
     return (
-      <Box sx={{ p: 3, maxWidth: 760, mx: 'auto', mt: 10 }}>
+      <Box component="main" sx={{ p: 3, maxWidth: 760, mx: 'auto', mt: 10 }}>
         <Typography variant="h5" sx={{ mb: 1 }}>
           Connection Error
         </Typography>
