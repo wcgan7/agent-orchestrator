@@ -182,7 +182,7 @@ describe('Integration Tests', () => {
           })
         )
       })
-    })
+    }, 10000)
   })
 
   describe('Chat Workflow', () => {

@@ -1,9 +1,22 @@
 /**
- * Command Palette — Cmd+K powered quick actions.
+ * Command Palette — Cmd/Ctrl+K global action center.
  */
 
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react'
-import './CommandPalette.css'
+import {
+  Dialog,
+  DialogContent,
+  InputAdornment,
+  List,
+  ListItemButton,
+  ListItemText,
+  Stack,
+  TextField,
+  Typography,
+  Chip,
+  Box,
+} from '@mui/material'
+import SearchIcon from '@mui/icons-material/Search'
 
 export interface Command {
   id: string
@@ -24,20 +37,19 @@ export default function CommandPalette({ commands, isOpen, onClose }: Props) {
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
-  const listRef = useRef<HTMLDivElement>(null)
+  const listRef = useRef<HTMLUListElement>(null)
 
-  // Filter and group commands
   const filtered = useMemo(() => {
     if (!query) return commands
     const q = query.toLowerCase()
     return commands.filter(
       (cmd) =>
         cmd.label.toLowerCase().includes(q) ||
-        cmd.category.toLowerCase().includes(q)
+        cmd.category.toLowerCase().includes(q) ||
+        (cmd.shortcut || '').toLowerCase().includes(q)
     )
   }, [commands, query])
 
-  // Group by category
   const grouped = useMemo(() => {
     const groups: Record<string, Command[]> = {}
     for (const cmd of filtered) {
@@ -47,107 +59,142 @@ export default function CommandPalette({ commands, isOpen, onClose }: Props) {
     return groups
   }, [filtered])
 
-  // Reset selection when results change
   useEffect(() => {
     setSelectedIndex(0)
   }, [query])
 
-  // Focus input on open
   useEffect(() => {
     if (isOpen) {
       setQuery('')
       setSelectedIndex(0)
-      setTimeout(() => inputRef.current?.focus(), 50)
+      setTimeout(() => inputRef.current?.focus(), 10)
     }
   }, [isOpen])
 
-  // Keyboard navigation
-  const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      switch (e.key) {
-        case 'ArrowDown':
-          e.preventDefault()
-          setSelectedIndex((i) => Math.min(i + 1, filtered.length - 1))
-          break
-        case 'ArrowUp':
-          e.preventDefault()
-          setSelectedIndex((i) => Math.max(i - 1, 0))
-          break
-        case 'Enter':
-          e.preventDefault()
-          if (filtered[selectedIndex]) {
-            filtered[selectedIndex].action()
-            onClose()
-          }
-          break
-        case 'Escape':
-          e.preventDefault()
-          onClose()
-          break
-      }
-    },
-    [filtered, selectedIndex, onClose]
-  )
+  const executeAtIndex = useCallback((idx: number) => {
+    const cmd = filtered[idx]
+    if (!cmd) return
+    cmd.action()
+    onClose()
+  }, [filtered, onClose])
 
-  // Scroll selected item into view
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault()
+        setSelectedIndex((i) => Math.min(i + 1, filtered.length - 1))
+        break
+      case 'ArrowUp':
+        e.preventDefault()
+        setSelectedIndex((i) => Math.max(i - 1, 0))
+        break
+      case 'Enter':
+        e.preventDefault()
+        executeAtIndex(selectedIndex)
+        break
+      case 'Escape':
+        e.preventDefault()
+        onClose()
+        break
+    }
+  }, [executeAtIndex, filtered.length, onClose, selectedIndex])
+
   useEffect(() => {
     const item = listRef.current?.querySelector(`[data-index="${selectedIndex}"]`)
     item?.scrollIntoView({ block: 'nearest' })
   }, [selectedIndex])
 
-  if (!isOpen) return null
-
   let flatIndex = -1
 
   return (
-    <div className="palette-overlay" onClick={onClose}>
-      <div className="palette-panel" onClick={(e) => e.stopPropagation()} onKeyDown={handleKeyDown}>
-        <div className="palette-input-wrapper">
-          <span className="palette-icon">&#x2318;</span>
-          <input
-            ref={inputRef}
-            className="palette-input"
-            type="text"
-            placeholder="Type a command..."
+    <Dialog
+      open={isOpen}
+      onClose={onClose}
+      fullWidth
+      maxWidth="sm"
+      aria-labelledby="command-palette-title"
+      PaperProps={{
+        sx: {
+          mt: '8vh',
+          borderRadius: 2,
+          alignSelf: 'flex-start',
+        },
+      }}
+    >
+      <DialogContent sx={{ p: 0 }} onKeyDown={handleKeyDown}>
+        <Box sx={{ p: 2, borderBottom: 1, borderColor: 'divider' }}>
+          <Typography id="command-palette-title" variant="overline" color="text.secondary">
+            Command Palette
+          </Typography>
+          <TextField
+            inputRef={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            placeholder="Type a command..."
+            fullWidth
+            size="small"
+            sx={{ mt: 1 }}
+            InputProps={{
+              startAdornment: (
+                <InputAdornment position="start">
+                  <SearchIcon fontSize="small" />
+                </InputAdornment>
+              ),
+              endAdornment: <Chip size="small" label="Esc" variant="outlined" />,
+            }}
           />
-          <kbd className="palette-esc">esc</kbd>
-        </div>
-        <div className="palette-results" ref={listRef}>
+        </Box>
+
+        <List ref={listRef} sx={{ maxHeight: 420, overflowY: 'auto', py: 0.5 }}>
           {Object.entries(grouped).map(([category, cmds]) => (
-            <div key={category} className="palette-group">
-              <div className="palette-group-label">{category}</div>
+            <Box key={category}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ px: 2, py: 0.75, display: 'block', textTransform: 'uppercase', letterSpacing: 0.5 }}
+              >
+                {category}
+              </Typography>
               {cmds.map((cmd) => {
                 flatIndex++
                 const idx = flatIndex
                 return (
-                  <div
+                  <ListItemButton
                     key={cmd.id}
-                    className={`palette-item ${idx === selectedIndex ? 'palette-item-selected' : ''}`}
+                    selected={idx === selectedIndex}
                     data-index={idx}
-                    onClick={() => {
-                      cmd.action()
-                      onClose()
-                    }}
+                    onClick={() => executeAtIndex(idx)}
                     onMouseEnter={() => setSelectedIndex(idx)}
                   >
-                    <span className="palette-item-icon">{cmd.icon || '>'}</span>
-                    <span className="palette-item-label">{cmd.label}</span>
+                    <ListItemText
+                      primary={
+                        <Stack direction="row" spacing={1.25} alignItems="center" useFlexGap>
+                          <Typography variant="body2" sx={{ minWidth: 18, textAlign: 'center' }}>
+                            {cmd.icon || '>'}
+                          </Typography>
+                          <Typography variant="body2">{cmd.label}</Typography>
+                        </Stack>
+                      }
+                    />
                     {cmd.shortcut && (
-                      <kbd className="palette-item-shortcut">{cmd.shortcut}</kbd>
+                      <Chip size="small" label={cmd.shortcut} variant="outlined" sx={{ fontSize: 11 }} />
                     )}
-                  </div>
+                  </ListItemButton>
                 )
               })}
-            </div>
+            </Box>
           ))}
+
           {filtered.length === 0 && (
-            <div className="palette-empty">No commands found</div>
+            <Box sx={{ px: 2, py: 4 }}>
+              <Typography variant="body2" color="text.secondary" textAlign="center">
+                No commands found
+              </Typography>
+            </Box>
           )}
-        </div>
-      </div>
-    </div>
+        </List>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -159,7 +206,7 @@ export function useCommandPalette() {
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         setIsOpen((prev) => !prev)
       }

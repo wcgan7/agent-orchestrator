@@ -81,6 +81,27 @@
   gap: 0.5rem;
 }
 
+.kanban-quick-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.kanban-quick-btn {
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--border-color, #e5e7eb);
+  border-radius: 999px;
+  background: var(--surface-bg, #fff);
+  color: var(--text-secondary, #6b7280);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+
+.kanban-quick-btn:hover {
+  color: var(--text-primary, #111827);
+  border-color: var(--border-hover, #d1d5db);
+}
+
 .kanban-btn-refresh {
   padding: 0.375rem 0.625rem;
   border: 1px solid var(--border-color, #e5e7eb);

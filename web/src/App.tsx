@@ -1,5 +1,29 @@
-import { useState, useEffect, useMemo, useCallback } from 'react'
-import './App.css'
+import { useState, useEffect, useMemo, useCallback, lazy, Suspense } from 'react'
+import {
+  Alert,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  CircularProgress,
+  Divider,
+  Grid,
+  IconButton,
+  Stack,
+  Tab,
+  Tabs,
+  ToggleButton,
+  ToggleButtonGroup,
+  Typography,
+} from '@mui/material'
+import LightModeIcon from '@mui/icons-material/LightMode'
+import DarkModeIcon from '@mui/icons-material/DarkMode'
+import SettingsSuggestIcon from '@mui/icons-material/SettingsSuggest'
+import LogoutIcon from '@mui/icons-material/Logout'
+import RefreshIcon from '@mui/icons-material/Refresh'
+import ProjectSelector from './components/ProjectSelector'
+import Login from './components/Login'
 import RunDashboard from './components/RunDashboard'
 import PhaseTimeline from './components/PhaseTimeline'
 import LiveLog from './components/LiveLog'
@@ -7,8 +31,6 @@ import MetricsPanel from './components/MetricsPanel'
 import MetricsChart from './components/MetricsChart'
 import ControlPanel from './components/ControlPanel'
 import DependencyGraph from './components/DependencyGraph'
-import ProjectSelector from './components/ProjectSelector'
-import Login from './components/Login'
 import ApprovalGate from './components/ApprovalGate'
 import Chat from './components/Chat'
 import FileReview from './components/FileReview'
@@ -17,22 +39,35 @@ import RunsPanel from './components/RunsPanel'
 import CostBreakdown from './components/CostBreakdown'
 import BreakpointsPanel from './components/BreakpointsPanel'
 import TaskLauncher from './components/TaskLauncher'
-import DryRunPanel from './components/DryRunPanel'
-import DoctorPanel from './components/DoctorPanel'
-import WorkersPanel from './components/WorkersPanel'
-import ParallelPlanView from './components/ParallelPlanView'
-import RequirementForm from './components/RequirementForm'
 import LoadingSpinner from './components/LoadingSpinner'
-import SplitPane from './components/SplitPane/SplitPane'
-import KanbanBoard from './components/KanbanBoard/KanbanBoard'
-import AgentPanel from './components/AgentCard/AgentCard'
 import CommandPalette, { useCommandPalette, Command } from './components/CommandPalette/CommandPalette'
-import HITLModeSelector from './components/HITLModeSelector/HITLModeSelector'
 import NotificationCenter from './components/NotificationCenter/NotificationCenter'
 import OnlineUsers from './components/OnlineUsers'
 import { ToastProvider } from './contexts/ToastContext'
 import { WebSocketProvider, useChannel } from './contexts/WebSocketContext'
-import { ThemeProvider, useTheme } from './contexts/ThemeContext'
+import { ThemeProvider as AppThemeProvider, useTheme } from './contexts/ThemeContext'
+import type { ThemeMode } from './contexts/ThemeContext'
+import { ThemeProvider as MuiThemeProvider, CssBaseline } from '@mui/material'
+import { createCockpitTheme } from './ui/theme'
+import AppShell from './ui/layout/AppShell'
+import { mapStatusSummary } from './ui/status'
+import type {
+  AppNavSection,
+  CockpitPanelState,
+  CockpitView,
+  DashboardLayoutConfig,
+  TaskDetailTab,
+} from './types/ui'
+import './App.css'
+
+const DryRunPanel = lazy(() => import('./components/DryRunPanel'))
+const DoctorPanel = lazy(() => import('./components/DoctorPanel'))
+const WorkersPanel = lazy(() => import('./components/WorkersPanel'))
+const ParallelPlanView = lazy(() => import('./components/ParallelPlanView'))
+const RequirementForm = lazy(() => import('./components/RequirementForm'))
+const KanbanBoard = lazy(() => import('./components/KanbanBoard/KanbanBoard'))
+const AgentPanel = lazy(() => import('./components/AgentCard/AgentCard'))
+const HITLModeSelector = lazy(() => import('./components/HITLModeSelector/HITLModeSelector'))
 
 interface ProjectStatus {
   project_dir: string
@@ -55,43 +90,198 @@ interface AuthStatus {
   username: string | null
 }
 
-type ViewTab = 'dashboard' | 'board' | 'agents'
-
 const STORAGE_KEY_PROJECT = 'feature-prd-runner-selected-project'
 const STORAGE_KEY_TOKEN = 'feature-prd-runner-auth-token'
 const STORAGE_KEY_USERNAME = 'feature-prd-runner-username'
 const STORAGE_KEY_VIEW = 'feature-prd-runner-view'
+const STORAGE_KEY_TASK_TAB = 'feature-prd-runner-task-tab'
+
+const navSections: AppNavSection[] = [
+  { id: 'overview', label: 'Overview', description: 'Current run health and priorities' },
+  { id: 'execution', label: 'Execution', description: 'Run controls, approvals, and live activity' },
+  { id: 'tasks', label: 'Tasks', description: 'Board, dependencies, and task interventions' },
+  { id: 'agents', label: 'Agents', description: 'Agent orchestration and worker capacity' },
+  { id: 'diagnostics', label: 'Diagnostics', description: 'Dry-run, doctor, cost, and metrics' },
+]
+
+const dashboardLayoutConfig: DashboardLayoutConfig = {
+  now: ['run_dashboard', 'approval_gate', 'file_review'],
+  flow: ['control_panel', 'phase_timeline', 'tasks_runs'],
+  insights: ['metrics', 'cost', 'dependency_parallel'],
+}
 
 function ThemeToggle() {
   const { theme, setTheme } = useTheme()
 
   return (
-    <div className="theme-toggle-group">
-      <button
-        className={`theme-btn ${theme === 'light' ? 'active' : ''}`}
-        onClick={() => setTheme('light')}
-        title="Light mode"
-        aria-label="Light mode"
-      >
-        &#x2600;
-      </button>
-      <button
-        className={`theme-btn ${theme === 'dark' ? 'active' : ''}`}
-        onClick={() => setTheme('dark')}
-        title="Dark mode"
-        aria-label="Dark mode"
-      >
-        &#x263E;
-      </button>
-      <button
-        className={`theme-btn ${theme === 'system' ? 'active' : ''}`}
-        onClick={() => setTheme('system')}
-        title="System preference"
-        aria-label="System preference"
-      >
-        &#x2699;
-      </button>
-    </div>
+    <ToggleButtonGroup
+      size="small"
+      value={theme}
+      exclusive
+      onChange={(_, next: ThemeMode | null) => {
+        if (next) setTheme(next)
+      }}
+      aria-label="Theme selection"
+    >
+      <ToggleButton value="light" aria-label="Light mode">
+        <LightModeIcon fontSize="small" />
+      </ToggleButton>
+      <ToggleButton value="dark" aria-label="Dark mode">
+        <DarkModeIcon fontSize="small" />
+      </ToggleButton>
+      <ToggleButton value="system" aria-label="System mode">
+        <SettingsSuggestIcon fontSize="small" />
+      </ToggleButton>
+    </ToggleButtonGroup>
+  )
+}
+
+function ActivityRail({
+  status,
+  currentProject,
+}: {
+  status: ProjectStatus | null
+  currentProject: string | null
+}) {
+  const statusSummary = mapStatusSummary(status?.status)
+
+  return (
+    <Stack spacing={2}>
+      <Card>
+        <CardContent>
+          <Typography variant="overline" color="text.secondary">Run Health</Typography>
+          <Stack direction="row" alignItems="center" spacing={1} sx={{ mt: 0.5 }}>
+            <Chip size="small" label={statusSummary.label} color={statusSummary.color} />
+            <Typography variant="body2" color="text.secondary">
+              Phase {status?.phases_completed ?? 0}/{status?.phases_total ?? 0}
+            </Typography>
+          </Stack>
+          <Stack direction="row" spacing={1} sx={{ mt: 1.5, flexWrap: 'wrap' }}>
+            <Chip size="small" color="success" variant="outlined" label={`Done ${status?.tasks_done ?? 0}`} />
+            <Chip size="small" color="info" variant="outlined" label={`Running ${status?.tasks_running ?? 0}`} />
+            <Chip size="small" color="warning" variant="outlined" label={`Ready ${status?.tasks_ready ?? 0}`} />
+            <Chip size="small" color="error" variant="outlined" label={`Blocked ${status?.tasks_blocked ?? 0}`} />
+          </Stack>
+          {status?.current_phase_id && (
+            <Typography variant="body2" sx={{ mt: 1.5 }}>
+              Current: <strong>{status.current_phase_id}</strong>
+            </Typography>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent>
+          <Typography variant="overline" color="text.secondary">Approvals and Risk</Typography>
+          <Typography variant="body2" sx={{ mt: 1 }}>
+            Blocked tasks: <strong>{status?.tasks_blocked ?? 0}</strong>
+          </Typography>
+          <Typography variant="body2">
+            Review task: <strong>{status?.current_task_id || 'none'}</strong>
+          </Typography>
+          {status?.last_error && (
+            <Alert severity="error" sx={{ mt: 1.5 }}>
+              {status.last_error}
+            </Alert>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardContent>
+          <Typography variant="overline" color="text.secondary">Context</Typography>
+          <Typography variant="body2" sx={{ mt: 1, wordBreak: 'break-word' }}>
+            {currentProject || 'No project selected'}
+          </Typography>
+          <Box sx={{ mt: 1.5 }}>
+            <OnlineUsers projectDir={currentProject || undefined} />
+          </Box>
+        </CardContent>
+      </Card>
+    </Stack>
+  )
+}
+
+function CockpitOverview({
+  status,
+  currentProject,
+}: {
+  status: ProjectStatus | null
+  currentProject: string | null
+}) {
+  return (
+    <Stack spacing={2.5}>
+      <Stack direction="row" spacing={1} alignItems="center">
+        <Typography variant="h5">Overview</Typography>
+        <Chip size="small" variant="outlined" label="Now / Flow / Insights" />
+      </Stack>
+
+      <Grid container spacing={2}>
+        <Grid size={{ xs: 12, xl: 4 }}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" sx={{ mb: 1.5 }}>Now</Typography>
+              <RunDashboard status={status} />
+              <Divider sx={{ my: 2 }} />
+              <ApprovalGate projectDir={currentProject || undefined} />
+              <Divider sx={{ my: 2 }} />
+              <FileReview
+                taskId={status?.current_task_id}
+                projectDir={currentProject || undefined}
+              />
+            </CardContent>
+          </Card>
+        </Grid>
+
+        <Grid size={{ xs: 12, xl: 4 }}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" sx={{ mb: 1.5 }}>Flow</Typography>
+              <ControlPanel
+                currentTaskId={status?.current_task_id}
+                currentPhaseId={status?.current_phase_id}
+                status={status?.status}
+                projectDir={currentProject || undefined}
+              />
+              <Divider sx={{ my: 2 }} />
+              <PhaseTimeline projectDir={currentProject || undefined} />
+              <Divider sx={{ my: 2 }} />
+              <Grid container spacing={2}>
+                <Grid size={{ xs: 12 }}>
+                  <TasksPanel
+                    projectDir={currentProject || undefined}
+                    currentTaskId={status?.current_task_id}
+                  />
+                </Grid>
+                <Grid size={{ xs: 12 }}>
+                  <RunsPanel
+                    projectDir={currentProject || undefined}
+                    currentRunId={status?.run_id}
+                  />
+                </Grid>
+              </Grid>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        <Grid size={{ xs: 12, xl: 4 }}>
+          <Card>
+            <CardContent>
+              <Typography variant="h6" sx={{ mb: 1.5 }}>Insights</Typography>
+              <MetricsPanel projectDir={currentProject || undefined} />
+              <Divider sx={{ my: 2 }} />
+              <MetricsChart projectDir={currentProject || undefined} />
+              <Divider sx={{ my: 2 }} />
+              <CostBreakdown projectDir={currentProject || undefined} />
+              <Divider sx={{ my: 2 }} />
+              <DependencyGraph projectDir={currentProject || undefined} />
+              <Divider sx={{ my: 2 }} />
+              <ParallelPlanView projectDir={currentProject || undefined} />
+            </CardContent>
+          </Card>
+        </Grid>
+      </Grid>
+    </Stack>
   )
 }
 
@@ -101,29 +291,36 @@ function AppContent() {
   const [loading, setLoading] = useState(true)
   const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null)
   const [authChecked, setAuthChecked] = useState(false)
-  const [currentProject, setCurrentProject] = useState<string | null>(() => {
-    return localStorage.getItem(STORAGE_KEY_PROJECT)
+  const [currentProject, setCurrentProject] = useState<string | null>(() => localStorage.getItem(STORAGE_KEY_PROJECT))
+  const [activeView, setActiveView] = useState<CockpitView>(() => {
+    const stored = localStorage.getItem(STORAGE_KEY_VIEW) as CockpitView | null
+    return stored || 'overview'
   })
-  const [showLauncher, setShowLauncher] = useState(false)
-  const [activeView, setActiveView] = useState<ViewTab>(() => {
-    return (localStorage.getItem(STORAGE_KEY_VIEW) as ViewTab) || 'dashboard'
+  const [taskTab, setTaskTab] = useState<TaskDetailTab>(() => {
+    const stored = localStorage.getItem(STORAGE_KEY_TASK_TAB) as TaskDetailTab | null
+    return stored || 'summary'
   })
   const [hitlMode, setHitlMode] = useState('autopilot')
+  const [panelState, setPanelState] = useState<CockpitPanelState>({
+    showLauncher: false,
+    showLiveLog: true,
+  })
 
   const { effectiveTheme, toggleTheme } = useTheme()
   const { isOpen: paletteOpen, open: openPalette, close: closePalette } = useCommandPalette()
 
-  // Persist active view
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY_VIEW, activeView)
   }, [activeView])
 
-  // Check auth status on mount
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_TASK_TAB, taskTab)
+  }, [taskTab])
+
   useEffect(() => {
     checkAuthStatus()
   }, [])
 
-  // Fetch project status after auth is checked
   useEffect(() => {
     if (authChecked && isAuthenticated()) {
       fetchStatus()
@@ -142,16 +339,9 @@ function AppContent() {
       if (response.ok) {
         const data = await response.json()
         setAuthStatus(data)
-
-        if (!data.enabled) {
-          setAuthChecked(true)
-          return
-        }
-
         setAuthChecked(true)
       }
-    } catch (err) {
-      console.error('Failed to check auth status:', err)
+    } catch {
       setAuthStatus({ enabled: false, authenticated: true, username: null })
       setAuthChecked(true)
     }
@@ -177,14 +367,10 @@ function AppContent() {
   const handleLogout = () => {
     localStorage.removeItem(STORAGE_KEY_TOKEN)
     localStorage.removeItem(STORAGE_KEY_USERNAME)
-    setAuthStatus({
-      enabled: true,
-      authenticated: false,
-      username: null,
-    })
+    setAuthStatus({ enabled: true, authenticated: false, username: null })
   }
 
-  const fetchStatus = async () => {
+  const fetchStatus = useCallback(async () => {
     try {
       const url = currentProject
         ? `/api/status?project_dir=${encodeURIComponent(currentProject)}`
@@ -192,14 +378,11 @@ function AppContent() {
 
       const headers: HeadersInit = {}
       const token = localStorage.getItem(STORAGE_KEY_TOKEN)
-      if (token) {
-        headers['Authorization'] = `Bearer ${token}`
-      }
+      if (token) headers.Authorization = `Bearer ${token}`
 
       const response = await fetch(url, { headers })
-      if (!response.ok) {
-        throw new Error(`HTTP error ${response.status}`)
-      }
+      if (!response.ok) throw new Error(`HTTP error ${response.status}`)
+
       const data = await response.json()
       setStatus(data)
       setError(null)
@@ -208,7 +391,7 @@ function AppContent() {
     } finally {
       setLoading(false)
     }
-  }
+  }, [currentProject])
 
   const handleProjectChange = (projectPath: string) => {
     setCurrentProject(projectPath)
@@ -216,71 +399,94 @@ function AppContent() {
     setLoading(true)
   }
 
-  const handleRunStarted = (_runId: string) => {
-    setShowLauncher(false)
+  const handleRunStarted = () => {
+    setPanelState((prev) => ({ ...prev, showLauncher: false }))
     fetchStatus()
   }
 
-  // Command palette commands
   const commands: Command[] = useMemo(() => [
     {
-      id: 'nav-board',
-      label: 'Go to Task Board',
+      id: 'nav-overview',
+      label: 'Go to Overview',
       category: 'Navigation',
-      icon: '&#x25A6;',
-      shortcut: 'B',
-      action: () => setActiveView('board'),
+      icon: 'O',
+      shortcut: 'O',
+      action: () => setActiveView('overview'),
     },
     {
-      id: 'nav-dashboard',
-      label: 'Go to Dashboard',
+      id: 'nav-execution',
+      label: 'Go to Execution',
       category: 'Navigation',
-      icon: '&#x25A3;',
-      shortcut: 'D',
-      action: () => setActiveView('dashboard'),
+      icon: 'E',
+      shortcut: 'E',
+      action: () => setActiveView('execution'),
+    },
+    {
+      id: 'nav-tasks',
+      label: 'Go to Tasks',
+      category: 'Navigation',
+      icon: 'T',
+      shortcut: 'T',
+      action: () => setActiveView('tasks'),
     },
     {
       id: 'nav-agents',
       label: 'Go to Agents',
       category: 'Navigation',
-      icon: '&#x2699;',
+      icon: 'A',
       shortcut: 'A',
       action: () => setActiveView('agents'),
+    },
+    {
+      id: 'nav-diagnostics',
+      label: 'Go to Diagnostics',
+      category: 'Navigation',
+      icon: 'D',
+      shortcut: 'G',
+      action: () => setActiveView('diagnostics'),
     },
     {
       id: 'toggle-theme',
       label: `Switch to ${effectiveTheme === 'light' ? 'Dark' : 'Light'} Mode`,
       category: 'Settings',
-      icon: effectiveTheme === 'light' ? '&#x263E;' : '&#x2600;',
-      shortcut: 'T',
+      icon: effectiveTheme === 'light' ? 'M' : 'S',
+      shortcut: 'Shift+T',
       action: toggleTheme,
     },
     {
       id: 'toggle-launcher',
-      label: showLauncher ? 'Hide Task Launcher' : 'Launch New Run',
+      label: panelState.showLauncher ? 'Hide Task Launcher' : 'Launch New Run',
       category: 'Actions',
-      icon: '&#x25B6;',
+      icon: 'L',
       shortcut: 'L',
-      action: () => { setActiveView('dashboard'); setShowLauncher(!showLauncher) },
+      action: () => {
+        setActiveView('execution')
+        setPanelState((prev) => ({ ...prev, showLauncher: !prev.showLauncher }))
+      },
+    },
+    {
+      id: 'toggle-log',
+      label: panelState.showLiveLog ? 'Hide Live Log' : 'Show Live Log',
+      category: 'Actions',
+      icon: 'R',
+      shortcut: 'V',
+      action: () => setPanelState((prev) => ({ ...prev, showLiveLog: !prev.showLiveLog })),
     },
     {
       id: 'refresh',
       label: 'Refresh Status',
       category: 'Actions',
-      icon: '&#x21BB;',
+      icon: 'R',
       shortcut: 'R',
       action: fetchStatus,
     },
-  ], [effectiveTheme, toggleTheme, showLauncher])
+  ], [effectiveTheme, toggleTheme, panelState, fetchStatus])
 
-  // Show login page if auth is enabled and not authenticated
   if (!authChecked) {
     return (
-      <div className="app">
-        <div className="loading-screen">
-          <LoadingSpinner size="lg" label="Checking authentication..." />
-        </div>
-      </div>
+      <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
+        <LoadingSpinner size="lg" label="Checking authentication..." />
+      </Box>
     )
   }
 
@@ -290,319 +496,319 @@ function AppContent() {
 
   if (loading) {
     return (
-      <div className="app">
-        <div className="loading-screen">
-          <LoadingSpinner size="lg" label="Loading dashboard..." />
-        </div>
-      </div>
+      <Box sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
+        <Stack spacing={2} alignItems="center">
+          <CircularProgress size={28} />
+          <Typography color="text.secondary">Loading cockpit...</Typography>
+        </Stack>
+      </Box>
     )
   }
 
   if (error) {
     return (
-      <div className="app">
-        <header className="header">
-          <div className="header-left">
-            <h1 className="header-title">Feature PRD Runner</h1>
-          </div>
-          <div className="header-right">
-            <ProjectSelector
-              currentProject={currentProject}
-              onProjectChange={handleProjectChange}
-            />
-            <ThemeToggle />
-            {authStatus?.enabled && (
-              <button onClick={handleLogout} className="btn-logout">
-                Logout
-              </button>
-            )}
-          </div>
-        </header>
-        <div className="error">
-          <h2>Connection Error</h2>
-          <p>{error}</p>
-          <p className="hint">
-            {currentProject
-              ? 'Make sure the selected project has a valid .prd_runner directory'
-              : 'Select a project or make sure the backend server is running on port 8080'}
-          </p>
-          <button onClick={fetchStatus} className="btn btn-primary">
-            Retry
-          </button>
-        </div>
-      </div>
+      <Box sx={{ p: 3, maxWidth: 760, mx: 'auto', mt: 10 }}>
+        <Typography variant="h5" sx={{ mb: 1 }}>
+          Connection Error
+        </Typography>
+        <Alert severity="error" sx={{ mb: 2 }}>
+          Connection error: {error}
+        </Alert>
+        <Typography color="text.secondary" sx={{ mb: 2 }}>
+          {currentProject
+            ? 'Ensure the selected project has a valid .prd_runner directory.'
+            : 'Select a project or ensure the backend server is running on port 8080.'}
+        </Typography>
+        <Button variant="contained" onClick={fetchStatus}>Retry</Button>
+      </Box>
     )
   }
 
   const username = localStorage.getItem(STORAGE_KEY_USERNAME) || authStatus?.username
+  const statusSummary = mapStatusSummary(status?.status)
 
-  return (
-    <div className="app">
-      <header className="header">
-        <div className="header-left">
-          <h1 className="header-title">Feature PRD Runner</h1>
-          <nav className="header-nav">
-            <button
-              className={`nav-tab ${activeView === 'board' ? 'active' : ''}`}
-              onClick={() => setActiveView('board')}
-            >
-              Task Board
-            </button>
-            <button
-              className={`nav-tab ${activeView === 'dashboard' ? 'active' : ''}`}
-              onClick={() => setActiveView('dashboard')}
-            >
-              Dashboard
-            </button>
-            <button
-              className={`nav-tab ${activeView === 'agents' ? 'active' : ''}`}
-              onClick={() => setActiveView('agents')}
-            >
-              Agents
-            </button>
-          </nav>
-        </div>
-        <div className="header-center">
-          <ProjectSelector
-            currentProject={currentProject}
-            onProjectChange={handleProjectChange}
-          />
-        </div>
-        <div className="header-right">
-          <button
-            className="cmd-k-btn"
-            onClick={openPalette}
-            title="Command Palette (Cmd+K)"
+  const executionContent = (
+    <Stack spacing={2.5}>
+      <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1.5}>
+        <Typography variant="h5">Execution</Typography>
+        <Stack direction="row" spacing={1}>
+          <Button
+            variant={panelState.showLauncher ? 'outlined' : 'contained'}
+            onClick={() => setPanelState((prev) => ({ ...prev, showLauncher: !prev.showLauncher }))}
           >
-            <kbd>&#x2318;K</kbd>
-          </button>
-          <OnlineUsers projectDir={currentProject || undefined} />
-          <NotificationCenter />
-          <ThemeToggle />
-          {username && <span className="header-username">{username}</span>}
-          <div className="status-badge" data-status={status?.status}>
-            {status?.status || 'unknown'}
-          </div>
-          {authStatus?.enabled && (
-            <button onClick={handleLogout} className="btn-logout">
-              Logout
-            </button>
-          )}
-        </div>
-      </header>
+            {panelState.showLauncher ? 'Hide Launcher' : 'Launch New Run'}
+          </Button>
+          <Button
+            variant="outlined"
+            onClick={() => setPanelState((prev) => ({ ...prev, showLiveLog: !prev.showLiveLog }))}
+          >
+            {panelState.showLiveLog ? 'Hide Live Log' : 'Show Live Log'}
+          </Button>
+        </Stack>
+      </Stack>
 
-      {/* Main content area */}
-      {activeView === 'board' ? (
-        <div className="main-content">
-          <KanbanBoard projectDir={currentProject || undefined} />
-        </div>
-      ) : activeView === 'agents' ? (
-        <div className="main-content main-content-scroll">
-          <div className="agents-header-bar">
-            <HITLModeSelector
-              currentMode={hitlMode}
-              onModeChange={setHitlMode}
-              projectDir={currentProject || undefined}
-            />
-          </div>
-          <AgentPanel projectDir={currentProject || undefined} />
-          <div style={{ padding: '0 1rem' }}>
-            <WorkersPanel projectDir={currentProject || undefined} />
-            <RequirementForm projectDir={currentProject || undefined} />
-          </div>
-        </div>
-      ) : status?.run_id ? (
-        <SplitPane
-          defaultLeftWidth={65}
-          minLeftWidth={40}
-          maxLeftWidth={80}
-          className="dashboard-split"
-          left={
-            <div className="container">
-              <RunDashboard status={status} />
-
-              {/* Task Launcher Section */}
-              <div className="launcher-toggle-section">
-                <button
-                  onClick={() => setShowLauncher(!showLauncher)}
-                  className={`btn-launcher-toggle ${showLauncher ? 'active' : ''}`}
-                >
-                  {showLauncher ? 'Hide Task Launcher' : 'Launch New Run'}
-                </button>
-              </div>
-
-              {showLauncher && (
-                <TaskLauncher
-                  projectDir={currentProject}
-                  onRunStarted={handleRunStarted}
-                />
-              )}
-
-              <div className="grid">
-                <div className="col-2">
-                  <DryRunPanel projectDir={currentProject || undefined} />
-                </div>
-                <div className="col-2">
-                  <DoctorPanel projectDir={currentProject || undefined} />
-                </div>
-              </div>
-
-              <ControlPanel
-                currentTaskId={status?.current_task_id}
-                currentPhaseId={status?.current_phase_id}
-                status={status?.status}
-                projectDir={currentProject || undefined}
-              />
-
-              <ApprovalGate projectDir={currentProject || undefined} />
-
-              <FileReview
-                taskId={status?.current_task_id}
-                projectDir={currentProject || undefined}
-              />
-
-              <div className="grid">
-                <div className="col-2">
-                  <PhaseTimeline projectDir={currentProject || undefined} />
-                </div>
-                <div className="col-2">
-                  <MetricsPanel projectDir={currentProject || undefined} />
-                </div>
-              </div>
-
-              <MetricsChart projectDir={currentProject || undefined} />
-
-              <CostBreakdown projectDir={currentProject || undefined} />
-
-              <DependencyGraph projectDir={currentProject || undefined} />
-
-              <ParallelPlanView projectDir={currentProject || undefined} />
-
-              <div className="grid">
-                <div className="col-2">
-                  <TasksPanel
-                    projectDir={currentProject || undefined}
-                    currentTaskId={status?.current_task_id}
-                  />
-                </div>
-                <div className="col-2">
-                  <RunsPanel
-                    projectDir={currentProject || undefined}
-                    currentRunId={status?.run_id}
-                  />
-                </div>
-              </div>
-
-              <BreakpointsPanel projectDir={currentProject || undefined} />
-            </div>
-          }
-          right={
-            <div className="split-log-panel">
-              <LiveLog runId={status.run_id} projectDir={currentProject || undefined} />
-            </div>
-          }
-        />
-      ) : (
-        <div className="container">
-          <RunDashboard status={status} />
-
-          {/* Task Launcher Section */}
-          <div className="launcher-toggle-section">
-            <button
-              onClick={() => setShowLauncher(!showLauncher)}
-              className={`btn-launcher-toggle ${showLauncher ? 'active' : ''}`}
-            >
-              {showLauncher ? 'Hide Task Launcher' : 'Launch New Run'}
-            </button>
-          </div>
-
-          {showLauncher && (
-            <TaskLauncher
-              projectDir={currentProject}
-              onRunStarted={handleRunStarted}
-            />
-          )}
-
-          <div className="grid">
-            <div className="col-2">
-              <DryRunPanel projectDir={currentProject || undefined} />
-            </div>
-            <div className="col-2">
-              <DoctorPanel projectDir={currentProject || undefined} />
-            </div>
-          </div>
-
-          <ControlPanel
-            currentTaskId={status?.current_task_id}
-            currentPhaseId={status?.current_phase_id}
-            status={status?.status}
-            projectDir={currentProject || undefined}
-          />
-
-          <ApprovalGate projectDir={currentProject || undefined} />
-
-          <FileReview
-            taskId={status?.current_task_id}
-            projectDir={currentProject || undefined}
-          />
-
-          <div className="grid">
-            <div className="col-2">
-              <PhaseTimeline projectDir={currentProject || undefined} />
-            </div>
-            <div className="col-2">
-              <MetricsPanel projectDir={currentProject || undefined} />
-            </div>
-          </div>
-
-          <MetricsChart projectDir={currentProject || undefined} />
-
-          <CostBreakdown projectDir={currentProject || undefined} />
-
-          <DependencyGraph projectDir={currentProject || undefined} />
-
-          <ParallelPlanView projectDir={currentProject || undefined} />
-
-          <div className="grid">
-            <div className="col-2">
-              <TasksPanel
-                projectDir={currentProject || undefined}
-                currentTaskId={status?.current_task_id}
-              />
-            </div>
-            <div className="col-2">
-              <RunsPanel
-                projectDir={currentProject || undefined}
-                currentRunId={status?.run_id}
-              />
-            </div>
-          </div>
-
-          <BreakpointsPanel projectDir={currentProject || undefined} />
-        </div>
+      {panelState.showLauncher && (
+        <Card>
+          <CardContent>
+            <TaskLauncher projectDir={currentProject} onRunStarted={handleRunStarted} />
+          </CardContent>
+        </Card>
       )}
 
-      <Chat runId={status?.run_id} projectDir={currentProject || undefined} />
+      <Grid container spacing={2}>
+        <Grid size={{ xs: 12, lg: panelState.showLiveLog ? 8 : 12 }}>
+          <Stack spacing={2}>
+            <Card>
+              <CardContent>
+                <ControlPanel
+                  currentTaskId={status?.current_task_id}
+                  currentPhaseId={status?.current_phase_id}
+                  status={status?.status}
+                  projectDir={currentProject || undefined}
+                />
+                <Divider sx={{ my: 2 }} />
+                <ApprovalGate projectDir={currentProject || undefined} />
+                <Divider sx={{ my: 2 }} />
+                <FileReview taskId={status?.current_task_id} projectDir={currentProject || undefined} />
+                <Divider sx={{ my: 2 }} />
+                <BreakpointsPanel projectDir={currentProject || undefined} />
+              </CardContent>
+            </Card>
+          </Stack>
+        </Grid>
+        {panelState.showLiveLog && (
+          <Grid size={{ xs: 12, lg: 4 }}>
+            <Card>
+              <CardContent>
+                <Typography variant="h6" sx={{ mb: 1.5 }}>Live Log</Typography>
+                {status?.run_id ? (
+                  <LiveLog runId={status.run_id} projectDir={currentProject || undefined} />
+                ) : (
+                  <Alert severity="info">Start a run to stream logs.</Alert>
+                )}
+              </CardContent>
+            </Card>
+          </Grid>
+        )}
+      </Grid>
+    </Stack>
+  )
 
-      {/* Command Palette */}
+  const taskContent = (
+    <Stack spacing={2.5}>
+      <Typography variant="h5">Tasks</Typography>
+      <Card>
+        <CardContent>
+          <KanbanBoard projectDir={currentProject || undefined} />
+        </CardContent>
+      </Card>
+      <Card>
+        <CardContent>
+          <Typography variant="h6" sx={{ mb: 1.5 }}>Task Detail Workbench</Typography>
+          <Tabs
+            value={taskTab}
+            onChange={(_, value: TaskDetailTab) => setTaskTab(value)}
+            variant="scrollable"
+            allowScrollButtonsMobile
+          >
+            <Tab value="summary" label="Summary" />
+            <Tab value="dependencies" label="Dependencies" />
+            <Tab value="logs" label="Logs" />
+            <Tab value="interventions" label="Interventions" />
+          </Tabs>
+          <Divider sx={{ my: 2 }} />
+
+          {taskTab === 'summary' && (
+            <Grid container spacing={2}>
+              <Grid size={{ xs: 12, lg: 6 }}>
+                <TasksPanel
+                  projectDir={currentProject || undefined}
+                  currentTaskId={status?.current_task_id}
+                />
+              </Grid>
+              <Grid size={{ xs: 12, lg: 6 }}>
+                <RunsPanel
+                  projectDir={currentProject || undefined}
+                  currentRunId={status?.run_id}
+                />
+              </Grid>
+            </Grid>
+          )}
+
+          {taskTab === 'dependencies' && (
+            <Stack spacing={2}>
+              <DependencyGraph projectDir={currentProject || undefined} />
+              <ParallelPlanView projectDir={currentProject || undefined} />
+            </Stack>
+          )}
+
+          {taskTab === 'logs' && (
+            status?.run_id
+              ? <LiveLog runId={status.run_id} projectDir={currentProject || undefined} />
+              : <Alert severity="info">No active run logs available.</Alert>
+          )}
+
+          {taskTab === 'interventions' && (
+            <Stack spacing={2}>
+              <RequirementForm projectDir={currentProject || undefined} />
+              <Typography variant="body2" color="text.secondary">
+                Use the floating chat entry point to collaborate with the worker.
+              </Typography>
+            </Stack>
+          )}
+        </CardContent>
+      </Card>
+    </Stack>
+  )
+
+  const agentsContent = (
+    <Stack spacing={2.5}>
+      <Typography variant="h5">Agents</Typography>
+      <Grid container spacing={2}>
+        <Grid size={{ xs: 12, lg: 4 }}>
+          <Stack spacing={2}>
+            <Card>
+              <CardContent>
+                <HITLModeSelector
+                  currentMode={hitlMode}
+                  onModeChange={setHitlMode}
+                  projectDir={currentProject || undefined}
+                />
+              </CardContent>
+            </Card>
+            <Card>
+              <CardContent>
+                <WorkersPanel projectDir={currentProject || undefined} />
+              </CardContent>
+            </Card>
+          </Stack>
+        </Grid>
+        <Grid size={{ xs: 12, lg: 8 }}>
+          <Card>
+            <CardContent>
+              <AgentPanel projectDir={currentProject || undefined} />
+              <Divider sx={{ my: 2 }} />
+              <RequirementForm projectDir={currentProject || undefined} />
+            </CardContent>
+          </Card>
+        </Grid>
+      </Grid>
+    </Stack>
+  )
+
+  const diagnosticsContent = (
+    <Stack spacing={2.5}>
+      <Typography variant="h5">Diagnostics</Typography>
+      <Grid container spacing={2}>
+        <Grid size={{ xs: 12, lg: 6 }}>
+          <Card><CardContent><DryRunPanel projectDir={currentProject || undefined} /></CardContent></Card>
+        </Grid>
+        <Grid size={{ xs: 12, lg: 6 }}>
+          <Card><CardContent><DoctorPanel projectDir={currentProject || undefined} /></CardContent></Card>
+        </Grid>
+      </Grid>
+      <Card><CardContent><MetricsPanel projectDir={currentProject || undefined} /></CardContent></Card>
+      <Card><CardContent><MetricsChart projectDir={currentProject || undefined} /></CardContent></Card>
+      <Card><CardContent><CostBreakdown projectDir={currentProject || undefined} /></CardContent></Card>
+    </Stack>
+  )
+
+  return (
+    <>
+      <AppShell
+        title="Feature PRD Runner"
+        sections={navSections}
+        activeSection={activeView}
+        onSectionChange={setActiveView}
+        statusSummary={statusSummary}
+        commandHint="Cmd/Ctrl + K"
+        onOpenCommandPalette={openPalette}
+        commandBarCenter={(
+          <Box sx={{ width: { xs: '100%', md: 420 }, maxWidth: '100%' }}>
+            <ProjectSelector
+              currentProject={currentProject}
+              onProjectChange={handleProjectChange}
+            />
+          </Box>
+        )}
+        commandBarRight={(
+          <Stack direction="row" spacing={1.2} alignItems="center">
+            <IconButton aria-label="Refresh status" onClick={fetchStatus}>
+              <RefreshIcon />
+            </IconButton>
+            <NotificationCenter />
+            <ThemeToggle />
+            {username && (
+              <Chip size="small" variant="outlined" label={username} />
+            )}
+            {authStatus?.enabled && (
+              <Button
+                size="small"
+                color="error"
+                variant="outlined"
+                startIcon={<LogoutIcon />}
+                onClick={handleLogout}
+              >
+                Logout
+              </Button>
+            )}
+          </Stack>
+        )}
+        rightRail={<ActivityRail status={status} currentProject={currentProject} />}
+      >
+        <Suspense
+          fallback={(
+            <Box sx={{ minHeight: 220, display: 'grid', placeItems: 'center' }}>
+              <LoadingSpinner label="Loading section..." />
+            </Box>
+          )}
+        >
+          {activeView === 'overview' && <CockpitOverview status={status} currentProject={currentProject} />}
+          {activeView === 'execution' && executionContent}
+          {activeView === 'tasks' && taskContent}
+          {activeView === 'agents' && agentsContent}
+          {activeView === 'diagnostics' && diagnosticsContent}
+        </Suspense>
+      </AppShell>
+
       <CommandPalette
         commands={commands}
         isOpen={paletteOpen}
         onClose={closePalette}
       />
-    </div>
+
+      <Chat runId={status?.run_id} projectDir={currentProject || undefined} />
+
+      <Box sx={{ display: 'none' }}>
+        {dashboardLayoutConfig.now.join(',')}
+        {dashboardLayoutConfig.flow.join(',')}
+        {dashboardLayoutConfig.insights.join(',')}
+      </Box>
+    </>
   )
 }
 
-function App() {
+function CockpitThemeRoot() {
+  const { effectiveTheme } = useTheme()
+  const muiTheme = useMemo(() => createCockpitTheme(effectiveTheme), [effectiveTheme])
+
   return (
-    <ThemeProvider>
+    <MuiThemeProvider theme={muiTheme}>
+      <CssBaseline />
       <ToastProvider>
         <WebSocketProvider>
           <AppContent />
         </WebSocketProvider>
       </ToastProvider>
-    </ThemeProvider>
+    </MuiThemeProvider>
+  )
+}
+
+function App() {
+  return (
+    <AppThemeProvider>
+      <CockpitThemeRoot />
+    </AppThemeProvider>
   )
 }
 

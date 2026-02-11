@@ -1,4 +1,18 @@
 import { useEffect, useMemo, useState, useCallback } from 'react'
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
+  TextField,
+  Typography,
+} from '@mui/material'
 import { buildApiUrl, buildAuthHeaders } from '../api'
 import { useChannel } from '../contexts/WebSocketContext'
 import EmptyState from './EmptyState'
@@ -85,15 +99,13 @@ export default function TasksPanel({ projectDir, currentTaskId }: Props) {
   const filteredTasks = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!q) return tasks
-    return tasks.filter((t) => {
-      return (
-        t.id.toLowerCase().includes(q) ||
-        (t.phase_id || '').toLowerCase().includes(q) ||
-        t.step.toLowerCase().includes(q) ||
-        t.lifecycle.toLowerCase().includes(q) ||
-        t.status.toLowerCase().includes(q)
-      )
-    })
+    return tasks.filter((t) => (
+      t.id.toLowerCase().includes(q) ||
+      (t.phase_id || '').toLowerCase().includes(q) ||
+      t.step.toLowerCase().includes(q) ||
+      t.lifecycle.toLowerCase().includes(q) ||
+      t.status.toLowerCase().includes(q)
+    ))
   }, [tasks, query])
 
   const counts = useMemo(() => {
@@ -105,21 +117,22 @@ export default function TasksPanel({ projectDir, currentTaskId }: Props) {
   }, [tasks])
 
   return (
-    <div className="card">
-      <h2>Tasks</h2>
+    <Box>
+      <Typography variant="h2" sx={{ fontSize: '1.125rem', mb: 1.5 }}>Tasks</Typography>
 
-      <div className="tasks-panel-header">
-        <input
-          type="text"
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} className="tasks-panel-header" sx={{ mb: 1.5 }}>
+        <TextField
+          size="small"
           placeholder="Filter tasks..."
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           className="tasks-panel-search"
+          fullWidth
         />
-        <button onClick={fetchTasks} className="tasks-panel-btn">
+        <Button variant="outlined" onClick={fetchTasks} className="tasks-panel-btn">
           Refresh
-        </button>
-      </div>
+        </Button>
+      </Stack>
 
       {loading ? (
         <LoadingSpinner label="Loading tasks..." />
@@ -139,54 +152,57 @@ export default function TasksPanel({ projectDir, currentTaskId }: Props) {
         />
       ) : (
         <>
-          <div className="tasks-panel-summary">
-            Total: {tasks.length}
-            {Object.keys(counts).length > 0 && (
-              <>
-                {' • '}
-                {Object.entries(counts)
-                  .map(([k, v]) => `${k}: ${v}`)
-                  .join(' • ')}
-              </>
-            )}
-          </div>
+          <Box className="tasks-panel-summary" sx={{ mb: 1.25 }}>
+            <Typography variant="caption" color="text.secondary">
+              Total: {tasks.length}
+            </Typography>
+            <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap" sx={{ mt: 0.75 }}>
+              {Object.entries(counts).map(([k, v]) => (
+                <Chip key={k} size="small" variant="outlined" label={`${k}: ${v}`} />
+              ))}
+            </Stack>
+          </Box>
 
-          <div className="tasks-panel-table-wrapper">
-            <table className="tasks-panel-table">
-              <thead>
-                <tr>
-                  <th>Task</th>
-                  <th>Phase</th>
-                  <th>Step</th>
-                  <th>Lifecycle</th>
-                  <th>Attempts</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredTasks.map((task) => (
-                  <tr
-                    key={task.id}
-                    className={task.id === currentTaskId ? 'active' : ''}
-                  >
-                    <td>
-                      <span className="tasks-panel-task-id">{task.id}</span>
-                      {task.last_error && (
-                        <div className="tasks-panel-task-error">
-                          {task.last_error}
-                        </div>
-                      )}
-                    </td>
-                    <td>{task.phase_id || '-'}</td>
-                    <td>{task.step || '-'}</td>
-                    <td>{task.lifecycle || '-'}</td>
-                    <td>{task.worker_attempts}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          <Box className="tasks-panel-table-wrapper" sx={{ overflowX: 'auto' }}>
+            <Table className="tasks-panel-table" size="small" aria-label="Task table">
+              <TableHead>
+                <TableRow>
+                  <TableCell>Task</TableCell>
+                  <TableCell>Phase</TableCell>
+                  <TableCell>Step</TableCell>
+                  <TableCell>Lifecycle</TableCell>
+                  <TableCell align="right">Attempts</TableCell>
+                </TableRow>
+              </TableHead>
+              <TableBody>
+                {filteredTasks.map((task) => {
+                  const isActive = task.id === currentTaskId
+                  return (
+                    <TableRow
+                      key={task.id}
+                      className={isActive ? 'active' : ''}
+                      sx={isActive ? { bgcolor: 'action.selected' } : undefined}
+                    >
+                      <TableCell>
+                        <Typography className="tasks-panel-task-id" fontWeight={600}>{task.id}</Typography>
+                        {task.last_error && (
+                          <Alert className="tasks-panel-task-error" severity="error" sx={{ mt: 0.5, py: 0 }}>
+                            {task.last_error}
+                          </Alert>
+                        )}
+                      </TableCell>
+                      <TableCell>{task.phase_id || '-'}</TableCell>
+                      <TableCell>{task.step || '-'}</TableCell>
+                      <TableCell>{task.lifecycle || '-'}</TableCell>
+                      <TableCell align="right">{task.worker_attempts}</TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          </Box>
         </>
       )}
-    </div>
+    </Box>
   )
 }

@@ -41,6 +41,15 @@ interface BoardData {
   columns: Record<string, TaskData[]>
 }
 
+interface SavedView {
+  id: string
+  name: string
+  filterType: string
+  filterPriority: string
+  filterStatus: string
+  searchQuery: string
+}
+
 const COLUMN_ORDER = ['backlog', 'ready', 'in_progress', 'in_review', 'done']
 const COLUMN_LABELS: Record<string, string> = {
   backlog: 'Backlog',
@@ -50,6 +59,42 @@ const COLUMN_LABELS: Record<string, string> = {
   blocked: 'Blocked',
   done: 'Done',
 }
+
+const STORAGE_KEY_SAVED_VIEWS = 'feature-prd-runner-kanban-saved-views'
+const BUILTIN_VIEWS: SavedView[] = [
+  {
+    id: 'all',
+    name: 'All Tasks',
+    filterType: '',
+    filterPriority: '',
+    filterStatus: '',
+    searchQuery: '',
+  },
+  {
+    id: 'blocked',
+    name: 'Blocked Tasks',
+    filterType: '',
+    filterPriority: '',
+    filterStatus: 'blocked',
+    searchQuery: '',
+  },
+  {
+    id: 'high-priority',
+    name: 'High Priority',
+    filterType: '',
+    filterPriority: 'P0',
+    filterStatus: '',
+    searchQuery: '',
+  },
+  {
+    id: 'in-review',
+    name: 'Needs Review',
+    filterType: '',
+    filterPriority: '',
+    filterStatus: 'in_review',
+    searchQuery: '',
+  },
+]
 
 interface Props {
   projectDir?: string
@@ -62,9 +107,29 @@ export default function KanbanBoard({ projectDir }: Props) {
   const [showCreate, setShowCreate] = useState(false)
   const [filterType, setFilterType] = useState<string>('')
   const [filterPriority, setFilterPriority] = useState<string>('')
+  const [filterStatus, setFilterStatus] = useState<string>('')
   const [searchQuery, setSearchQuery] = useState('')
+  const [savedViews, setSavedViews] = useState<SavedView[]>([])
+  const [selectedViewId, setSelectedViewId] = useState('all')
   const [draggedTaskId, setDraggedTaskId] = useState<string | null>(null)
   const searchInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_SAVED_VIEWS)
+      if (!raw) return
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) {
+        setSavedViews(parsed.filter((v) => v && typeof v.id === 'string'))
+      }
+    } catch {
+      // ignore invalid localStorage data
+    }
+  }, [])
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEY_SAVED_VIEWS, JSON.stringify(savedViews))
+  }, [savedViews])
 
   // ---- Keyboard shortcuts ----
   useEffect(() => {
@@ -154,6 +219,36 @@ export default function KanbanBoard({ projectDir }: Props) {
     fetchBoard()
   }
 
+  const allViews = useMemo(() => [...BUILTIN_VIEWS, ...savedViews], [savedViews])
+
+  const applyView = useCallback((view: SavedView) => {
+    setFilterType(view.filterType)
+    setFilterPriority(view.filterPriority)
+    setFilterStatus(view.filterStatus)
+    setSearchQuery(view.searchQuery)
+    setSelectedViewId(view.id)
+  }, [])
+
+  const saveCurrentView = () => {
+    const name = prompt('Saved view name')
+    if (!name?.trim()) return
+    const id = `custom-${Date.now()}`
+    const next: SavedView = {
+      id,
+      name: name.trim(),
+      filterType,
+      filterPriority,
+      filterStatus,
+      searchQuery,
+    }
+    setSavedViews((prev) => [next, ...prev.filter((v) => v.name !== next.name)].slice(0, 12))
+    setSelectedViewId(id)
+  }
+
+  const clearFilters = () => {
+    applyView(BUILTIN_VIEWS[0])
+  }
+
   // Filter logic
   const filteredBoard = useMemo(() => {
     if (!board?.columns) return null
@@ -162,6 +257,7 @@ export default function KanbanBoard({ projectDir }: Props) {
       filtered[col] = tasks.filter((t) => {
         if (filterType && t.task_type !== filterType) return false
         if (filterPriority && t.priority !== filterPriority) return false
+        if (filterStatus && t.status !== filterStatus) return false
         if (searchQuery) {
           const q = searchQuery.toLowerCase()
           if (!t.title.toLowerCase().includes(q) && !t.id.toLowerCase().includes(q)) return false
@@ -170,7 +266,7 @@ export default function KanbanBoard({ projectDir }: Props) {
       })
     }
     return { columns: filtered }
-  }, [board, filterType, filterPriority, searchQuery])
+  }, [board, filterType, filterPriority, filterStatus, searchQuery])
 
   const totalTasks = board?.columns
     ? Object.values(board.columns).reduce((sum, col) => sum + col.length, 0)
@@ -219,10 +315,42 @@ export default function KanbanBoard({ projectDir }: Props) {
             <option value="P0">P0 - Critical</option>
             <option value="P1">P1 - High</option>
             <option value="P2">P2 - Medium</option>
-            <option value="P3">P3 - Low</option>
+              <option value="P3">P3 - Low</option>
+            </select>
+          <select
+            className="kanban-filter"
+            value={filterStatus}
+            onChange={(e) => setFilterStatus(e.target.value)}
+          >
+            <option value="">All status</option>
+            <option value="backlog">Backlog</option>
+            <option value="ready">Ready</option>
+            <option value="in_progress">In Progress</option>
+            <option value="in_review">In Review</option>
+            <option value="blocked">Blocked</option>
+            <option value="done">Done</option>
+          </select>
+          <select
+            className="kanban-filter"
+            aria-label="Saved view"
+            value={selectedViewId}
+            onChange={(e) => {
+              const next = allViews.find((v) => v.id === e.target.value)
+              if (next) applyView(next)
+            }}
+          >
+            {allViews.map((view) => (
+              <option key={view.id} value={view.id}>{view.name}</option>
+            ))}
           </select>
         </div>
         <div className="kanban-toolbar-right">
+          <button className="kanban-btn-refresh" onClick={saveCurrentView} title="Save current filters">
+            Save View
+          </button>
+          <button className="kanban-btn-refresh" onClick={clearFilters} title="Clear filters">
+            Clear
+          </button>
           <button className="kanban-btn-refresh" onClick={fetchBoard} title="Refresh">
             &#x21bb;
           </button>
@@ -230,6 +358,12 @@ export default function KanbanBoard({ projectDir }: Props) {
             + New Task
           </button>
         </div>
+      </div>
+
+      <div className="kanban-quick-actions">
+        <button className="kanban-quick-btn" onClick={() => applyView(BUILTIN_VIEWS[1])}>Blocked Only</button>
+        <button className="kanban-quick-btn" onClick={() => applyView(BUILTIN_VIEWS[2])}>Critical</button>
+        <button className="kanban-quick-btn" onClick={() => applyView(BUILTIN_VIEWS[3])}>Needs Review</button>
       </div>
 
       {/* Board */}

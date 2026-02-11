@@ -1,5 +1,16 @@
 import { useState, useEffect, useCallback } from 'react'
-import './ApprovalGate.css'
+import {
+  Alert,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Chip,
+  Collapse,
+  Stack,
+  TextField,
+  Typography,
+} from '@mui/material'
 import { buildApiUrl, buildAuthHeaders } from '../api'
 import { useChannel } from '../contexts/WebSocketContext'
 import { useToast } from '../contexts/ToastContext'
@@ -31,6 +42,7 @@ const ApprovalGate = ({ projectDir }: ApprovalGateProps) => {
   const [error, setError] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<Record<string, string>>({})
   const [submitting, setSubmitting] = useState<string | null>(null)
+  const [expandedId, setExpandedId] = useState<string | null>(null)
   const toast = useToast()
 
   useEffect(() => {
@@ -80,14 +92,12 @@ const ApprovalGate = ({ projectDir }: ApprovalGateProps) => {
       await response.json()
       toast.success(approved ? 'Approved successfully' : 'Rejected successfully')
 
-      // Clear feedback for this request
       setFeedback((prev) => {
         const updated = { ...prev }
         delete updated[requestId]
         return updated
       })
 
-      // Refresh approvals
       await fetchApprovals()
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to respond')
@@ -96,180 +106,188 @@ const ApprovalGate = ({ projectDir }: ApprovalGateProps) => {
     }
   }
 
-  const handleFeedbackChange = (requestId: string, value: string) => {
-    setFeedback((prev) => ({ ...prev, [requestId]: value }))
-  }
-
   const formatTimestamp = (timestamp: string): string => {
     try {
-      const date = new Date(timestamp)
-      return date.toLocaleString()
+      return new Date(timestamp).toLocaleString()
     } catch {
       return timestamp
     }
   }
 
   const renderContext = (approval: ApprovalGateInfo) => {
-    const contextSections: JSX.Element[] = []
+    const sections: Array<{ title: string; content: string }> = []
 
     if (approval.show_diff && approval.context.diff) {
-      contextSections.push(
-        <div key="diff" className="context-section">
-          <h4>Diff:</h4>
-          <pre className="context-content">{approval.context.diff}</pre>
-        </div>
-      )
+      sections.push({ title: 'Diff', content: String(approval.context.diff) })
     }
-
     if (approval.show_plan && approval.context.plan) {
-      contextSections.push(
-        <div key="plan" className="context-section">
-          <h4>Plan:</h4>
-          <pre className="context-content">{approval.context.plan}</pre>
-        </div>
-      )
+      sections.push({ title: 'Plan', content: String(approval.context.plan) })
     }
-
     if (approval.show_tests && approval.context.tests) {
-      contextSections.push(
-        <div key="tests" className="context-section">
-          <h4>Tests:</h4>
-          <pre className="context-content">{approval.context.tests}</pre>
-        </div>
-      )
+      sections.push({ title: 'Tests', content: String(approval.context.tests) })
     }
-
     if (approval.show_review && approval.context.review) {
-      contextSections.push(
-        <div key="review" className="context-section">
-          <h4>Review:</h4>
-          <pre className="context-content">{approval.context.review}</pre>
-        </div>
-      )
+      sections.push({ title: 'Review', content: String(approval.context.review) })
     }
 
-    // Show any other context data
     const otherContext = Object.entries(approval.context).filter(
       ([key]) => !['diff', 'plan', 'tests', 'review'].includes(key)
     )
     if (otherContext.length > 0) {
-      contextSections.push(
-        <div key="other" className="context-section">
-          <h4>Additional Context:</h4>
-          <pre className="context-content">
-            {JSON.stringify(Object.fromEntries(otherContext), null, 2)}
-          </pre>
-        </div>
-      )
+      sections.push({
+        title: 'Additional Context',
+        content: JSON.stringify(Object.fromEntries(otherContext), null, 2),
+      })
     }
 
-    return contextSections.length > 0 ? contextSections : null
+    if (sections.length === 0) return null
+
+    return (
+      <Stack spacing={1.5} sx={{ mt: 1.5 }}>
+        {sections.map((section) => (
+          <Box key={section.title}>
+            <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', fontWeight: 600 }}>
+              {section.title}
+            </Typography>
+            <Box
+              component="pre"
+              sx={{
+                fontSize: 12,
+                p: 1,
+                mt: 0.5,
+                borderRadius: 1,
+                bgcolor: 'background.default',
+                border: 1,
+                borderColor: 'divider',
+                overflowX: 'auto',
+                whiteSpace: 'pre-wrap',
+              }}
+            >
+              {section.content}
+            </Box>
+          </Box>
+        ))}
+      </Stack>
+    )
   }
 
   if (loading) {
     return (
-      <div className="approval-gate">
-        <h2>Pending Approvals</h2>
+      <Box className="approval-gate">
+        <Typography variant="h2" sx={{ fontSize: '1.125rem', mb: 1 }}>Pending Approvals</Typography>
         <LoadingSpinner label="Loading approvals..." />
-      </div>
+      </Box>
     )
   }
 
   if (error) {
     return (
-      <div className="approval-gate">
-        <h2>Pending Approvals</h2>
+      <Box className="approval-gate">
+        <Typography variant="h2" sx={{ fontSize: '1.125rem', mb: 1 }}>Pending Approvals</Typography>
         <EmptyState
           icon={<span>⚠️</span>}
           title="Error loading approvals"
           description={error}
           size="sm"
         />
-      </div>
+      </Box>
     )
   }
 
   if (approvals.length === 0) {
     return (
-      <div className="approval-gate">
-        <h2>Pending Approvals</h2>
+      <Box className="approval-gate">
+        <Typography variant="h2" sx={{ fontSize: '1.125rem', mb: 1 }}>Pending Approvals</Typography>
         <EmptyState
           icon={<span>✓</span>}
           title="No pending approvals"
           description="All approval gates have been resolved."
           size="sm"
         />
-      </div>
+      </Box>
     )
   }
 
   return (
-    <div className="approval-gate">
-      <h2>
-        Pending Approvals
-        <span className="approval-count">{approvals.length}</span>
-      </h2>
+    <Box className="approval-gate">
+      <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5 }}>
+        <Typography variant="h2" sx={{ fontSize: '1.125rem' }}>Pending Approvals</Typography>
+        <Chip size="small" label={approvals.length} className="approval-count" />
+      </Stack>
 
-      <div className="approvals-list">
-        {approvals.map((approval) => (
-          <div key={approval.request_id} className="approval-card">
-            <div className="approval-header">
-              <div className="approval-meta">
-                <span className="gate-type">{approval.gate_type}</span>
-                {approval.task_id && (
-                  <span className="task-id">Task: {approval.task_id}</span>
+      <Stack spacing={1.25} className="approvals-list">
+        {approvals.map((approval) => {
+          const isOpen = expandedId === approval.request_id
+          const busy = submitting === approval.request_id
+
+          return (
+            <Card key={approval.request_id} className="approval-card" variant="outlined">
+              <CardContent sx={{ pb: '16px !important' }}>
+                <Stack direction="row" justifyContent="space-between" spacing={1} sx={{ mb: 1 }}>
+                  <Stack direction="row" spacing={0.75} alignItems="center" flexWrap="wrap" useFlexGap>
+                    <Chip size="small" label={approval.gate_type} className="gate-type" />
+                    {approval.task_id && <Chip size="small" label={`Task: ${approval.task_id}`} className="task-id" />}
+                    {approval.phase_id && <Chip size="small" label={`Phase: ${approval.phase_id}`} className="phase-id" />}
+                  </Stack>
+                  <Typography variant="caption" color="text.secondary" className="approval-timestamp">
+                    {formatTimestamp(approval.created_at)}
+                  </Typography>
+                </Stack>
+
+                <Typography className="approval-message" sx={{ mb: 1 }}>{approval.message}</Typography>
+
+                {approval.timeout && (
+                  <Alert severity="warning" sx={{ py: 0.25, mb: 1 }} className="approval-timeout">
+                    Timeout: {approval.timeout} seconds
+                  </Alert>
                 )}
-                {approval.phase_id && (
-                  <span className="phase-id">Phase: {approval.phase_id}</span>
-                )}
-              </div>
-              <div className="approval-timestamp">
-                {formatTimestamp(approval.created_at)}
-              </div>
-            </div>
 
-            <div className="approval-message">{approval.message}</div>
+                <Button size="small" variant="text" onClick={() => setExpandedId(isOpen ? null : approval.request_id)}>
+                  {isOpen ? 'Hide Context' : 'Show Context'}
+                </Button>
 
-            {approval.timeout && (
-              <div className="approval-timeout">
-                Timeout: {approval.timeout} seconds
-              </div>
-            )}
+                <Collapse in={isOpen}>
+                  {renderContext(approval)}
+                </Collapse>
 
-            {renderContext(approval)}
-
-            <div className="approval-actions">
-              <textarea
-                className="feedback-input"
-                placeholder="Optional feedback..."
-                value={feedback[approval.request_id] || ''}
-                onChange={(e) =>
-                  handleFeedbackChange(approval.request_id, e.target.value)
-                }
-                disabled={submitting === approval.request_id}
-                rows={2}
-              />
-              <div className="action-buttons">
-                <button
-                  className="approve-btn"
-                  onClick={() => handleRespond(approval.request_id, true)}
-                  disabled={submitting === approval.request_id}
-                >
-                  {submitting === approval.request_id ? 'Processing...' : 'Approve'}
-                </button>
-                <button
-                  className="reject-btn"
-                  onClick={() => handleRespond(approval.request_id, false)}
-                  disabled={submitting === approval.request_id}
-                >
-                  {submitting === approval.request_id ? 'Processing...' : 'Reject'}
-                </button>
-              </div>
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
+                <Stack spacing={1} sx={{ mt: 1.5 }} className="approval-actions">
+                  <TextField
+                    className="feedback-input"
+                    placeholder="Optional feedback..."
+                    value={feedback[approval.request_id] || ''}
+                    onChange={(e) => setFeedback((prev) => ({ ...prev, [approval.request_id]: e.target.value }))}
+                    disabled={busy}
+                    multiline
+                    minRows={2}
+                    fullWidth
+                  />
+                  <Stack direction="row" spacing={1} className="action-buttons">
+                    <Button
+                      className="approve-btn"
+                      variant="contained"
+                      color="success"
+                      onClick={() => handleRespond(approval.request_id, true)}
+                      disabled={busy}
+                    >
+                      {busy ? 'Processing...' : 'Approve'}
+                    </Button>
+                    <Button
+                      className="reject-btn"
+                      variant="outlined"
+                      color="error"
+                      onClick={() => handleRespond(approval.request_id, false)}
+                      disabled={busy}
+                    >
+                      {busy ? 'Processing...' : 'Reject'}
+                    </Button>
+                  </Stack>
+                </Stack>
+              </CardContent>
+            </Card>
+          )
+        })}
+      </Stack>
+    </Box>
   )
 }
 

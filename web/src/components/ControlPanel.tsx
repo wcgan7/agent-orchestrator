@@ -1,7 +1,18 @@
 import { useState } from 'react'
+import {
+  Alert,
+  Box,
+  Button,
+  Chip,
+  FormControl,
+  InputLabel,
+  MenuItem,
+  Select,
+  Stack,
+  Typography,
+} from '@mui/material'
 import { buildApiUrl, buildAuthHeaders } from '../api'
 import { useToast } from '../contexts/ToastContext'
-import './ControlPanel.css'
 
 interface Props {
   currentTaskId?: string
@@ -42,14 +53,11 @@ export default function ControlPanel({ currentTaskId, currentPhaseId, status, pr
 
       const response = await fetch(buildApiUrl('/api/control', projectDir), {
         method: 'POST',
-        headers: buildAuthHeaders({
-          'Content-Type': 'application/json',
-        }),
+        headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(body),
       })
 
       const data = await response.json()
-
       if (data.success) {
         toast.success(data.message || `${action} completed successfully`)
       } else {
@@ -63,89 +71,81 @@ export default function ControlPanel({ currentTaskId, currentPhaseId, status, pr
   }
 
   return (
-    <div className="card">
-      <h2>Run Control</h2>
+    <Box>
+      <Typography variant="h2" sx={{ fontSize: '1.125rem', mb: 1.5 }}>Run Control</Typography>
 
-      {/* Status Display */}
-      {currentTaskId && (
-        <div className="control-panel-status">
-          <div className="control-panel-status-item">
-            <strong>Current Task:</strong> {currentTaskId}
-          </div>
-          {currentPhaseId && (
-            <div className="control-panel-status-item">
-              <strong>Phase:</strong> {currentPhaseId}
-            </div>
-          )}
-          {status && (
-            <div className="control-panel-status-item">
-              <strong>Status:</strong> {status}
-            </div>
-          )}
-        </div>
+      {currentTaskId ? (
+        <Stack direction={{ xs: 'column', md: 'row' }} spacing={1} sx={{ mb: 2 }}>
+          <Chip size="small" variant="outlined" label={`Task: ${currentTaskId}`} />
+          {currentPhaseId && <Chip size="small" variant="outlined" label={`Phase: ${currentPhaseId}`} />}
+          {status && <Chip size="small" color="info" variant="outlined" label={`Status: ${status}`} />}
+        </Stack>
+      ) : (
+        <Alert severity="info" sx={{ mb: 2 }}>No active task found. You can still stop the run.</Alert>
       )}
 
-      {/* Step Selector for Retry */}
-      <div className="control-panel-step-selector">
-        <label className="control-panel-label">Retry from step:</label>
-        <select
+      <FormControl size="small" fullWidth sx={{ mb: 2 }}>
+        <InputLabel id="control-panel-step-label">Retry from step</InputLabel>
+        <Select
+          labelId="control-panel-step-label"
           value={selectedStep}
+          label="Retry from step"
           onChange={(e) => setSelectedStep(e.target.value)}
           className="control-panel-select"
         >
           {steps.map((step) => (
-            <option key={step.value} value={step.value}>
+            <MenuItem key={step.value} value={step.value}>
               {step.label}
-            </option>
+            </MenuItem>
           ))}
-        </select>
-      </div>
+        </Select>
+      </FormControl>
 
-      {/* Control Buttons */}
-      <div className="control-panel-buttons">
-        <button
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={1} useFlexGap flexWrap="wrap" sx={{ mb: 2 }}>
+        <Button
+          variant="contained"
+          color="primary"
           onClick={() => executeAction('retry')}
           disabled={loading !== null || !currentTaskId}
           className={`control-btn control-btn-retry ${loading === 'retry' ? 'loading' : ''}`}
         >
           {loading === 'retry' ? 'Retrying...' : 'Retry Task'}
-        </button>
+        </Button>
 
-        <button
+        <Button
+          variant="outlined"
+          color="warning"
           onClick={() => executeAction('skip')}
           disabled={loading !== null || !currentTaskId}
           className={`control-btn control-btn-skip ${loading === 'skip' ? 'loading' : ''}`}
         >
           {loading === 'skip' ? 'Skipping...' : 'Skip Step'}
-        </button>
+        </Button>
 
-        <button
+        <Button
+          variant="outlined"
+          color="success"
           onClick={() => executeAction('resume')}
           disabled={loading !== null || !currentTaskId}
           className={`control-btn control-btn-resume ${loading === 'resume' ? 'loading' : ''}`}
         >
           {loading === 'resume' ? 'Resuming...' : 'Resume Task'}
-        </button>
+        </Button>
 
-        <button
+        <Button
+          variant="outlined"
+          color="error"
           onClick={() => executeAction('stop')}
           disabled={loading !== null}
           className={`control-btn control-btn-stop ${loading === 'stop' ? 'loading' : ''}`}
         >
           {loading === 'stop' ? 'Stopping...' : 'Stop Run'}
-        </button>
-      </div>
+        </Button>
+      </Stack>
 
-      {/* Help Text */}
-      <div className="control-panel-help">
-        <strong>Controls:</strong>
-        <ul>
-          <li><strong>Retry:</strong> Restart task from selected step</li>
-          <li><strong>Skip:</strong> Skip current step and move to next</li>
-          <li><strong>Resume:</strong> Resume a blocked task</li>
-          <li><strong>Stop:</strong> Send stop signal to running process</li>
-        </ul>
-      </div>
-    </div>
+      <Typography variant="body2" color="text.secondary">
+        Retry restarts at a selected step, Skip advances the task, Resume unblocks stalled tasks, and Stop sends a stop signal.
+      </Typography>
+    </Box>
   )
 }

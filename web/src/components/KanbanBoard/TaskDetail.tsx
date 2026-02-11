@@ -10,7 +10,15 @@ import ReasoningViewer from '../ReasoningViewer/ReasoningViewer'
 import CorrectionForm from '../CorrectionForm'
 import './KanbanBoard.css'
 
-type DetailTab = 'details' | 'feedback' | 'activity' | 'reasoning' | 'inspect' | 'logs' | 'trace'
+type DetailTab =
+  | 'summary'
+  | 'dependencies'
+  | 'logs'
+  | 'interventions'
+  | 'activity'
+  | 'reasoning'
+  | 'inspect'
+  | 'trace'
 
 interface TaskData {
   id: string
@@ -52,7 +60,7 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
   const [priority, setPriority] = useState(task.priority)
   const [taskType, setTaskType] = useState(task.task_type)
   const [saving, setSaving] = useState(false)
-  const [activeTab, setActiveTab] = useState<DetailTab>('details')
+  const [activeTab, setActiveTab] = useState<DetailTab>('summary')
 
   const handleSave = async () => {
     setSaving(true)
@@ -109,19 +117,31 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
           <button className="task-detail-close" onClick={onClose}>&times;</button>
         </div>
 
-        {/* Collaboration tabs */}
+        {/* Task detail tabs */}
         <div className="task-detail-tabs">
           <button
-            className={`detail-tab ${activeTab === 'details' ? 'active' : ''}`}
-            onClick={() => setActiveTab('details')}
+            className={`detail-tab ${activeTab === 'summary' ? 'active' : ''}`}
+            onClick={() => setActiveTab('summary')}
           >
-            Details
+            Summary
           </button>
           <button
-            className={`detail-tab ${activeTab === 'feedback' ? 'active' : ''}`}
-            onClick={() => setActiveTab('feedback')}
+            className={`detail-tab ${activeTab === 'dependencies' ? 'active' : ''}`}
+            onClick={() => setActiveTab('dependencies')}
           >
-            Feedback
+            Dependencies
+          </button>
+          <button
+            className={`detail-tab ${activeTab === 'logs' ? 'active' : ''}`}
+            onClick={() => setActiveTab('logs')}
+          >
+            Logs
+          </button>
+          <button
+            className={`detail-tab ${activeTab === 'interventions' ? 'active' : ''}`}
+            onClick={() => setActiveTab('interventions')}
+          >
+            Interventions
           </button>
           <button
             className={`detail-tab ${activeTab === 'activity' ? 'active' : ''}`}
@@ -142,12 +162,6 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
             Inspect
           </button>
           <button
-            className={`detail-tab ${activeTab === 'logs' ? 'active' : ''}`}
-            onClick={() => setActiveTab('logs')}
-          >
-            Logs
-          </button>
-          <button
             className={`detail-tab ${activeTab === 'trace' ? 'active' : ''}`}
             onClick={() => setActiveTab('trace')}
           >
@@ -156,8 +170,15 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
         </div>
 
         <div className="task-detail-body">
-          {activeTab === 'feedback' ? (
-            <FeedbackPanel taskId={task.id} projectDir={projectDir} />
+          {activeTab === 'interventions' ? (
+            <div className="task-detail-section">
+              <FeedbackPanel taskId={task.id} projectDir={projectDir} />
+              {(task.error || task.status === 'blocked' || task.blocked_by.length > 0) && (
+                <div style={{ marginTop: '1rem' }}>
+                  <CorrectionForm taskId={task.id} projectDir={projectDir} />
+                </div>
+              )}
+            </div>
           ) : activeTab === 'activity' ? (
             <ActivityTimeline taskId={task.id} projectDir={projectDir} />
           ) : activeTab === 'reasoning' ? (
@@ -216,7 +237,7 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
             </>
           )}
 
-          {activeTab === 'details' && (
+          {activeTab === 'summary' && (
             <>
               {/* Status & Actions */}
               <div className="task-detail-section">
@@ -273,8 +294,25 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
                 </div>
               )}
 
-              {/* Dependencies */}
-              {(task.blocked_by.length > 0 || task.blocks.length > 0) && (
+              {/* Metadata */}
+              <div className="task-detail-section task-detail-meta">
+                <div>Created: {new Date(task.created_at).toLocaleString()}</div>
+                <div>Updated: {new Date(task.updated_at).toLocaleString()}</div>
+                {task.completed_at && <div>Completed: {new Date(task.completed_at).toLocaleString()}</div>}
+                {task.assignee && <div>Assignee: {task.assignee} ({task.assignee_type})</div>}
+                <div>Source: {task.source}</div>
+              </div>
+
+              {/* Danger zone */}
+              <div className="task-detail-section task-detail-danger">
+                <button className="btn-delete" onClick={handleDelete}>Delete Task</button>
+              </div>
+            </>
+          )}
+
+          {activeTab === 'dependencies' && (
+            <>
+              {(task.blocked_by.length > 0 || task.blocks.length > 0) ? (
                 <div className="task-detail-section">
                   <h3>Dependencies</h3>
                   {task.blocked_by.length > 0 && (
@@ -294,9 +332,12 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
                     </div>
                   )}
                 </div>
+              ) : (
+                <div className="task-detail-section">
+                  <p>No dependencies found for this task.</p>
+                </div>
               )}
 
-              {/* Context Files */}
               {task.context_files.length > 0 && (
                 <div className="task-detail-section">
                   <h3>Context Files</h3>
@@ -308,7 +349,6 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
                 </div>
               )}
 
-              {/* Error */}
               {task.error && (
                 <div className="task-detail-section task-detail-error">
                   <h3>Error</h3>
@@ -316,27 +356,6 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated }: Props) {
                   <ExplainButton taskId={task.id} projectDir={projectDir} />
                 </div>
               )}
-
-              {/* Correction form for blocked/errored tasks */}
-              {(task.error || task.status === 'blocked' || task.blocked_by.length > 0) && (
-                <div className="task-detail-section">
-                  <CorrectionForm taskId={task.id} projectDir={projectDir} />
-                </div>
-              )}
-
-              {/* Metadata */}
-              <div className="task-detail-section task-detail-meta">
-                <div>Created: {new Date(task.created_at).toLocaleString()}</div>
-                <div>Updated: {new Date(task.updated_at).toLocaleString()}</div>
-                {task.completed_at && <div>Completed: {new Date(task.completed_at).toLocaleString()}</div>}
-                {task.assignee && <div>Assignee: {task.assignee} ({task.assignee_type})</div>}
-                <div>Source: {task.source}</div>
-              </div>
-
-              {/* Danger zone */}
-              <div className="task-detail-section task-detail-danger">
-                <button className="btn-delete" onClick={handleDelete}>Delete Task</button>
-              </div>
             </>
           )}
         </div>
