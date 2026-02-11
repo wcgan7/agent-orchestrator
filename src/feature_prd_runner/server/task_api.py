@@ -240,6 +240,8 @@ def create_task_router(get_engine: Any) -> APIRouter:
             "human_review_required_default": not engine.allow_auto_approve_review,
             "allow_auto_approve_review": engine.allow_auto_approve_review,
             "auto_approve_env_var": "FEATURE_PRD_AUTO_APPROVE_REVIEW",
+            "v2_tasks_default_enabled": True,
+            "legacy_scheduler_opt_out_env_var": "FEATURE_PRD_DISABLE_V2_TASKS",
         }
         return StateMachineResponse(
             states=list(transitions.keys()),

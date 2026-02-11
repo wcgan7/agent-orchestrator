@@ -147,11 +147,13 @@ Quick Action:
 
 Events:
 - `task.created`, `task.updated`, `task.claimed`, `task.step_started`, `task.step_completed`, `task.blocked`, `task.completed`
-- `quick_run.started`, `quick_run.completed`, `quick_run.failed`
+- `quick_run.started`, `quick_run.completed`, `quick_run.failed`, `quick_run.promoted`
 
 Implemented event APIs:
 - `GET /api/v2/tasks/events/recent`
 - `GET /api/v2/tasks/{id}/events`
+- `GET /api/v2/quick-runs/events/recent`
+- `GET /api/v2/quick-runs/{id}/events`
 
 ## 7) UX Rules
 
@@ -182,13 +184,15 @@ Implemented event APIs:
 - [x] Enforce dependency guard for `ready` and `in_progress` transitions.
 - [x] Expose state-machine metadata endpoint for UI/test contract checks.
 - [x] Add orchestrator adapter to consume `TaskEngine.get_ready_tasks()`.
-  - Current rollout is flag-gated via `FEATURE_PRD_USE_V2_TASKS=true`.
+  - M4 update: v2 adapter is now default-on. Legacy scheduler fallback is temporary via `FEATURE_PRD_DISABLE_V2_TASKS=true`.
 - [x] Add atomic claim API/path for `ready -> in_progress`.
 - [x] Add `POST /api/v2/tasks/{id}/run`.
 - [x] Add retry/cancel endpoints and policies.
 - [x] Persist runtime step/task events from pipeline execution.
 - [x] Add PRD import preview/commit endpoints.
 - [x] Add quick-run promote endpoint.
+- [x] Add quick-run telemetry events + query endpoints.
+- [x] Deprecate legacy scheduler path (v2 default-on with opt-out flag).
 
 ### Frontend
 - [x] Rename `Quick Task` to `Quick Action`.

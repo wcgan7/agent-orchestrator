@@ -11,6 +11,17 @@ from feature_prd_runner.task_engine.engine import TaskEngine
 from feature_prd_runner.task_engine.model import TaskStatus
 
 
+def test_v2_tasks_enabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("FEATURE_PRD_USE_V2_TASKS", raising=False)
+    monkeypatch.delenv("FEATURE_PRD_DISABLE_V2_TASKS", raising=False)
+    assert orchestrator._v2_tasks_enabled() is True
+
+
+def test_v2_tasks_can_be_temporarily_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FEATURE_PRD_DISABLE_V2_TASKS", "true")
+    assert orchestrator._v2_tasks_enabled() is False
+
+
 @pytest.mark.anyio
 async def test_v2_adapter_success_moves_to_in_review_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project_dir = tmp_path / "project"
@@ -94,4 +105,3 @@ async def test_v2_adapter_success_auto_approve_moves_to_done(tmp_path: Path, mon
     assert run_state["status"] == "idle"
     assert run_state["current_task_id"] is None
     assert run_state["run_id"] is None
-

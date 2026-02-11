@@ -361,6 +361,23 @@ class PromoteQuickRunResponse(BaseModel):
     quick_run: Optional[QuickRunRecord] = None
 
 
+class QuickRunEventRecord(BaseModel):
+    """Runtime telemetry event for quick runs."""
+
+    ts: str
+    type: str
+    quick_run_id: str
+    status: str
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class QuickRunEventsResponse(BaseModel):
+    """List wrapper for quick-run telemetry events."""
+
+    events: list[QuickRunEventRecord]
+    total: int
+
+
 # --- Batch 1: Explain + Inspect ---
 
 

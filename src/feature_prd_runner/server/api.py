@@ -44,7 +44,9 @@ from .models import (
     PromoteQuickRunRequest,
     PromoteQuickRunResponse,
     QuickRunCreateRequest,
+    QuickRunEventRecord,
     QuickRunExecuteResponse,
+    QuickRunEventsResponse,
     QuickRunRecord,
     RequirementRequest,
     RunDetail,
@@ -157,6 +159,49 @@ def create_app(
 
     def _quick_runs_path(project_dir: Path) -> Path:
         return _get_paths(project_dir)["state_dir"] / "quick_runs.json"
+
+    def _quick_run_events_path(project_dir: Path) -> Path:
+        return _get_paths(project_dir)["state_dir"] / "artifacts" / "quick_run_events.jsonl"
+
+    def _append_quick_run_event(
+        project_dir: Path,
+        *,
+        event_type: str,
+        quick_run_id: str,
+        status: str,
+        details: Optional[dict[str, Any]] = None,
+    ) -> None:
+        path = _quick_run_events_path(project_dir)
+        payload: dict[str, Any] = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": event_type,
+            "quick_run_id": quick_run_id,
+            "status": status,
+            "details": details or {},
+        }
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload) + "\n")
+        except Exception:
+            logger.exception("Failed to append quick-run event {} for {}", event_type, quick_run_id)
+
+    def _load_quick_run_events(project_dir: Path, limit: int = 100) -> list[dict[str, Any]]:
+        path = _quick_run_events_path(project_dir)
+        if limit < 1 or not path.exists():
+            return []
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+            selected = lines[-limit:]
+            events: list[dict[str, Any]] = []
+            for line in selected:
+                payload = json.loads(line)
+                if isinstance(payload, dict):
+                    events.append(payload)
+            return events
+        except Exception:
+            logger.warning("Failed to read quick-run events from {}", path)
+            return []
 
     def _load_quick_runs(project_dir: Path) -> list[dict[str, Any]]:
         path = _quick_runs_path(project_dir)
@@ -1758,6 +1803,12 @@ Write the generated PRD to the file: {generated_prd_path}"""
         records = _load_quick_runs(proj_dir)
         records.append(record)
         _save_quick_runs(proj_dir, records)
+        _append_quick_run_event(
+            proj_dir,
+            event_type="quick_run.started",
+            quick_run_id=run_id,
+            status=record["status"],
+        )
 
         try:
             context = None
@@ -1784,6 +1835,13 @@ Write the generated PRD to the file: {generated_prd_path}"""
             )
             record["error"] = None if success else error_message
             _save_quick_runs(proj_dir, records)
+            _append_quick_run_event(
+                proj_dir,
+                event_type="quick_run.completed" if success else "quick_run.failed",
+                quick_run_id=run_id,
+                status=record["status"],
+                details={"error": error_message} if not success and error_message else {},
+            )
 
             return QuickRunExecuteResponse(
                 success=success,
@@ -1797,6 +1855,13 @@ Write the generated PRD to the file: {generated_prd_path}"""
             record["result_summary"] = "Quick action execution failed"
             record["error"] = str(e)
             _save_quick_runs(proj_dir, records)
+            _append_quick_run_event(
+                proj_dir,
+                event_type="quick_run.failed",
+                quick_run_id=run_id,
+                status=record["status"],
+                details={"error": str(e)},
+            )
             logger.error("Failed to execute quick run {}: {}", run_id, e)
             return QuickRunExecuteResponse(
                 success=False,
@@ -1829,6 +1894,31 @@ Write the generated PRD to the file: {generated_prd_path}"""
         if target is None:
             raise HTTPException(status_code=404, detail=f"Quick run {quick_run_id} not found")
         return QuickRunRecord(**target)
+
+    @app.get("/api/v2/quick-runs/events/recent", response_model=QuickRunEventsResponse)
+    async def get_recent_quick_run_events(
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+        limit: int = Query(100, ge=1, le=1000),
+    ) -> QuickRunEventsResponse:
+        proj_dir = _get_project_dir(project_dir)
+        events = _load_quick_run_events(proj_dir, limit=limit)
+        parsed = [QuickRunEventRecord(**item) for item in events]
+        return QuickRunEventsResponse(events=parsed, total=len(parsed))
+
+    @app.get("/api/v2/quick-runs/{quick_run_id}/events", response_model=QuickRunEventsResponse)
+    async def get_quick_run_events(
+        quick_run_id: str,
+        project_dir: Optional[str] = Query(None, description="Project directory path"),
+        limit: int = Query(100, ge=1, le=1000),
+    ) -> QuickRunEventsResponse:
+        proj_dir = _get_project_dir(project_dir)
+        _records, target = _find_quick_run(proj_dir, quick_run_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"Quick run {quick_run_id} not found")
+        events = _load_quick_run_events(proj_dir, limit=max(limit * 5, limit))
+        filtered = [item for item in events if str(item.get("quick_run_id")) == quick_run_id]
+        parsed = [QuickRunEventRecord(**item) for item in filtered[-limit:]]
+        return QuickRunEventsResponse(events=parsed, total=len(parsed))
 
     @app.post("/api/v2/quick-runs/{quick_run_id}/promote", response_model=PromoteQuickRunResponse)
     async def promote_quick_run(
@@ -1885,6 +1975,13 @@ Write the generated PRD to the file: {generated_prd_path}"""
 
         target["promoted_task_id"] = task.id
         _save_quick_runs(proj_dir, records)
+        _append_quick_run_event(
+            proj_dir,
+            event_type="quick_run.promoted",
+            quick_run_id=quick_run_id,
+            status=str(target.get("status") or "completed"),
+            details={"task_id": task.id},
+        )
 
         return PromoteQuickRunResponse(
             success=True,

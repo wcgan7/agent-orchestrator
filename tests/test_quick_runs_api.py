@@ -52,6 +52,12 @@ class TestQuickRunPromotionFlow:
         assert quick_get_resp.status_code == 200
         assert quick_get_resp.json()["promoted_task_id"] is None
 
+        events_resp = await client.get(f"/api/v2/quick-runs/{quick_run_id}/events")
+        assert events_resp.status_code == 200
+        event_types = [evt["type"] for evt in events_resp.json()["events"]]
+        assert "quick_run.started" in event_types
+        assert "quick_run.completed" in event_types
+
     async def test_promote_quick_run_creates_task(self, client: AsyncClient) -> None:
         with patch("feature_prd_runner.custom_execution.execute_custom_prompt", return_value=(True, None)):
             quick_resp = await client.post(
@@ -82,3 +88,7 @@ class TestQuickRunPromotionFlow:
         assert task["id"] == promoted_task_id
         assert task["source"] == "promoted_quick_action"
 
+        recent_events_resp = await client.get("/api/v2/quick-runs/events/recent")
+        assert recent_events_resp.status_code == 200
+        recent_event_types = [evt["type"] for evt in recent_events_resp.json()["events"]]
+        assert "quick_run.promoted" in recent_event_types

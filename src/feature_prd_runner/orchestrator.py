@@ -176,9 +176,27 @@ def _step_suffix(task_type: str, task_step: str) -> str:
 
 
 def _v2_tasks_enabled() -> bool:
-    return os.getenv("FEATURE_PRD_USE_V2_TASKS", "").strip().lower() in {
+    """Return whether the v2 task adapter path is enabled.
+
+    M4 deprecates the legacy-only scheduler path; v2 is now enabled by default.
+    Operators can temporarily opt out with FEATURE_PRD_DISABLE_V2_TASKS=true.
+    """
+    disable_v2 = os.getenv("FEATURE_PRD_DISABLE_V2_TASKS", "").strip().lower() in {
         "1", "true", "yes", "on",
     }
+    legacy_flag = os.getenv("FEATURE_PRD_USE_V2_TASKS", "")
+    if legacy_flag:
+        logger.warning(
+            "FEATURE_PRD_USE_V2_TASKS is deprecated; v2 tasks are default-on. "
+            "Use FEATURE_PRD_DISABLE_V2_TASKS=true only as a temporary rollback."
+        )
+    if disable_v2:
+        logger.warning(
+            "Legacy scheduler path enabled via FEATURE_PRD_DISABLE_V2_TASKS=true. "
+            "This compatibility path is deprecated and will be removed."
+        )
+        return False
+    return True
 
 
 def _build_v2_task_prompt(task: Any) -> str:
