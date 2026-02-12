@@ -143,7 +143,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     server = subparsers.add_parser('server', help='Start the v3 web server')
     server.add_argument('--host', default='127.0.0.1')
-    server.add_argument('--port', default=8000, type=int)
+    server.add_argument('--port', default=8080, type=int)
     server.add_argument('--reload', action='store_true')
     server.set_defaults(func=_server)
 

@@ -98,7 +98,7 @@ describe('App navigation and settings flows', () => {
     })
 
     await waitFor(() => {
-      expect(screen.getByRole('option', { name: /abs\/path/i })).toBeInTheDocument()
+      expect(screen.getAllByRole('option', { name: /abs\/path/i }).length).toBeGreaterThan(0)
     })
   })
 })

@@ -207,6 +207,50 @@ def create_v3_router(
         container.config.save(cfg)
         return {"removed": len(remaining) != len(pinned)}
 
+    @router.get("/projects/browse")
+    async def browse_projects(
+        project_dir: Optional[str] = Query(None),
+        path: Optional[str] = Query(None),
+        include_hidden: bool = Query(False),
+        limit: int = Query(200, ge=1, le=1000),
+    ) -> dict[str, Any]:
+        _ctx(project_dir)
+        target = Path(path).expanduser().resolve() if path else Path.home().resolve()
+        if not target.exists() or not target.is_dir() or not os_access(target):
+            raise HTTPException(status_code=400, detail="Invalid browse path")
+
+        try:
+            children = list(target.iterdir())
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Cannot read browse path: {exc}") from exc
+
+        directories: list[dict[str, Any]] = []
+        for child in sorted(children, key=lambda item: item.name.lower()):
+            if not child.is_dir():
+                continue
+            if not include_hidden and child.name.startswith("."):
+                continue
+            if not os_access(child):
+                continue
+            directories.append(
+                {
+                    "name": child.name,
+                    "path": str(child),
+                    "is_git": (child / ".git").exists(),
+                }
+            )
+            if len(directories) >= limit:
+                break
+
+        parent = target.parent if target.parent != target else None
+        return {
+            "path": str(target),
+            "parent": str(parent) if parent else None,
+            "current_is_git": (target / ".git").exists(),
+            "directories": directories,
+            "truncated": len(directories) >= limit,
+        }
+
     @router.post("/tasks")
     async def create_task(body: CreateTaskRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         container, bus, _ = _ctx(project_dir)

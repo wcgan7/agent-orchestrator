@@ -58,8 +58,23 @@ type ProjectRef = {
   is_git: boolean
 }
 
+type BrowseDirectoryEntry = {
+  name: string
+  path: string
+  is_git: boolean
+}
+
+type BrowseProjectsResponse = {
+  path: string
+  parent: string | null
+  current_is_git: boolean
+  directories: BrowseDirectoryEntry[]
+  truncated: boolean
+}
+
 const STORAGE_PROJECT = 'feature-prd-runner-v3-project'
 const STORAGE_ROUTE = 'feature-prd-runner-v3-route'
+const ADD_REPO_VALUE = '__add_new_repo__'
 
 const ROUTES: Array<{ key: RouteKey; label: string }> = [
   { key: 'board', label: 'Board' },
@@ -115,6 +130,14 @@ export default function App() {
   const [manualPinPath, setManualPinPath] = useState('')
   const [allowNonGit, setAllowNonGit] = useState(false)
   const [projectSearch, setProjectSearch] = useState('')
+  const [browseOpen, setBrowseOpen] = useState(false)
+  const [browsePath, setBrowsePath] = useState('')
+  const [browseParentPath, setBrowseParentPath] = useState<string | null>(null)
+  const [browseDirectories, setBrowseDirectories] = useState<BrowseDirectoryEntry[]>([])
+  const [browseCurrentIsGit, setBrowseCurrentIsGit] = useState(false)
+  const [browseLoading, setBrowseLoading] = useState(false)
+  const [browseError, setBrowseError] = useState('')
+  const [browseAllowNonGit, setBrowseAllowNonGit] = useState(false)
 
   useEffect(() => {
     const syncFromHash = () => {
@@ -270,16 +293,54 @@ export default function App() {
     await reloadAll()
   }
 
+  async function pinProjectPath(path: string, allowNonGitValue: boolean): Promise<void> {
+    const pinned = await requestJson<{ project: ProjectRef }>(buildApiUrl('/api/v3/projects/pinned', projectDir), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path, allow_non_git: allowNonGitValue }),
+    })
+    setProjectDir(pinned.project.path)
+    await reloadAll()
+  }
+
   async function pinManualProject(event: FormEvent): Promise<void> {
     event.preventDefault()
     if (!manualPinPath.trim()) return
-    await requestJson<{ project: ProjectRef }>(buildApiUrl('/api/v3/projects/pinned', projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: manualPinPath.trim(), allow_non_git: allowNonGit }),
-    })
+    await pinProjectPath(manualPinPath.trim(), allowNonGit)
     setManualPinPath('')
-    await reloadAll()
+  }
+
+  async function handleTopbarProjectChange(nextValue: string): Promise<void> {
+    if (nextValue === ADD_REPO_VALUE) {
+      setBrowseOpen(true)
+      void loadBrowseDirectories()
+      return
+    }
+    setProjectDir(nextValue)
+  }
+
+  async function loadBrowseDirectories(nextPath?: string): Promise<void> {
+    setBrowseLoading(true)
+    setBrowseError('')
+    try {
+      const data = await requestJson<BrowseProjectsResponse>(
+        buildApiUrl('/api/v3/projects/browse', projectDir, nextPath ? { path: nextPath } : {})
+      )
+      setBrowsePath(data.path)
+      setBrowseParentPath(data.parent)
+      setBrowseCurrentIsGit(data.current_is_git)
+      setBrowseDirectories(data.directories)
+    } catch (err) {
+      setBrowseError(err instanceof Error ? err.message : 'Failed to browse directories')
+    } finally {
+      setBrowseLoading(false)
+    }
+  }
+
+  async function pinFromBrowse(): Promise<void> {
+    if (!browsePath) return
+    await pinProjectPath(browsePath, browseAllowNonGit)
+    setBrowseOpen(false)
   }
 
   function renderBoard(): JSX.Element {
@@ -291,7 +352,6 @@ export default function App() {
       <section className="panel">
         <header className="panel-head">
           <h2>Board</h2>
-          <button className="button button-primary" onClick={() => setWorkOpen(true)}>Create Work</button>
         </header>
         <div className="workbench-grid">
           <article className="workbench-pane">
@@ -519,6 +579,22 @@ export default function App() {
           <h1>Feature PRD Runner</h1>
         </div>
         <div className="topbar-actions">
+          <select
+            className="topbar-project-select"
+            value={projectDir}
+            onChange={(event) => {
+              void handleTopbarProjectChange(event.target.value)
+            }}
+            aria-label="Active repo"
+          >
+            <option value="">Current workspace</option>
+            {projects.map((project) => (
+              <option key={`${project.id}-${project.path}`} value={project.path}>
+                {project.path}
+              </option>
+            ))}
+            <option value={ADD_REPO_VALUE}>Add repo...</option>
+          </select>
           <button className="button" onClick={() => void reloadAll()} disabled={loading}>Refresh</button>
           <button className="button button-primary" onClick={() => setWorkOpen(true)}>Create Work</button>
         </div>
@@ -617,6 +693,65 @@ export default function App() {
                 <button className="button button-primary" type="submit">Run Quick Action</button>
               </form>
             ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {browseOpen ? (
+        <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Browse repositories">
+          <div className="modal-card">
+            <header className="panel-head">
+              <h2>Browse Repositories</h2>
+              <button className="button" onClick={() => setBrowseOpen(false)}>Close</button>
+            </header>
+            <div className="browse-toolbar">
+              <button className="button" onClick={() => void loadBrowseDirectories(browseParentPath || undefined)} disabled={!browseParentPath || browseLoading}>
+                Up
+              </button>
+              <button className="button" onClick={() => void loadBrowseDirectories(browsePath || undefined)} disabled={browseLoading}>
+                Refresh
+              </button>
+              <div className="browse-path-wrap">
+                <input
+                  className={`browse-path-input ${browseCurrentIsGit ? 'is-git' : ''}`}
+                  value={browsePath}
+                  onChange={(event) => setBrowsePath(event.target.value)}
+                  aria-label="Browse path"
+                />
+                {browseCurrentIsGit ? <span className="git-chip">Git repo</span> : null}
+              </div>
+              <button className="button" onClick={() => void loadBrowseDirectories(browsePath || undefined)} disabled={!browsePath || browseLoading}>
+                Go
+              </button>
+            </div>
+
+            {browseError ? <p className="error-banner">{browseError}</p> : null}
+            <div className="browse-list">
+              {browseDirectories.map((entry) => (
+                <button
+                  key={entry.path}
+                  className={`browse-item ${entry.is_git ? 'is-git' : ''}`}
+                  onClick={() => void loadBrowseDirectories(entry.path)}
+                >
+                  <span className="browse-item-name">{entry.name}</span>
+                  <span className="browse-item-kind">{entry.is_git ? 'git' : 'dir'}</span>
+                </button>
+              ))}
+              {browseDirectories.length === 0 && !browseLoading ? <p className="empty">No directories found.</p> : null}
+            </div>
+            <div className="browse-actions">
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={browseAllowNonGit}
+                  onChange={(event) => setBrowseAllowNonGit(event.target.checked)}
+                />
+                Allow non-git directory
+              </label>
+              <button className="button button-primary" onClick={() => void pinFromBrowse()} disabled={!browsePath || browseLoading}>
+                Pin this folder
+              </button>
+            </div>
           </div>
         </div>
       ) : null}
