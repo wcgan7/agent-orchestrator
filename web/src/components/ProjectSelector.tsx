@@ -26,7 +26,7 @@ export default function ProjectSelector({ currentProject, onProjectChange }: Pro
 
   const fetchProjects = async () => {
     try {
-      const response = await fetch('/api/projects')
+      const response = await fetch('/api/v3/projects')
       if (response.ok) {
         const data = await response.json()
         setProjects(Array.isArray(data) ? data : [])

@@ -126,7 +126,7 @@ export async function sendCorrection(
   projectDir?: string,
 ) {
   const res = await fetch(buildApiUrl(`/api/v3/tasks/${taskId}`, projectDir), {
-    method: 'POST',
+    method: 'PATCH',
     headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(correction),
   })

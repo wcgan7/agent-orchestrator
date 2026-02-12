@@ -99,7 +99,7 @@ export default function RunsPanel({ projectDir, currentRunId }: Props) {
 
   const fetchRuns = async () => {
     try {
-      const response = await fetch(buildApiUrl('/api/runs', projectDir, { limit: 25 }), {
+      const response = await fetch(buildApiUrl('/api/v3/runs', projectDir, { limit: 25 }), {
         headers: buildAuthHeaders(),
       })
       if (!response.ok) {
@@ -118,7 +118,7 @@ export default function RunsPanel({ projectDir, currentRunId }: Props) {
   const fetchRunDetail = async (runId: string) => {
     setDetailError(null)
     try {
-      const response = await fetch(buildApiUrl(`/api/runs/${runId}`, projectDir), {
+      const response = await fetch(buildApiUrl(`/api/v3/runs/${runId}`, projectDir), {
         headers: buildAuthHeaders(),
       })
       if (!response.ok) {

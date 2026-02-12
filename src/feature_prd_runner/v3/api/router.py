@@ -95,6 +95,31 @@ def _priority_rank(priority: str) -> int:
     return {"P0": 0, "P1": 1, "P2": 2, "P3": 3}.get(priority, 9)
 
 
+def _execution_batches(tasks: list[Task]) -> list[list[str]]:
+    by_id = {task.id: task for task in tasks}
+    indegree: dict[str, int] = {}
+    dependents: dict[str, list[str]] = {task.id: [] for task in tasks}
+    for task in tasks:
+        refs = [dep_id for dep_id in task.blocked_by if dep_id in by_id]
+        indegree[task.id] = len(refs)
+        for dep_id in refs:
+            dependents.setdefault(dep_id, []).append(task.id)
+
+    ready = sorted([task_id for task_id, degree in indegree.items() if degree == 0], key=lambda tid: (_priority_rank(by_id[tid].priority), by_id[tid].created_at))
+    batches: list[list[str]] = []
+    while ready:
+        batch = list(ready)
+        batches.append(batch)
+        next_ready: list[str] = []
+        for task_id in batch:
+            for dep_id in dependents.get(task_id, []):
+                indegree[dep_id] -= 1
+                if indegree[dep_id] == 0:
+                    next_ready.append(dep_id)
+        ready = sorted(next_ready, key=lambda tid: (_priority_rank(by_id[tid].priority), by_id[tid].created_at))
+    return batches
+
+
 def _parse_prd_into_tasks(content: str, default_priority: str) -> list[dict[str, Any]]:
     tasks: list[dict[str, Any]] = []
     for line in content.splitlines():
@@ -229,6 +254,12 @@ def create_v3_router(
         for key, items in columns.items():
             items.sort(key=lambda x: (_priority_rank(str(x.get("priority") or "P3")), str(x.get("created_at") or "")))
         return {"columns": columns}
+
+    @router.get("/tasks/execution-order")
+    async def execution_order(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        tasks = container.tasks.list()
+        return {"batches": _execution_batches(tasks)}
 
     @router.get("/tasks/{task_id}")
     async def get_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:

@@ -11,10 +11,13 @@ def test_python_runtime_is_at_least_3_10() -> None:
 
 def test_ui_runtime_uses_v3_api_paths_only() -> None:
     root = Path(__file__).resolve().parents[1]
-    ui_files = [
-        root / 'web' / 'src' / 'App.tsx',
-        root / 'web' / 'src' / 'api.ts',
-    ]
+    ui_root = root / 'web' / 'src'
+    ui_files = sorted(
+        path for path in ui_root.rglob('*')
+        if path.suffix in {'.ts', '.tsx'}
+        and '.test.' not in path.name
+        and 'src/test/' not in str(path).replace('\\', '/')
+    )
     legacy_hits: list[str] = []
 
     for path in ui_files:

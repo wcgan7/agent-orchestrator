@@ -521,6 +521,19 @@ Full revamp-plan gap review cycles:
   - Fixes applied: websocket refresh test + project selector persistence assertion.
 - Review cycle 3:
   - no remaining contract gaps found against this revamp plan.
+- Post-completion review cycle 4 (follow-up):
+  - gap found: CI gate scope only covered two UI files.
+    - fix: gate now scans all non-test TS/TSX files under `web/src`.
+  - gap found: frontend compile scope was narrowed and could hide regressions.
+    - fix: restored `web/tsconfig.json` include to full `src`.
+  - gap found: runtime UI still had legacy `/api/*` endpoint usage in non-test components.
+    - fix: migrated remaining non-test component endpoint strings to `/api/v3/*`.
+  - gap found: helper inconsistency for task correction method and execution-order route.
+    - fix: changed helper to `PATCH /api/v3/tasks/{id}` and added `GET /api/v3/tasks/execution-order`.
+  - verification after fixes:
+    - backend suites passed (`25 passed`),
+    - frontend tests passed (`5 passed`),
+    - frontend build passed.
 
 Release readiness:
 - Breaking reset behavior implemented and documented.

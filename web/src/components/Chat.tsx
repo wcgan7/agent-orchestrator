@@ -59,7 +59,7 @@ const Chat = ({ runId, projectDir }: ChatProps) => {
   const fetchMessages = async () => {
     try {
       const response = await fetch(
-        buildApiUrl('/api/messages', projectDir, { run_id: runId }),
+        buildApiUrl('/api/v3/messages', projectDir, { run_id: runId }),
         { headers: buildAuthHeaders() }
       )
       if (!response.ok) throw new Error(`HTTP error ${response.status}`)
@@ -96,7 +96,7 @@ const Chat = ({ runId, projectDir }: ChatProps) => {
         metadata.expects_response = true
       }
 
-      const response = await fetch(buildApiUrl('/api/messages', projectDir, { run_id: runId }), {
+      const response = await fetch(buildApiUrl('/api/v3/messages', projectDir, { run_id: runId }), {
         method: 'POST',
         headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({ content: inputValue, type: messageType, metadata }),

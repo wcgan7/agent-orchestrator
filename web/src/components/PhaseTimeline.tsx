@@ -66,7 +66,7 @@ export default function PhaseTimeline({ projectDir }: Props) {
 
   const fetchPhases = async () => {
     try {
-      const response = await fetch(buildApiUrl('/api/phases', projectDir), {
+      const response = await fetch(buildApiUrl('/api/v3/phases', projectDir), {
         headers: buildAuthHeaders(),
       })
       if (response.ok) {

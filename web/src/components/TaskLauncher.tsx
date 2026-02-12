@@ -115,7 +115,7 @@ export default function TaskLauncher({ projectDir, onRunStarted }: TaskLauncherP
 
   const promoteQuickActionToTask = async (quickRunId: string, prompt: string): Promise<string | null> => {
     if (!projectDir) return null
-    const response = await fetch(buildApiUrl(`/api/v3/quick-runs/${quickRunId}/promote`, projectDir), {
+    const response = await fetch(buildApiUrl(`/api/v3/v3/quick-runs/${quickRunId}/promote`, projectDir), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -161,7 +161,7 @@ export default function TaskLauncher({ projectDir, onRunStarted }: TaskLauncherP
     try {
       if (mode === 'quick_task') {
         // Use the exec endpoint for one-off actions
-        const response = await fetch(buildApiUrl('/api/v3/quick-runs', projectDir), {
+        const response = await fetch(buildApiUrl('/api/v3/v3/quick-runs', projectDir), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -204,7 +204,7 @@ export default function TaskLauncher({ projectDir, onRunStarted }: TaskLauncherP
         }
       } else {
         // Use the run endpoint for full workflow
-        const response = await fetch(buildApiUrl('/api/runs/start', projectDir), {
+        const response = await fetch(buildApiUrl('/api/v3/runs/start', projectDir), {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

@@ -251,7 +251,7 @@ export default function BreakpointsPanel({ projectDir }: Props) {
 
   const fetchBreakpoints = async () => {
     try {
-      const response = await fetch(buildApiUrl('/api/breakpoints', projectDir), {
+      const response = await fetch(buildApiUrl('/api/v3/breakpoints', projectDir), {
         headers: buildAuthHeaders(),
       })
       if (!response.ok) throw new Error(`HTTP error ${response.status}`)
@@ -269,7 +269,7 @@ export default function BreakpointsPanel({ projectDir }: Props) {
     if (creating) return
     setCreating(true)
     try {
-      const response = await fetch(buildApiUrl('/api/breakpoints', projectDir), {
+      const response = await fetch(buildApiUrl('/api/v3/breakpoints', projectDir), {
         method: 'POST',
         headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
@@ -296,7 +296,7 @@ export default function BreakpointsPanel({ projectDir }: Props) {
   const toggleBreakpoint = async (breakpointId: string) => {
     try {
       const response = await fetch(
-        buildApiUrl(`/api/breakpoints/${breakpointId}/toggle`, projectDir),
+        buildApiUrl(`/api/v3/breakpoints/${breakpointId}/toggle`, projectDir),
         {
           method: 'POST',
           headers: buildAuthHeaders(),
@@ -314,7 +314,7 @@ export default function BreakpointsPanel({ projectDir }: Props) {
 
   const deleteBreakpoint = async (breakpointId: string) => {
     try {
-      const response = await fetch(buildApiUrl(`/api/breakpoints/${breakpointId}`, projectDir), {
+      const response = await fetch(buildApiUrl(`/api/v3/breakpoints/${breakpointId}`, projectDir), {
         method: 'DELETE',
         headers: buildAuthHeaders(),
       })
@@ -330,7 +330,7 @@ export default function BreakpointsPanel({ projectDir }: Props) {
 
   const clearAll = async () => {
     try {
-      const response = await fetch(buildApiUrl('/api/breakpoints', projectDir), {
+      const response = await fetch(buildApiUrl('/api/v3/breakpoints', projectDir), {
         method: 'DELETE',
         headers: buildAuthHeaders(),
       })

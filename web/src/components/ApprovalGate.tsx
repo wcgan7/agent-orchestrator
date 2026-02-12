@@ -55,7 +55,7 @@ const ApprovalGate = ({ projectDir }: ApprovalGateProps) => {
 
   const fetchApprovals = async () => {
     try {
-      const response = await fetch(buildApiUrl('/api/approvals', projectDir), {
+      const response = await fetch(buildApiUrl('/api/v3/approvals', projectDir), {
         headers: buildAuthHeaders(),
       })
       if (!response.ok) {
@@ -75,7 +75,7 @@ const ApprovalGate = ({ projectDir }: ApprovalGateProps) => {
     setSubmitting(requestId)
 
     try {
-      const response = await fetch(buildApiUrl('/api/approvals/respond', projectDir), {
+      const response = await fetch(buildApiUrl('/api/v3/approvals/respond', projectDir), {
         method: 'POST',
         headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({

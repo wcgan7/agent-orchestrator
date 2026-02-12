@@ -49,7 +49,7 @@ const FileReview = ({ taskId, projectDir }: FileReviewProps) => {
       const token = localStorage.getItem('feature-prd-runner-auth-token')
       if (token) headers.Authorization = `Bearer ${token}`
 
-      const response = await fetch(`/api/file-changes?${params}`, { headers })
+      const response = await fetch(`/api/v3/file-changes?${params}`, { headers })
       if (!response.ok) throw new Error(`HTTP error ${response.status}`)
 
       const data = await response.json()
@@ -73,7 +73,7 @@ const FileReview = ({ taskId, projectDir }: FileReviewProps) => {
       const token = localStorage.getItem('feature-prd-runner-auth-token')
       if (token) headers.Authorization = `Bearer ${token}`
 
-      const response = await fetch(`/api/file-review?${params}`, {
+      const response = await fetch(`/api/v3/file-review?${params}`, {
         method: 'POST',
         headers,
         body: JSON.stringify({

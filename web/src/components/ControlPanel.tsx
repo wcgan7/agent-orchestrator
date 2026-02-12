@@ -52,7 +52,7 @@ export default function ControlPanel({ currentTaskId, currentPhaseId, status, pr
         params: action === 'retry' ? { step: selectedStep } : null,
       }
 
-      const response = await fetch(buildApiUrl('/api/control', projectDir), {
+      const response = await fetch(buildApiUrl('/api/v3/control', projectDir), {
         method: 'POST',
         headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
         body: JSON.stringify(body),

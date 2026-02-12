@@ -80,7 +80,7 @@ export default function TasksPanel({ projectDir, currentTaskId }: Props) {
 
   const fetchTasks = async () => {
     try {
-      const response = await fetch(buildApiUrl('/api/tasks', projectDir), {
+      const response = await fetch(buildApiUrl('/api/v3/tasks', projectDir), {
         headers: buildAuthHeaders(),
       })
       if (!response.ok) {
