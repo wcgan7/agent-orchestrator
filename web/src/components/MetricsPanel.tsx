@@ -64,7 +64,7 @@ export default function MetricsPanel({ projectDir }: Props) {
 
   const fetchMetrics = async () => {
     try {
-      const response = await fetch(buildApiUrl('/api/metrics', projectDir), {
+      const response = await fetch(buildApiUrl('/api/v3/metrics', projectDir), {
         headers: buildAuthHeaders(),
       })
       if (response.ok) {

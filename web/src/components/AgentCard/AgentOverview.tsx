@@ -43,7 +43,7 @@ export function AgentOverview({ projectDir }: Props) {
   const fetchAgents = useCallback(async () => {
     try {
       const resp = await fetch(
-        buildApiUrl('/api/v2/agents', projectDir),
+        buildApiUrl('/api/v3/agents', projectDir),
         { headers: buildAuthHeaders() }
       )
       if (resp.ok) {

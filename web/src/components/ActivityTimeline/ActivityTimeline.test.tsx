@@ -138,7 +138,7 @@ describe('ActivityTimeline', () => {
 
     // Our mock buildApiUrl just returns the path, verify fetch was called
     expect(global.fetch).toHaveBeenCalledWith(
-      expect.stringContaining('/api/v2/collaboration/timeline/task-42'),
+      expect.stringContaining('/api/v3/collaboration/timeline/task-42'),
       expect.any(Object)
     )
   })

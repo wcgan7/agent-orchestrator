@@ -1,105 +1,104 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
-import userEvent from '@testing-library/user-event'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import App from './App'
 
-function mockFetchForApp() {
-  global.fetch = vi.fn().mockImplementation((url) => {
-    const urlString = url.toString()
-    if (urlString.includes('/api/auth/status')) {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({
-          enabled: false,
-          authenticated: true,
-          username: null,
-        }),
-      })
-    }
-    if (urlString.includes('/api/status')) {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({
-          project_dir: '',
-          status: 'idle',
-          phases_completed: 0,
-          phases_total: 0,
-          tasks_ready: 0,
-          tasks_running: 0,
-          tasks_done: 0,
-          tasks_blocked: 0,
-        }),
-      })
-    }
-    if (urlString.includes('/api/workers/')) {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({
-          success: true,
-          message: 'ok',
-        }),
-      })
-    }
-    if (urlString.includes('/api/workers')) {
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({
-          default_worker: 'codex',
-          routing: {},
-          providers: [],
-        }),
-      })
-    }
-    return Promise.resolve({
-      ok: true,
-      json: async () => ({}),
-    })
-  })
+class MockWebSocket {
+  listeners: Record<string, Array<(event?: unknown) => void>> = {}
+
+  constructor() {
+    setTimeout(() => this.emit('open'), 0)
+  }
+
+  addEventListener(event: string, cb: (event?: unknown) => void) {
+    this.listeners[event] = this.listeners[event] || []
+    this.listeners[event].push(cb)
+  }
+
+  send() {}
+
+  close() {}
+
+  emit(event: string) {
+    for (const cb of this.listeners[event] || []) cb({})
+  }
 }
 
-async function clickNav(label: string) {
-  const btn = screen.getByRole('button', { name: new RegExp(`^${label}`, 'i') })
-  await userEvent.click(btn)
+function installFetchMock() {
+  const projects = [{ id: 'p1', path: '/tmp/repo', source: 'pinned', is_git: true }]
+  global.fetch = vi.fn().mockImplementation((url, init) => {
+    const u = String(url)
+    if (u.includes('/api/v3/tasks/board')) {
+      return Promise.resolve({ ok: true, json: async () => ({ columns: { backlog: [], ready: [], in_progress: [], in_review: [], blocked: [], done: [] } }) })
+    }
+    if (u.includes('/api/v3/orchestrator/status')) {
+      return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 1, in_progress: 0, draining: false, run_branch: null }) })
+    }
+    if (u.includes('/api/v3/review-queue')) {
+      return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+    }
+    if (u.includes('/api/v3/agents') && (init?.method || 'GET') === 'GET') {
+      return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+    }
+    if (u.includes('/api/v3/projects') && (init?.method || 'GET') === 'GET') {
+      return Promise.resolve({ ok: true, json: async () => ({ projects }) })
+    }
+    if (u.includes('/api/v3/projects/pinned') && (init?.method || 'GET') === 'POST') {
+      projects.push({ id: 'p2', path: '/abs/path', source: 'pinned', is_git: false })
+      return Promise.resolve({ ok: true, json: async () => ({ project: { id: 'p2', path: '/abs/path', source: 'pinned', is_git: false } }) })
+    }
+    return Promise.resolve({ ok: true, json: async () => ({}) })
+  }) as unknown as typeof fetch
 }
 
-describe('Accessibility coverage for core cockpit views', () => {
+describe('App navigation and settings flows', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    global.localStorage.clear()
-    mockFetchForApp()
+    localStorage.clear()
+    window.location.hash = ''
+    ;(globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = MockWebSocket as unknown as typeof WebSocket
+    installFetchMock()
   })
 
-  it('renders landmarks and accessible global controls', async () => {
+  it('keeps core routes navigable via nav buttons', async () => {
     render(<App />)
 
     await waitFor(() => {
-      expect(screen.getByText(/task workflow/i)).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: /board/i })).toBeInTheDocument()
     })
-    expect(screen.getByRole('main')).toBeInTheDocument()
-    expect(screen.getByLabelText(/command palette/i)).toBeInTheDocument()
-    expect(screen.getByLabelText(/activity rail/i)).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: /Execution/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /execution/i })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /Agents/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /agents/i })).toBeInTheDocument()
+    })
   })
 
-  it('keeps Tasks, Execution, and Agents navigable via labeled nav buttons', async () => {
+  it('pins manual project paths from Settings', async () => {
     render(<App />)
 
+    fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
-      expect(screen.getByText(/task workflow/i)).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: /settings/i })).toBeInTheDocument()
     })
 
-    await clickNav('Execution')
+    fireEvent.change(screen.getByLabelText(/Pin project by absolute path/i), {
+      target: { value: '/abs/path' },
+    })
+    fireEvent.click(screen.getByRole('button', { name: /Pin project/i }))
+
     await waitFor(() => {
-      expect(screen.getByText(/execution workflow/i)).toBeInTheDocument()
+      expect(global.fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/v3/projects/pinned'),
+        expect.objectContaining({ method: 'POST' }),
+      )
     })
 
-    await clickNav('Agents')
     await waitFor(() => {
-      expect(screen.getByText(/agent operations/i)).toBeInTheDocument()
-    })
-
-    await clickNav('Tasks')
-    await waitFor(() => {
-      expect(screen.getByText(/task workflow/i)).toBeInTheDocument()
+      expect(screen.getByRole('option', { name: /abs\/path/i })).toBeInTheDocument()
     })
   })
 })

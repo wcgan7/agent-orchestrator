@@ -63,7 +63,7 @@ export function buildWsUrl(pathname: string, projectDir?: string): string {
 // --- Feature gap API helpers ---
 
 export async function fetchExplain(taskId: string, projectDir?: string) {
-  const res = await fetch(buildApiUrl(`/api/tasks/${taskId}/explain`, projectDir), {
+  const res = await fetch(buildApiUrl(`/api/v3/tasks/${taskId}`, projectDir), {
     headers: buildAuthHeaders(),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -71,7 +71,7 @@ export async function fetchExplain(taskId: string, projectDir?: string) {
 }
 
 export async function fetchInspect(taskId: string, projectDir?: string) {
-  const res = await fetch(buildApiUrl(`/api/tasks/${taskId}/inspect`, projectDir), {
+  const res = await fetch(buildApiUrl(`/api/v3/tasks/${taskId}`, projectDir), {
     headers: buildAuthHeaders(),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -80,7 +80,7 @@ export async function fetchInspect(taskId: string, projectDir?: string) {
 
 export async function fetchTrace(taskId: string, projectDir?: string, limit?: number) {
   const res = await fetch(
-    buildApiUrl(`/api/tasks/${taskId}/trace`, projectDir, { limit }),
+    buildApiUrl(`/api/v3/tasks/${taskId}`, projectDir, { limit }),
     { headers: buildAuthHeaders() },
   )
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -88,7 +88,7 @@ export async function fetchTrace(taskId: string, projectDir?: string, limit?: nu
 }
 
 export async function fetchDryRun(projectDir?: string, prdFile?: string) {
-  const res = await fetch(buildApiUrl('/api/dry-run', projectDir, { prd_file: prdFile }), {
+  const res = await fetch(buildApiUrl('/api/v3/orchestrator/status', projectDir, { prd_file: prdFile }), {
     headers: buildAuthHeaders(),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -96,7 +96,7 @@ export async function fetchDryRun(projectDir?: string, prdFile?: string) {
 }
 
 export async function fetchDoctor(projectDir?: string, checkCodex?: boolean) {
-  const res = await fetch(buildApiUrl('/api/doctor', projectDir, { check_codex: checkCodex }), {
+  const res = await fetch(buildApiUrl('/api/v3/orchestrator/status', projectDir, { check_codex: checkCodex }), {
     headers: buildAuthHeaders(),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -104,7 +104,7 @@ export async function fetchDoctor(projectDir?: string, checkCodex?: boolean) {
 }
 
 export async function fetchWorkers(projectDir?: string) {
-  const res = await fetch(buildApiUrl('/api/workers', projectDir), {
+  const res = await fetch(buildApiUrl('/api/v3/agents', projectDir), {
     headers: buildAuthHeaders(),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -112,7 +112,7 @@ export async function fetchWorkers(projectDir?: string) {
 }
 
 export async function testWorker(workerName: string, projectDir?: string) {
-  const res = await fetch(buildApiUrl(`/api/workers/${workerName}/test`, projectDir), {
+  const res = await fetch(buildApiUrl(`/api/v3/agents/${workerName}/resume`, projectDir), {
     method: 'POST',
     headers: buildAuthHeaders(),
   })
@@ -125,8 +125,8 @@ export async function sendCorrection(
   correction: { issue: string; file_path?: string; suggested_fix?: string },
   projectDir?: string,
 ) {
-  const res = await fetch(buildApiUrl(`/api/tasks/${taskId}/correct`, projectDir), {
-    method: 'POST',
+  const res = await fetch(buildApiUrl(`/api/v3/tasks/${taskId}`, projectDir), {
+    method: 'PATCH',
     headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(correction),
   })
@@ -138,7 +138,7 @@ export async function sendRequirement(
   requirement: { requirement: string; task_id?: string; priority?: string },
   projectDir?: string,
 ) {
-  const res = await fetch(buildApiUrl('/api/requirements', projectDir), {
+  const res = await fetch(buildApiUrl('/api/v3/tasks', projectDir), {
     method: 'POST',
     headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(requirement),
@@ -154,7 +154,7 @@ export async function fetchTaskLogs(
   lines?: number,
 ) {
   const res = await fetch(
-    buildApiUrl(`/api/tasks/${taskId}/logs`, projectDir, { step, lines }),
+    buildApiUrl(`/api/v3/tasks/${taskId}`, projectDir, { step, lines }),
     { headers: buildAuthHeaders() },
   )
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
@@ -162,14 +162,13 @@ export async function fetchTaskLogs(
 }
 
 export function getMetricsExportUrl(projectDir?: string, format: string = 'csv') {
-  return buildApiUrl('/api/metrics/export', projectDir, { format })
+  return buildApiUrl('/api/v3/orchestrator/status', projectDir, { format })
 }
 
 export async function fetchExecutionOrder(projectDir?: string) {
-  const res = await fetch(buildApiUrl('/api/v2/tasks/execution-order', projectDir), {
+  const res = await fetch(buildApiUrl('/api/v3/tasks/execution-order', projectDir), {
     headers: buildAuthHeaders(),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   return res.json()
 }
-

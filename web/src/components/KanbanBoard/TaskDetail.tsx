@@ -103,7 +103,7 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated, onNavigateTas
     setSaving(true)
     try {
       await fetch(
-        buildApiUrl(`/api/v2/tasks/${task.id}`, projectDir),
+        buildApiUrl(`/api/v3/tasks/${task.id}`, projectDir),
         {
           method: 'PATCH',
           headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -120,7 +120,7 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated, onNavigateTas
   const handleTransition = async (newStatus: string) => {
     try {
       const response = await fetch(
-        buildApiUrl(`/api/v2/tasks/${task.id}/transition`, projectDir),
+        buildApiUrl(`/api/v3/tasks/${task.id}/transition`, projectDir),
         {
           method: 'POST',
           headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -142,7 +142,7 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated, onNavigateTas
   const handleRunNow = async () => {
     try {
       const response = await fetch(
-        buildApiUrl(`/api/v2/tasks/${task.id}/run`, projectDir),
+        buildApiUrl(`/api/v3/tasks/${task.id}/run`, projectDir),
         {
           method: 'POST',
           headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -164,7 +164,7 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated, onNavigateTas
   const handleRetry = async () => {
     try {
       const response = await fetch(
-        buildApiUrl(`/api/v2/tasks/${task.id}/retry`, projectDir),
+        buildApiUrl(`/api/v3/tasks/${task.id}/retry`, projectDir),
         {
           method: 'POST',
           headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -186,7 +186,7 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated, onNavigateTas
   const handleCancelTask = async () => {
     try {
       const response = await fetch(
-        buildApiUrl(`/api/v2/tasks/${task.id}/cancel`, projectDir),
+        buildApiUrl(`/api/v3/tasks/${task.id}/cancel`, projectDir),
         {
           method: 'POST',
           headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -208,7 +208,7 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated, onNavigateTas
   const handleDelete = async () => {
     if (!confirm('Delete this task?')) return
     await fetch(
-      buildApiUrl(`/api/v2/tasks/${task.id}`, projectDir),
+      buildApiUrl(`/api/v3/tasks/${task.id}`, projectDir),
       { method: 'DELETE', headers: buildAuthHeaders() }
     )
     onUpdated()
@@ -484,7 +484,7 @@ function BlockedTaskAssistant({
       try {
         const results = await Promise.all(
           task.blocked_by.map(async (id) => {
-            const response = await fetch(buildApiUrl(`/api/v2/tasks/${id}`, projectDir), {
+            const response = await fetch(buildApiUrl(`/api/v3/tasks/${id}`, projectDir), {
               headers: buildAuthHeaders(),
             })
             if (!response.ok) return null
@@ -513,7 +513,7 @@ function BlockedTaskAssistant({
     setAssistantError(null)
     try {
       const response = await fetch(
-        buildApiUrl(`/api/v2/tasks/${blockerId}/run`, projectDir),
+        buildApiUrl(`/api/v3/tasks/${blockerId}/run`, projectDir),
         {
           method: 'POST',
           headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -538,7 +538,7 @@ function BlockedTaskAssistant({
     setLoadingTaskId(blockerId)
     setAssistantError(null)
     try {
-      const response = await fetch(buildApiUrl(`/api/v2/tasks/${blockerId}`, projectDir), {
+      const response = await fetch(buildApiUrl(`/api/v3/tasks/${blockerId}`, projectDir), {
         headers: buildAuthHeaders(),
       })
       if (!response.ok) {
@@ -559,7 +559,7 @@ function BlockedTaskAssistant({
     setAssistantError(null)
     try {
       const response = await fetch(
-        buildApiUrl(`/api/v2/tasks/${task.id}/retry`, projectDir),
+        buildApiUrl(`/api/v3/tasks/${task.id}/retry`, projectDir),
         {
           method: 'POST',
           headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),

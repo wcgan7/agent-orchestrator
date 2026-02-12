@@ -1,5 +1,9 @@
 # Feature PRD Runner - Web Dashboard
 
+> **Status (2026-02-11):** Current frontend setup/development guide.
+> **Product direction:** [`../docs/ORCHESTRATOR_FIRST_REVAMP_PLAN.md`](../docs/ORCHESTRATOR_FIRST_REVAMP_PLAN.md)
+> **Docs index:** [`../docs/README.md`](../docs/README.md)
+
 Modern web dashboard for monitoring and controlling Feature PRD Runner.
 
 ## Setup

@@ -1,964 +1,625 @@
-import { useState, useEffect, useMemo, useCallback, lazy, Suspense } from 'react'
-import {
-  Alert,
-  Box,
-  Button,
-  Card,
-  CardContent,
-  Chip,
-  CircularProgress,
-  Divider,
-  Grid,
-  IconButton,
-  Stack,
-  Tab,
-  Tabs,
-  ToggleButton,
-  ToggleButtonGroup,
-  Typography,
-} from '@mui/material'
-import LightModeIcon from '@mui/icons-material/LightMode'
-import DarkModeIcon from '@mui/icons-material/DarkMode'
-import SettingsSuggestIcon from '@mui/icons-material/SettingsSuggest'
-import LogoutIcon from '@mui/icons-material/Logout'
-import RefreshIcon from '@mui/icons-material/Refresh'
-import ProjectSelector from './components/ProjectSelector'
-import Login from './components/Login'
-import RunDashboard from './components/RunDashboard'
-import PhaseTimeline from './components/PhaseTimeline'
-import LiveLog from './components/LiveLog'
-import MetricsPanel from './components/MetricsPanel'
-import ControlPanel from './components/ControlPanel'
-import ApprovalGate from './components/ApprovalGate'
-import Chat from './components/Chat'
-import TasksPanel from './components/TasksPanel'
-import RunsPanel from './components/RunsPanel'
-import BreakpointsPanel from './components/BreakpointsPanel'
-import TaskLauncher from './components/TaskLauncher'
-import QuickRunsPanel from './components/QuickRunsPanel'
-import LoadingSpinner from './components/LoadingSpinner'
-import CommandPalette, { useCommandPalette, Command } from './components/CommandPalette/CommandPalette'
-import NotificationCenter from './components/NotificationCenter/NotificationCenter'
-import OnlineUsers from './components/OnlineUsers'
-import { ToastProvider } from './contexts/ToastContext'
-import { WebSocketProvider, useChannel } from './contexts/WebSocketContext'
-import { ThemeProvider as AppThemeProvider, useTheme } from './contexts/ThemeContext'
-import type { ThemeMode } from './contexts/ThemeContext'
-import { ThemeProvider as MuiThemeProvider, CssBaseline } from '@mui/material'
-import { createCockpitTheme } from './ui/theme'
-import AppShell from './ui/layout/AppShell'
-import { mapStatusSummary } from './ui/status'
-import type {
-  AppNavSection,
-  CockpitPanelState,
-  CockpitView,
-  DashboardLayoutConfig,
-  TaskDetailTab,
-} from './types/ui'
+import { FormEvent, useEffect, useState } from 'react'
+import { buildApiUrl } from './api'
+import './styles/orchestrator.css'
 
-const DryRunPanel = lazy(() => import('./components/DryRunPanel'))
-const DoctorPanel = lazy(() => import('./components/DoctorPanel'))
-const WorkersPanel = lazy(() => import('./components/WorkersPanel'))
-const ParallelPlanView = lazy(() => import('./components/ParallelPlanView'))
-const RequirementForm = lazy(() => import('./components/RequirementForm'))
-const KanbanBoard = lazy(() => import('./components/KanbanBoard/KanbanBoard'))
-const AgentPanel = lazy(() => import('./components/AgentCard/AgentCard'))
-const HITLModeSelector = lazy(() => import('./components/HITLModeSelector/HITLModeSelector'))
-const MetricsChart = lazy(() => import('./components/MetricsChart'))
-const DependencyGraph = lazy(() => import('./components/DependencyGraph'))
-const FileReview = lazy(() => import('./components/FileReview'))
-const CostBreakdown = lazy(() => import('./components/CostBreakdown'))
+type RouteKey = 'board' | 'execution' | 'review' | 'agents' | 'settings'
+type CreateTab = 'task' | 'import' | 'quick'
 
-interface ProjectStatus {
-  project_dir: string
+type TaskRecord = {
+  id: string
+  title: string
+  description?: string
+  priority: string
   status: string
-  current_task_id?: string
-  current_phase_id?: string
-  run_id?: string
-  last_error?: string
-  phases_completed: number
-  phases_total: number
-  tasks_ready: number
-  tasks_running: number
-  tasks_done: number
-  tasks_blocked: number
+  blocked_by?: string[]
+  metadata?: Record<string, unknown>
 }
 
-interface AuthStatus {
-  enabled: boolean
-  authenticated: boolean
-  username: string | null
+type BoardResponse = {
+  columns: Record<string, TaskRecord[]>
 }
 
-const STORAGE_KEY_PROJECT = 'feature-prd-runner-selected-project'
-const STORAGE_KEY_TOKEN = 'feature-prd-runner-auth-token'
-const STORAGE_KEY_USERNAME = 'feature-prd-runner-username'
-const STORAGE_KEY_VIEW = 'feature-prd-runner-view'
-const STORAGE_KEY_TASK_TAB = 'feature-prd-runner-task-tab'
-const STORAGE_KEY_VIEW_MIGRATION = 'feature-prd-runner-view-default-v2'
+type PreviewNode = {
+  id: string
+  title: string
+  priority: string
+}
 
-const navSections: AppNavSection[] = [
-  { id: 'overview', label: 'Overview', description: 'Current run health and priorities' },
-  { id: 'execution', label: 'Execution', description: 'Run controls, approvals, and live activity' },
-  { id: 'tasks', label: 'Tasks', description: 'Board, dependencies, and task interventions' },
-  { id: 'agents', label: 'Agents', description: 'Agent orchestration and worker capacity' },
-  { id: 'diagnostics', label: 'Diagnostics', description: 'Dry-run, doctor, cost, and metrics' },
+type PreviewEdge = {
+  from: string
+  to: string
+}
+
+type PrdPreview = {
+  nodes: PreviewNode[]
+  edges: PreviewEdge[]
+}
+
+type OrchestratorStatus = {
+  status: string
+  queue_depth: number
+  in_progress: number
+  draining: boolean
+  run_branch?: string | null
+}
+
+type AgentRecord = {
+  id: string
+  role: string
+  status: string
+  capacity: number
+  override_provider?: string | null
+}
+
+type ProjectRef = {
+  id: string
+  path: string
+  source: string
+  is_git: boolean
+}
+
+const STORAGE_PROJECT = 'feature-prd-runner-v3-project'
+const STORAGE_ROUTE = 'feature-prd-runner-v3-route'
+
+const ROUTES: Array<{ key: RouteKey; label: string }> = [
+  { key: 'board', label: 'Board' },
+  { key: 'execution', label: 'Execution' },
+  { key: 'review', label: 'Review Queue' },
+  { key: 'agents', label: 'Agents' },
+  { key: 'settings', label: 'Settings' },
 ]
 
-const cockpitViews: CockpitView[] = ['overview', 'execution', 'tasks', 'agents', 'diagnostics']
-
-function isCockpitView(value: string | null): value is CockpitView {
-  return value !== null && cockpitViews.includes(value as CockpitView)
+function routeFromHash(hash: string): RouteKey {
+  const cleaned = hash.replace(/^#\/?/, '').trim().toLowerCase()
+  const found = ROUTES.find((route) => route.key === cleaned)
+  return found?.key ?? 'board'
 }
 
-const dashboardLayoutConfig: DashboardLayoutConfig = {
-  now: ['run_dashboard', 'approval_gate', 'file_review'],
-  flow: ['control_panel', 'phase_timeline', 'tasks_runs'],
-  insights: ['metrics', 'cost', 'dependency_parallel'],
+function toHash(route: RouteKey): string {
+  return `#/${route}`
 }
 
-function ThemeToggle() {
-  const { theme, setTheme } = useTheme()
-
-  return (
-    <ToggleButtonGroup
-      size="small"
-      value={theme}
-      exclusive
-      onChange={(_, next: ThemeMode | null) => {
-        if (next) setTheme(next)
-      }}
-      aria-label="Theme selection"
-    >
-      <ToggleButton value="light" aria-label="Light mode">
-        <LightModeIcon fontSize="small" />
-      </ToggleButton>
-      <ToggleButton value="dark" aria-label="Dark mode">
-        <DarkModeIcon fontSize="small" />
-      </ToggleButton>
-      <ToggleButton value="system" aria-label="System mode">
-        <SettingsSuggestIcon fontSize="small" />
-      </ToggleButton>
-    </ToggleButtonGroup>
-  )
-}
-
-function ActivityRail({
-  status,
-  currentProject,
-}: {
-  status: ProjectStatus | null
-  currentProject: string | null
-}) {
-  const statusSummary = mapStatusSummary(status?.status)
-
-  return (
-    <Stack spacing={2}>
-      <Card>
-        <CardContent>
-          <Typography variant="overline" color="text.secondary">Run Health</Typography>
-          <Stack direction="row" alignItems="center" spacing={1} sx={{ mt: 0.5 }}>
-            <Chip size="small" label={statusSummary.label} color={statusSummary.color} />
-            <Typography variant="body2" color="text.secondary">
-              Phase {status?.phases_completed ?? 0}/{status?.phases_total ?? 0}
-            </Typography>
-          </Stack>
-          <Box
-            sx={{
-              mt: 1.5,
-              display: 'grid',
-              gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-              gap: 1,
-            }}
-          >
-            <Chip size="small" color="success" variant="outlined" label={`Done ${status?.tasks_done ?? 0}`} sx={{ width: '100%' }} />
-            <Chip size="small" color="info" variant="outlined" label={`Running ${status?.tasks_running ?? 0}`} sx={{ width: '100%' }} />
-            <Chip size="small" color="warning" variant="outlined" label={`Ready ${status?.tasks_ready ?? 0}`} sx={{ width: '100%' }} />
-            <Chip size="small" color="error" variant="outlined" label={`Blocked ${status?.tasks_blocked ?? 0}`} sx={{ width: '100%' }} />
-          </Box>
-          {status?.current_phase_id && (
-            <Typography variant="body2" sx={{ mt: 1.5 }}>
-              Current: <strong>{status.current_phase_id}</strong>
-            </Typography>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent>
-          <Typography variant="overline" color="text.secondary">Approvals and Risk</Typography>
-          <Typography variant="body2" sx={{ mt: 1 }}>
-            Blocked tasks: <strong>{status?.tasks_blocked ?? 0}</strong>
-          </Typography>
-          <Typography variant="body2">
-            Review task: <strong>{status?.current_task_id || 'none'}</strong>
-          </Typography>
-          {status?.last_error && (
-            <Alert severity="error" sx={{ mt: 1.5 }}>
-              {status.last_error}
-            </Alert>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardContent>
-          <Typography variant="overline" color="text.secondary">Context</Typography>
-          <Typography variant="body2" sx={{ mt: 1, wordBreak: 'break-word' }}>
-            {currentProject || 'No project selected'}
-          </Typography>
-          <Box sx={{ mt: 1.5 }}>
-            <OnlineUsers projectDir={currentProject || undefined} />
-          </Box>
-        </CardContent>
-      </Card>
-    </Stack>
-  )
-}
-
-function ViewGuide({ title, steps }: { title: string; steps: string[] }) {
-  return (
-    <Alert severity="info" variant="outlined" sx={{ mb: 2 }}>
-      <Typography variant="subtitle2" sx={{ mb: 0.5 }}>{title}</Typography>
-      <Stack component="ul" spacing={0.25} sx={{ m: 0, pl: 2.25 }}>
-        {steps.map((step) => (
-          <Typography key={step} component="li" variant="body2">
-            {step}
-          </Typography>
-        ))}
-      </Stack>
-    </Alert>
-  )
-}
-
-function CockpitOverview({
-  status,
-  currentProject,
-}: {
-  status: ProjectStatus | null
-  currentProject: string | null
-}) {
-  return (
-    <Stack spacing={2.5}>
-      <ViewGuide
-        title="What to do here"
-        steps={[
-          'Check Now for blockers or approvals.',
-          'Use Flow to control active execution.',
-          'Use Insights to review cost and dependency risk.',
-        ]}
-      />
-      <Stack direction="row" spacing={1} alignItems="center">
-        <Typography variant="h5">Overview</Typography>
-        <Chip size="small" variant="outlined" label="Now / Flow / Insights" />
-      </Stack>
-
-      <Grid container spacing={2}>
-        <Grid size={{ xs: 12, xl: 4 }}>
-          <Card>
-            <CardContent>
-              <Typography variant="h6" sx={{ mb: 1.5 }}>Now</Typography>
-              <RunDashboard status={status} />
-              <Divider sx={{ my: 2 }} />
-              <ApprovalGate projectDir={currentProject || undefined} />
-              <Divider sx={{ my: 2 }} />
-              <FileReview
-                taskId={status?.current_task_id}
-                projectDir={currentProject || undefined}
-              />
-            </CardContent>
-          </Card>
-        </Grid>
-
-        <Grid size={{ xs: 12, xl: 4 }}>
-          <Card>
-            <CardContent>
-              <Typography variant="h6" sx={{ mb: 1.5 }}>Flow</Typography>
-              <ControlPanel
-                currentTaskId={status?.current_task_id}
-                currentPhaseId={status?.current_phase_id}
-                status={status?.status}
-                projectDir={currentProject || undefined}
-              />
-              <Divider sx={{ my: 2 }} />
-              <PhaseTimeline projectDir={currentProject || undefined} />
-              <Divider sx={{ my: 2 }} />
-              <Grid container spacing={2}>
-                <Grid size={{ xs: 12 }}>
-                  <TasksPanel
-                    projectDir={currentProject || undefined}
-                    currentTaskId={status?.current_task_id}
-                  />
-                </Grid>
-                <Grid size={{ xs: 12 }}>
-                  <RunsPanel
-                    projectDir={currentProject || undefined}
-                    currentRunId={status?.run_id}
-                  />
-                </Grid>
-              </Grid>
-            </CardContent>
-          </Card>
-        </Grid>
-
-        <Grid size={{ xs: 12, xl: 4 }}>
-          <Card>
-            <CardContent>
-              <Typography variant="h6" sx={{ mb: 1.5 }}>Insights</Typography>
-              <MetricsPanel projectDir={currentProject || undefined} />
-              <Divider sx={{ my: 2 }} />
-              <MetricsChart projectDir={currentProject || undefined} />
-              <Divider sx={{ my: 2 }} />
-              <CostBreakdown projectDir={currentProject || undefined} />
-              <Divider sx={{ my: 2 }} />
-              <DependencyGraph projectDir={currentProject || undefined} />
-              <Divider sx={{ my: 2 }} />
-              <ParallelPlanView projectDir={currentProject || undefined} />
-            </CardContent>
-          </Card>
-        </Grid>
-      </Grid>
-    </Stack>
-  )
-}
-
-function AppContent() {
-  const [status, setStatus] = useState<ProjectStatus | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null)
-  const [authChecked, setAuthChecked] = useState(false)
-  const [currentProject, setCurrentProject] = useState<string | null>(() => localStorage.getItem(STORAGE_KEY_PROJECT))
-  const [activeView, setActiveView] = useState<CockpitView>(() => {
-    const stored = localStorage.getItem(STORAGE_KEY_VIEW) as CockpitView | null
-    if (stored === 'overview' && !localStorage.getItem(STORAGE_KEY_VIEW_MIGRATION)) {
-      localStorage.setItem(STORAGE_KEY_VIEW_MIGRATION, '1')
-      return 'tasks'
-    }
-    if (isCockpitView(stored)) return stored
-    return 'tasks'
-  })
-  const [taskTab, setTaskTab] = useState<TaskDetailTab>(() => {
-    const stored = localStorage.getItem(STORAGE_KEY_TASK_TAB) as TaskDetailTab | null
-    return stored || 'summary'
-  })
-  const [hitlMode, setHitlMode] = useState('autopilot')
-  const [panelState, setPanelState] = useState<CockpitPanelState>({
-    showLauncher: false,
-    showLiveLog: true,
-  })
-
-  const { effectiveTheme, toggleTheme } = useTheme()
-  const { isOpen: paletteOpen, open: openPalette, close: closePalette } = useCommandPalette()
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY_VIEW, activeView)
-  }, [activeView])
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEY_TASK_TAB, taskTab)
-  }, [taskTab])
-
-  useEffect(() => {
-    checkAuthStatus()
-  }, [])
-
-  useEffect(() => {
-    if (authChecked && isAuthenticated()) {
-      fetchStatus()
-    }
-  }, [currentProject, authChecked])
-
-  useChannel('status', useCallback(() => {
-    if (authChecked && isAuthenticated()) {
-      fetchStatus()
-    }
-  }, [currentProject, authChecked]))
-
-  const checkAuthStatus = async () => {
-    try {
-      const response = await fetch('/api/auth/status')
-      if (response.ok) {
-        const data = await response.json()
-        setAuthStatus(data)
-        setAuthChecked(true)
-      }
-    } catch {
-      setAuthStatus({ enabled: false, authenticated: true, username: null })
-      setAuthChecked(true)
-    }
+async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init)
+  if (!response.ok) {
+    throw new Error(`${response.status} ${response.statusText}`)
   }
+  return response.json() as Promise<T>
+}
 
-  const isAuthenticated = (): boolean => {
-    if (!authStatus) return false
-    if (!authStatus.enabled) return true
-    return !!localStorage.getItem(STORAGE_KEY_TOKEN)
-  }
+export default function App() {
+  const [route, setRoute] = useState<RouteKey>(() => routeFromHash(window.location.hash || localStorage.getItem(STORAGE_ROUTE) || '#/board'))
+  const [projectDir, setProjectDir] = useState<string>(() => localStorage.getItem(STORAGE_PROJECT) || '')
+  const [board, setBoard] = useState<BoardResponse>({ columns: {} })
+  const [orchestrator, setOrchestrator] = useState<OrchestratorStatus | null>(null)
+  const [reviewQueue, setReviewQueue] = useState<TaskRecord[]>([])
+  const [agents, setAgents] = useState<AgentRecord[]>([])
+  const [projects, setProjects] = useState<ProjectRef[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string>('')
 
-  const handleLoginSuccess = (token: string, username: string) => {
-    localStorage.setItem(STORAGE_KEY_TOKEN, token)
-    localStorage.setItem(STORAGE_KEY_USERNAME, username)
-    setAuthStatus({
-      enabled: true,
-      authenticated: true,
-      username,
-    })
+  const [workOpen, setWorkOpen] = useState(false)
+  const [createTab, setCreateTab] = useState<CreateTab>('task')
+  const [selectedTaskId, setSelectedTaskId] = useState<string>('')
+
+  const [newTaskTitle, setNewTaskTitle] = useState('')
+  const [newTaskDescription, setNewTaskDescription] = useState('')
+  const [newTaskPriority, setNewTaskPriority] = useState('P2')
+
+  const [importText, setImportText] = useState('')
+  const [importJobId, setImportJobId] = useState('')
+  const [importPreview, setImportPreview] = useState<PrdPreview | null>(null)
+
+  const [quickPrompt, setQuickPrompt] = useState('')
+
+  const [manualPinPath, setManualPinPath] = useState('')
+  const [allowNonGit, setAllowNonGit] = useState(false)
+  const [projectSearch, setProjectSearch] = useState('')
+
+  useEffect(() => {
+    const syncFromHash = () => {
+      const next = routeFromHash(window.location.hash)
+      setRoute(next)
+      localStorage.setItem(STORAGE_ROUTE, toHash(next))
+    }
+    window.addEventListener('hashchange', syncFromHash)
+    if (!window.location.hash) {
+      window.location.hash = toHash(route)
+    }
+    return () => window.removeEventListener('hashchange', syncFromHash)
+  }, [route])
+
+  useEffect(() => {
+    if (projectDir) {
+      localStorage.setItem(STORAGE_PROJECT, projectDir)
+    } else {
+      localStorage.removeItem(STORAGE_PROJECT)
+    }
+  }, [projectDir])
+
+  async function reloadAll(): Promise<void> {
     setLoading(true)
-  }
-
-  const handleLogout = () => {
-    localStorage.removeItem(STORAGE_KEY_TOKEN)
-    localStorage.removeItem(STORAGE_KEY_USERNAME)
-    setAuthStatus({ enabled: true, authenticated: false, username: null })
-  }
-
-  const fetchStatus = useCallback(async () => {
+    setError('')
     try {
-      const url = currentProject
-        ? `/api/status?project_dir=${encodeURIComponent(currentProject)}`
-        : '/api/status'
-
-      const headers: HeadersInit = {}
-      const token = localStorage.getItem(STORAGE_KEY_TOKEN)
-      if (token) headers.Authorization = `Bearer ${token}`
-
-      const response = await fetch(url, { headers })
-      if (!response.ok) throw new Error(`HTTP error ${response.status}`)
-
-      const data = await response.json()
-      setStatus(data)
-      setError(null)
+      const [boardData, orchestratorData, reviewData, agentData, projectData] = await Promise.all([
+        requestJson<BoardResponse>(buildApiUrl('/api/v3/tasks/board', projectDir)),
+        requestJson<OrchestratorStatus>(buildApiUrl('/api/v3/orchestrator/status', projectDir)),
+        requestJson<{ tasks: TaskRecord[] }>(buildApiUrl('/api/v3/review-queue', projectDir)),
+        requestJson<{ agents: AgentRecord[] }>(buildApiUrl('/api/v3/agents', projectDir)),
+        requestJson<{ projects: ProjectRef[] }>(buildApiUrl('/api/v3/projects', projectDir)),
+      ])
+      setBoard(boardData)
+      setOrchestrator(orchestratorData)
+      setReviewQueue(reviewData.tasks)
+      setAgents(agentData.agents)
+      setProjects(projectData.projects)
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to fetch status')
+      setError(err instanceof Error ? err.message : 'Failed to load data')
     } finally {
       setLoading(false)
     }
-  }, [currentProject])
-
-  const handleProjectChange = (projectPath: string) => {
-    setCurrentProject(projectPath)
-    localStorage.setItem(STORAGE_KEY_PROJECT, projectPath)
-    setLoading(true)
   }
 
-  const handleRunStarted = () => {
-    setPanelState((prev) => ({ ...prev, showLauncher: false }))
-    fetchStatus()
+  useEffect(() => {
+    void reloadAll()
+  }, [projectDir])
+
+  useEffect(() => {
+    const socket = new WebSocket(`${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`)
+    socket.addEventListener('open', () => {
+      socket.send(JSON.stringify({ action: 'subscribe', channels: ['tasks', 'queue', 'agents', 'review', 'quick_actions', 'notifications', 'system'] }))
+    })
+    socket.addEventListener('message', () => {
+      void reloadAll()
+    })
+    socket.addEventListener('error', () => {
+      socket.close()
+    })
+    return () => socket.close()
+  }, [projectDir])
+
+  async function submitTask(event: FormEvent): Promise<void> {
+    event.preventDefault()
+    if (!newTaskTitle.trim()) return
+    await requestJson<{ task: TaskRecord }>(buildApiUrl('/api/v3/tasks', projectDir), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: newTaskTitle.trim(),
+        description: newTaskDescription,
+        priority: newTaskPriority,
+        status: 'backlog',
+      }),
+    })
+    setNewTaskTitle('')
+    setNewTaskDescription('')
+    setNewTaskPriority('P2')
+    setWorkOpen(false)
+    await reloadAll()
   }
 
-  const commands: Command[] = useMemo(() => [
-    {
-      id: 'nav-overview',
-      label: 'Go to Overview',
-      category: 'Navigation',
-      icon: 'O',
-      shortcut: 'O',
-      action: () => setActiveView('overview'),
-    },
-    {
-      id: 'nav-execution',
-      label: 'Go to Execution',
-      category: 'Navigation',
-      icon: 'E',
-      shortcut: 'E',
-      action: () => setActiveView('execution'),
-    },
-    {
-      id: 'nav-tasks',
-      label: 'Go to Tasks',
-      category: 'Navigation',
-      icon: 'T',
-      shortcut: 'T',
-      action: () => setActiveView('tasks'),
-    },
-    {
-      id: 'nav-agents',
-      label: 'Go to Agents',
-      category: 'Navigation',
-      icon: 'A',
-      shortcut: 'A',
-      action: () => setActiveView('agents'),
-    },
-    {
-      id: 'nav-diagnostics',
-      label: 'Go to Diagnostics',
-      category: 'Navigation',
-      icon: 'D',
-      shortcut: 'G',
-      action: () => setActiveView('diagnostics'),
-    },
-    {
-      id: 'toggle-theme',
-      label: `Switch to ${effectiveTheme === 'light' ? 'Dark' : 'Light'} Mode`,
-      category: 'Settings',
-      icon: effectiveTheme === 'light' ? 'M' : 'S',
-      shortcut: 'Shift+T',
-      action: toggleTheme,
-    },
-    {
-      id: 'toggle-launcher',
-      label: panelState.showLauncher ? 'Hide Task Launcher' : 'Launch New Run',
-      category: 'Actions',
-      icon: 'L',
-      shortcut: 'L',
-      action: () => {
-        setActiveView('execution')
-        setPanelState((prev) => ({ ...prev, showLauncher: !prev.showLauncher }))
-      },
-    },
-    {
-      id: 'toggle-log',
-      label: panelState.showLiveLog ? 'Hide Live Log' : 'Show Live Log',
-      category: 'Actions',
-      icon: 'R',
-      shortcut: 'V',
-      action: () => setPanelState((prev) => ({ ...prev, showLiveLog: !prev.showLiveLog })),
-    },
-    {
-      id: 'refresh',
-      label: 'Refresh Status',
-      category: 'Actions',
-      icon: 'R',
-      shortcut: 'R',
-      action: fetchStatus,
-    },
-  ], [effectiveTheme, toggleTheme, panelState, fetchStatus])
+  async function previewImport(event: FormEvent): Promise<void> {
+    event.preventDefault()
+    if (!importText.trim()) return
+    const preview = await requestJson<{ job_id: string; preview: PrdPreview }>(buildApiUrl('/api/v3/import/prd/preview', projectDir), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: importText, default_priority: 'P2' }),
+    })
+    setImportJobId(preview.job_id)
+    setImportPreview(preview.preview)
+  }
 
-  if (!authChecked) {
+  async function commitImport(): Promise<void> {
+    if (!importJobId) return
+    await requestJson<{ created_task_ids: string[] }>(buildApiUrl('/api/v3/import/prd/commit', projectDir), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ job_id: importJobId }),
+    })
+    setImportJobId('')
+    setImportPreview(null)
+    setImportText('')
+    setWorkOpen(false)
+    await reloadAll()
+  }
+
+  async function submitQuickAction(event: FormEvent): Promise<void> {
+    event.preventDefault()
+    if (!quickPrompt.trim()) return
+    await requestJson<{ quick_action: { id: string } }>(buildApiUrl('/api/v3/quick-actions', projectDir), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt: quickPrompt.trim() }),
+    })
+    setQuickPrompt('')
+    setWorkOpen(false)
+    await reloadAll()
+  }
+
+  async function controlOrchestrator(action: 'pause' | 'resume' | 'drain' | 'stop'): Promise<void> {
+    await requestJson<OrchestratorStatus>(buildApiUrl('/api/v3/orchestrator/control', projectDir), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action }),
+    })
+    await reloadAll()
+  }
+
+  async function reviewAction(taskId: string, action: 'approve' | 'request-changes'): Promise<void> {
+    const endpoint = action === 'approve' ? `/api/v3/review/${taskId}/approve` : `/api/v3/review/${taskId}/request-changes`
+    await requestJson<{ task: TaskRecord }>(buildApiUrl(endpoint, projectDir), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    })
+    await reloadAll()
+  }
+
+  async function spawnAgent(): Promise<void> {
+    await requestJson<{ agent: AgentRecord }>(buildApiUrl('/api/v3/agents/spawn', projectDir), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ role: 'general', capacity: 1 }),
+    })
+    await reloadAll()
+  }
+
+  async function agentAction(agentId: string, action: 'pause' | 'resume' | 'terminate'): Promise<void> {
+    await requestJson<{ agent: AgentRecord }>(buildApiUrl(`/api/v3/agents/${agentId}/${action}`, projectDir), { method: 'POST' })
+    await reloadAll()
+  }
+
+  async function pinManualProject(event: FormEvent): Promise<void> {
+    event.preventDefault()
+    if (!manualPinPath.trim()) return
+    await requestJson<{ project: ProjectRef }>(buildApiUrl('/api/v3/projects/pinned', projectDir), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: manualPinPath.trim(), allow_non_git: allowNonGit }),
+    })
+    setManualPinPath('')
+    await reloadAll()
+  }
+
+  function renderBoard(): JSX.Element {
+    const columns = ['backlog', 'ready', 'in_progress', 'in_review', 'blocked', 'done']
+    const allTasks = columns.flatMap((column) => board.columns[column] || [])
+    const selectedTask = allTasks.find((task) => task.id === selectedTaskId) || allTasks[0]
+    const queueTasks = [...(board.columns.ready || []), ...(board.columns.in_progress || [])]
     return (
-      <Box component="main" sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
-        <LoadingSpinner size="lg" label="Checking authentication..." />
-      </Box>
+      <section className="panel">
+        <header className="panel-head">
+          <h2>Board</h2>
+          <button className="button button-primary" onClick={() => setWorkOpen(true)}>Create Work</button>
+        </header>
+        <div className="workbench-grid">
+          <article className="workbench-pane">
+            <h3>Kanban</h3>
+            <div className="board-grid">
+              {columns.map((column) => (
+                <article className="board-col" key={column}>
+                  <h3>{column.replace('_', ' ')}</h3>
+                  <div className="card-list">
+                    {(board.columns[column] || []).map((task) => (
+                      <button className="task-card task-card-button" key={task.id} onClick={() => setSelectedTaskId(task.id)}>
+                        <p className="task-title">{task.title}</p>
+                        <p className="task-meta">{task.priority} · {task.id}</p>
+                        {task.description ? <p className="task-desc">{task.description}</p> : null}
+                      </button>
+                    ))}
+                  </div>
+                </article>
+              ))}
+            </div>
+          </article>
+          <article className="workbench-pane">
+            <h3>Task Detail</h3>
+            {selectedTask ? (
+              <div className="detail-card">
+                <p className="task-title">{selectedTask.title}</p>
+                <p className="task-meta">{selectedTask.id} · {selectedTask.priority} · {selectedTask.status}</p>
+                {selectedTask.description ? <p className="task-desc">{selectedTask.description}</p> : <p className="task-desc">No description.</p>}
+                <p className="field-label">Blockers: {(selectedTask.blocked_by || []).join(', ') || 'None'}</p>
+                <p className="field-label">Activity: Review queue size is {reviewQueue.length}. Trigger actions from Review Queue.</p>
+              </div>
+            ) : (
+              <p className="empty">No tasks on board yet.</p>
+            )}
+          </article>
+          <article className="workbench-pane">
+            <h3>Queue & Agents</h3>
+            <div className="list-stack">
+              <p className="field-label">Queue depth: {orchestrator?.queue_depth ?? 0}</p>
+              <p className="field-label">In progress: {orchestrator?.in_progress ?? 0}</p>
+              {queueTasks.slice(0, 5).map((task) => (
+                <div key={task.id} className="row-card">
+                  <p className="task-title">{task.title}</p>
+                  <p className="task-meta">{task.status}</p>
+                </div>
+              ))}
+              {queueTasks.length === 0 ? <p className="empty">No queued or running tasks.</p> : null}
+              <p className="field-label">Agents ({agents.length})</p>
+              {agents.slice(0, 4).map((agent) => (
+                <div key={agent.id} className="row-card">
+                  <p className="task-title">{agent.role}</p>
+                  <p className="task-meta">{agent.status}</p>
+                </div>
+              ))}
+            </div>
+          </article>
+        </div>
+      </section>
     )
   }
 
-  if (authStatus?.enabled && !isAuthenticated()) {
+  function renderExecution(): JSX.Element {
     return (
-      <Box component="main">
-        <Login onLoginSuccess={handleLoginSuccess} />
-      </Box>
+      <section className="panel">
+        <header className="panel-head">
+          <h2>Execution</h2>
+          <div className="inline-actions">
+            <button className="button" onClick={() => void controlOrchestrator('pause')}>Pause</button>
+            <button className="button" onClick={() => void controlOrchestrator('resume')}>Resume</button>
+            <button className="button" onClick={() => void controlOrchestrator('drain')}>Drain</button>
+            <button className="button button-danger" onClick={() => void controlOrchestrator('stop')}>Stop</button>
+          </div>
+        </header>
+        <div className="status-grid">
+          <div className="status-card">
+            <span>State</span>
+            <strong>{orchestrator?.status ?? 'unknown'}</strong>
+          </div>
+          <div className="status-card">
+            <span>Queue</span>
+            <strong>{orchestrator?.queue_depth ?? 0}</strong>
+          </div>
+          <div className="status-card">
+            <span>In Progress</span>
+            <strong>{orchestrator?.in_progress ?? 0}</strong>
+          </div>
+          <div className="status-card">
+            <span>Run Branch</span>
+            <strong>{orchestrator?.run_branch || '-'}</strong>
+          </div>
+        </div>
+      </section>
     )
   }
 
-  if (loading) {
+  function renderReviewQueue(): JSX.Element {
     return (
-      <Box component="main" sx={{ minHeight: '100vh', display: 'grid', placeItems: 'center' }}>
-        <Stack spacing={2} alignItems="center">
-          <CircularProgress size={28} />
-          <Typography color="text.secondary">Loading cockpit...</Typography>
-        </Stack>
-      </Box>
+      <section className="panel">
+        <header className="panel-head">
+          <h2>Review Queue</h2>
+        </header>
+        <div className="list-stack">
+          {reviewQueue.map((task) => (
+            <div className="row-card" key={task.id}>
+              <div>
+                <p className="task-title">{task.title}</p>
+                <p className="task-meta">{task.id}</p>
+              </div>
+              <div className="inline-actions">
+                <button className="button" onClick={() => void reviewAction(task.id, 'request-changes')}>Request changes</button>
+                <button className="button button-primary" onClick={() => void reviewAction(task.id, 'approve')}>Approve</button>
+              </div>
+            </div>
+          ))}
+          {reviewQueue.length === 0 ? <p className="empty">No tasks waiting for review.</p> : null}
+        </div>
+      </section>
     )
   }
 
-  if (error) {
+  function renderAgents(): JSX.Element {
     return (
-      <Box component="main" sx={{ p: 3, maxWidth: 760, mx: 'auto', mt: 10 }}>
-        <Typography variant="h5" sx={{ mb: 1 }}>
-          Connection Error
-        </Typography>
-        <Alert severity="error" sx={{ mb: 2 }}>
-          Connection error: {error}
-        </Alert>
-        <Typography color="text.secondary" sx={{ mb: 2 }}>
-          {currentProject
-            ? 'Ensure the selected project has a valid .prd_runner directory.'
-            : 'Select a project or ensure the backend server is running on port 8080.'}
-        </Typography>
-        <Button variant="contained" onClick={fetchStatus}>Retry</Button>
-      </Box>
+      <section className="panel">
+        <header className="panel-head">
+          <h2>Agents</h2>
+          <button className="button button-primary" onClick={() => void spawnAgent()}>Spawn agent</button>
+        </header>
+        <div className="list-stack">
+          {agents.map((agent) => (
+            <div className="row-card" key={agent.id}>
+              <div>
+                <p className="task-title">{agent.role}</p>
+                <p className="task-meta">{agent.id} · {agent.status}</p>
+              </div>
+              <div className="inline-actions">
+                <button className="button" onClick={() => void agentAction(agent.id, 'pause')}>Pause</button>
+                <button className="button" onClick={() => void agentAction(agent.id, 'resume')}>Resume</button>
+                <button className="button button-danger" onClick={() => void agentAction(agent.id, 'terminate')}>Terminate</button>
+              </div>
+            </div>
+          ))}
+          {agents.length === 0 ? <p className="empty">No agents active.</p> : null}
+        </div>
+      </section>
     )
   }
 
-  const username = localStorage.getItem(STORAGE_KEY_USERNAME) || authStatus?.username
-  const statusSummary = mapStatusSummary(status?.status)
+  function renderSettings(): JSX.Element {
+    const filteredProjects = projects.filter((project) => project.path.toLowerCase().includes(projectSearch.toLowerCase()))
+    return (
+      <section className="panel">
+        <header className="panel-head">
+          <h2>Settings</h2>
+        </header>
 
-  const executionContent = (
-    <Stack spacing={2.5}>
-      <ViewGuide
-        title="Execution workflow"
-        steps={[
-          'Check Run Snapshot first to see current run state and blockers.',
-          'Use Run Controls to retry, skip, resume, or stop.',
-          'Use Queue Monitor and Live Log to track active execution.',
-        ]}
-      />
-      <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1.5} useFlexGap flexWrap="wrap">
-        <Stack direction="row" spacing={1} alignItems="center">
-          <Typography variant="h5">Execution</Typography>
-          <Chip size="small" variant="outlined" color={statusSummary.color} label={statusSummary.label} />
-        </Stack>
-        <Stack direction="row" spacing={1} useFlexGap flexWrap="wrap">
-          <Button
-            variant={panelState.showLauncher ? 'outlined' : 'contained'}
-            onClick={() => setPanelState((prev) => ({ ...prev, showLauncher: !prev.showLauncher }))}
-          >
-            {panelState.showLauncher ? 'Hide Launcher' : 'Launch New Run'}
-          </Button>
-          <Button
-            variant="outlined"
-            onClick={() => setPanelState((prev) => ({ ...prev, showLiveLog: !prev.showLiveLog }))}
-          >
-            {panelState.showLiveLog ? 'Hide Live Log' : 'Show Live Log'}
-          </Button>
-        </Stack>
-      </Stack>
-
-      {panelState.showLauncher && (
-        <Card>
-          <CardContent>
-            <TaskLauncher projectDir={currentProject} onRunStarted={handleRunStarted} />
-          </CardContent>
-        </Card>
-      )}
-
-      <Card>
-        <CardContent>
-          <Typography variant="h6" sx={{ mb: 1.5 }}>Run Snapshot</Typography>
-          <RunDashboard status={status} />
-        </CardContent>
-      </Card>
-
-      <Grid container spacing={2}>
-        <Grid size={{ xs: 12, lg: panelState.showLiveLog ? 8 : 12 }}>
-          <Stack spacing={2}>
-            <Card>
-              <CardContent>
-                <Typography variant="h6" sx={{ mb: 1.5 }}>Run Controls</Typography>
-                <ControlPanel
-                  currentTaskId={status?.current_task_id}
-                  currentPhaseId={status?.current_phase_id}
-                  status={status?.status}
-                  projectDir={currentProject || undefined}
-                />
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent>
-                <Typography variant="h6" sx={{ mb: 1.5 }}>Approvals and Review</Typography>
-                <ApprovalGate projectDir={currentProject || undefined} />
-                <Divider sx={{ my: 2 }} />
-                <FileReview taskId={status?.current_task_id} projectDir={currentProject || undefined} />
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent>
-                <Typography variant="h6" sx={{ mb: 1.5 }}>Breakpoints</Typography>
-                <BreakpointsPanel projectDir={currentProject || undefined} />
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent>
-                <Typography variant="h6" sx={{ mb: 1.5 }}>Queue Monitor</Typography>
-                <Grid container spacing={2}>
-                  <Grid size={{ xs: 12, xl: 6 }}>
-                    <TasksPanel
-                      projectDir={currentProject || undefined}
-                      currentTaskId={status?.current_task_id}
-                    />
-                  </Grid>
-                  <Grid size={{ xs: 12, xl: 6 }}>
-                    <RunsPanel
-                      projectDir={currentProject || undefined}
-                      currentRunId={status?.run_id}
-                    />
-                  </Grid>
-                </Grid>
-              </CardContent>
-            </Card>
-          </Stack>
-        </Grid>
-        {panelState.showLiveLog && (
-          <Grid size={{ xs: 12, lg: 4 }}>
-            <Stack spacing={2}>
-              <Card>
-                <CardContent>
-                  <Typography variant="h6" sx={{ mb: 1.5 }}>Live Log</Typography>
-                  {status?.run_id ? (
-                    <LiveLog runId={status.run_id} projectDir={currentProject || undefined} />
-                  ) : (
-                    <Alert severity="info">Start a run to stream logs.</Alert>
-                  )}
-                </CardContent>
-              </Card>
-              <Card>
-                <CardContent>
-                  <QuickRunsPanel projectDir={currentProject || undefined} />
-                </CardContent>
-              </Card>
-            </Stack>
-          </Grid>
-        )}
-      </Grid>
-
-      {!panelState.showLiveLog && (
-        <Card>
-          <CardContent>
-            <QuickRunsPanel projectDir={currentProject || undefined} />
-          </CardContent>
-        </Card>
-      )}
-    </Stack>
-  )
-
-  const taskContent = (
-    <Stack spacing={2.5}>
-      <ViewGuide
-        title="Task workflow"
-        steps={[
-          'Filter the board to find critical or blocked items.',
-          'Open Task Detail Workbench for dependencies, logs, and interventions.',
-          'Use Save View for repeated filter sets.',
-        ]}
-      />
-      <Typography variant="h5">Tasks</Typography>
-      <Card>
-        <CardContent>
-          <KanbanBoard projectDir={currentProject || undefined} />
-        </CardContent>
-      </Card>
-      <Card>
-        <CardContent>
-          <Typography variant="h6" sx={{ mb: 1.5 }}>Task Detail Workbench</Typography>
-          <Tabs
-            value={taskTab}
-            onChange={(_, value: TaskDetailTab) => setTaskTab(value)}
-            variant="scrollable"
-            allowScrollButtonsMobile
-          >
-            <Tab value="summary" label="Summary" />
-            <Tab value="dependencies" label="Dependencies" />
-            <Tab value="logs" label="Logs" />
-            <Tab value="interventions" label="Interventions" />
-          </Tabs>
-          <Divider sx={{ my: 2 }} />
-
-          {taskTab === 'summary' && (
-            <Grid container spacing={2}>
-              <Grid size={{ xs: 12, lg: 6 }}>
-                <TasksPanel
-                  projectDir={currentProject || undefined}
-                  currentTaskId={status?.current_task_id}
-                />
-              </Grid>
-              <Grid size={{ xs: 12, lg: 6 }}>
-                <RunsPanel
-                  projectDir={currentProject || undefined}
-                  currentRunId={status?.run_id}
-                />
-              </Grid>
-            </Grid>
-          )}
-
-          {taskTab === 'dependencies' && (
-            <Stack spacing={2}>
-              <DependencyGraph projectDir={currentProject || undefined} />
-              <ParallelPlanView projectDir={currentProject || undefined} />
-            </Stack>
-          )}
-
-          {taskTab === 'logs' && (
-            status?.run_id
-              ? <LiveLog runId={status.run_id} projectDir={currentProject || undefined} />
-              : <Alert severity="info">No active run logs available.</Alert>
-          )}
-
-          {taskTab === 'interventions' && (
-            <Stack spacing={2}>
-              <RequirementForm projectDir={currentProject || undefined} />
-              <Typography variant="body2" color="text.secondary">
-                Use the floating chat entry point to collaborate with the worker.
-              </Typography>
-            </Stack>
-          )}
-        </CardContent>
-      </Card>
-    </Stack>
-  )
-
-  const agentsContent = (
-    <Stack spacing={2.5}>
-      <ViewGuide
-        title="Agent operations"
-        steps={[
-          'Pick a collaboration mode in the left panel.',
-          'Check worker/provider health before long runs.',
-          'Use the right pane to inspect active agent activity.',
-        ]}
-      />
-      <Typography variant="h5">Agents</Typography>
-      <Grid container spacing={2}>
-        <Grid size={{ xs: 12, lg: 4 }}>
-          <Stack spacing={2}>
-            <Card sx={{ overflow: 'visible' }}>
-              <CardContent sx={{ overflow: 'visible' }}>
-                <HITLModeSelector
-                  currentMode={hitlMode}
-                  onModeChange={setHitlMode}
-                  projectDir={currentProject || undefined}
-                />
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent>
-                <WorkersPanel projectDir={currentProject || undefined} />
-              </CardContent>
-            </Card>
-          </Stack>
-        </Grid>
-        <Grid size={{ xs: 12, lg: 8 }}>
-          <Card>
-            <CardContent>
-              <AgentPanel projectDir={currentProject || undefined} />
-              <Divider sx={{ my: 2 }} />
-              <Alert severity="info" variant="outlined" sx={{ mb: 1.5 }}>
-                <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
-                  What "Add Requirement" does
-                </Typography>
-                <Typography variant="body2">
-                  Sends a new product requirement into this project's task queue so agents can plan and execute it.
-                </Typography>
-                <Typography variant="body2" sx={{ mt: 0.5 }}>
-                  Use this for new work, scope changes, or mid-run clarifications.
-                </Typography>
-                <Typography variant="body2" sx={{ mt: 0.75, fontFamily: '"IBM Plex Mono", monospace' }}>
-                  Example: Add rate-limited login attempts with audit logging and tests.
-                </Typography>
-              </Alert>
-              <RequirementForm projectDir={currentProject || undefined} />
-            </CardContent>
-          </Card>
-        </Grid>
-      </Grid>
-    </Stack>
-  )
-
-  const diagnosticsContent = (
-    <Stack spacing={2.5}>
-      <ViewGuide
-        title="Diagnostics workflow"
-        steps={[
-          'Run Dry Run first to preview the next action.',
-          'Run Doctor for environment/config issues.',
-          'Use metrics and cost panels to identify regressions.',
-        ]}
-      />
-      <Typography variant="h5">Diagnostics</Typography>
-      <Grid container spacing={2}>
-        <Grid size={{ xs: 12, lg: 6 }}>
-          <Card><CardContent><DryRunPanel projectDir={currentProject || undefined} /></CardContent></Card>
-        </Grid>
-        <Grid size={{ xs: 12, lg: 6 }}>
-          <Card><CardContent><DoctorPanel projectDir={currentProject || undefined} /></CardContent></Card>
-        </Grid>
-      </Grid>
-      <Card><CardContent><MetricsPanel projectDir={currentProject || undefined} /></CardContent></Card>
-      <Card><CardContent><MetricsChart projectDir={currentProject || undefined} /></CardContent></Card>
-      <Card><CardContent><CostBreakdown projectDir={currentProject || undefined} /></CardContent></Card>
-    </Stack>
-  )
-
-  return (
-    <>
-      <Box className="sr-only" aria-live="polite" aria-atomic="true">
-        {`Run status ${statusSummary.label}`}
-      </Box>
-
-      <AppShell
-        title="Feature PRD Runner"
-        sections={navSections}
-        activeSection={activeView}
-        onSectionChange={setActiveView}
-        statusSummary={statusSummary}
-        commandHint="Cmd/Ctrl + K"
-        onOpenCommandPalette={openPalette}
-        commandBarCenter={(
-          <Box sx={{ width: { xs: '100%', md: 420 }, maxWidth: '100%' }}>
-            <ProjectSelector
-              currentProject={currentProject}
-              onProjectChange={handleProjectChange}
+        <div className="settings-grid">
+          <article className="settings-card">
+            <h3>Projects</h3>
+            <label className="field-label" htmlFor="project-selector">Active project</label>
+            <input
+              id="project-search"
+              value={projectSearch}
+              onChange={(event) => setProjectSearch(event.target.value)}
+              placeholder="Search discovered/pinned projects"
             />
-          </Box>
-        )}
-        commandBarRight={(
-          <Stack direction="row" spacing={1.2} alignItems="center">
-            <IconButton aria-label="Refresh status" onClick={fetchStatus}>
-              <RefreshIcon />
-            </IconButton>
-            <NotificationCenter />
-            <ThemeToggle />
-            {username && (
-              <Chip size="small" variant="outlined" label={username} />
-            )}
-            {authStatus?.enabled && (
-              <Button
-                size="small"
-                color="error"
-                variant="outlined"
-                startIcon={<LogoutIcon />}
-                onClick={handleLogout}
-              >
-                Logout
-              </Button>
-            )}
-          </Stack>
-        )}
-        rightRail={<ActivityRail status={status} currentProject={currentProject} />}
-      >
-        <Suspense
-          fallback={(
-            <Box sx={{ minHeight: 220, display: 'grid', placeItems: 'center' }}>
-              <LoadingSpinner label="Loading section..." />
-            </Box>
-          )}
-        >
-          {activeView === 'overview' && <CockpitOverview status={status} currentProject={currentProject} />}
-          {activeView === 'execution' && executionContent}
-          {activeView === 'tasks' && taskContent}
-          {activeView === 'agents' && agentsContent}
-          {activeView === 'diagnostics' && diagnosticsContent}
-        </Suspense>
-      </AppShell>
+            <select
+              id="project-selector"
+              value={projectDir}
+              onChange={(event) => setProjectDir(event.target.value)}
+            >
+              <option value="">Current workspace</option>
+              {filteredProjects.map((project) => (
+                <option key={`${project.id}-${project.path}`} value={project.path}>
+                  {project.path} ({project.source})
+                </option>
+              ))}
+            </select>
 
-      <CommandPalette
-        commands={commands}
-        isOpen={paletteOpen}
-        onClose={closePalette}
-      />
+            <form className="form-stack" onSubmit={(event) => void pinManualProject(event)}>
+              <label className="field-label" htmlFor="manual-project-path">Pin project by absolute path</label>
+              <input
+                id="manual-project-path"
+                value={manualPinPath}
+                onChange={(event) => setManualPinPath(event.target.value)}
+                placeholder="/absolute/path/to/repo"
+                required
+              />
+              <label className="checkbox-row">
+                <input
+                  type="checkbox"
+                  checked={allowNonGit}
+                  onChange={(event) => setAllowNonGit(event.target.checked)}
+                />
+                Allow non-git directory
+              </label>
+              <button className="button button-primary" type="submit">Pin project</button>
+            </form>
+          </article>
 
-      <Chat runId={status?.run_id} projectDir={currentProject || undefined} />
+          <article className="settings-card">
+            <h3>Diagnostics</h3>
+            <p>Schema version: 3</p>
+            <p>Selected route: {route}</p>
+            <p>Project dir: {projectDir || 'current workspace'}</p>
+          </article>
+        </div>
+      </section>
+    )
+  }
 
-      <Box sx={{ display: 'none' }}>
-        {dashboardLayoutConfig.now.join(',')}
-        {dashboardLayoutConfig.flow.join(',')}
-        {dashboardLayoutConfig.insights.join(',')}
-      </Box>
-    </>
-  )
-}
-
-function CockpitThemeRoot() {
-  const { effectiveTheme } = useTheme()
-  const muiTheme = useMemo(() => createCockpitTheme(effectiveTheme), [effectiveTheme])
+  function renderRoute(): JSX.Element {
+    if (route === 'execution') return renderExecution()
+    if (route === 'review') return renderReviewQueue()
+    if (route === 'agents') return renderAgents()
+    if (route === 'settings') return renderSettings()
+    return renderBoard()
+  }
 
   return (
-    <MuiThemeProvider theme={muiTheme}>
-      <CssBaseline />
-      <ToastProvider>
-        <WebSocketProvider>
-          <AppContent />
-        </WebSocketProvider>
-      </ToastProvider>
-    </MuiThemeProvider>
+    <div className="orchestrator-app">
+      <div className="bg-layer" aria-hidden="true" />
+      <header className="topbar">
+        <div>
+          <p className="kicker">orchestrator-first</p>
+          <h1>Feature PRD Runner</h1>
+        </div>
+        <div className="topbar-actions">
+          <button className="button" onClick={() => void reloadAll()} disabled={loading}>Refresh</button>
+          <button className="button button-primary" onClick={() => setWorkOpen(true)}>Create Work</button>
+        </div>
+      </header>
+
+      <nav className="nav-strip" aria-label="Main navigation">
+        {ROUTES.map((item) => (
+          <button
+            key={item.key}
+            className={`nav-pill ${route === item.key ? 'is-active' : ''}`}
+            onClick={() => {
+              window.location.hash = toHash(item.key)
+              setRoute(item.key)
+            }}
+          >
+            {item.label}
+          </button>
+        ))}
+      </nav>
+
+      <main>{renderRoute()}</main>
+
+      {error ? <p className="error-banner">{error}</p> : null}
+
+      {workOpen ? (
+        <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Create Work modal">
+          <div className="modal-card">
+            <header className="panel-head">
+              <h2>Create Work</h2>
+              <button className="button" onClick={() => setWorkOpen(false)}>Close</button>
+            </header>
+
+            <div className="tab-row">
+              <button className={`tab ${createTab === 'task' ? 'is-active' : ''}`} onClick={() => setCreateTab('task')}>Create Task</button>
+              <button className={`tab ${createTab === 'import' ? 'is-active' : ''}`} onClick={() => setCreateTab('import')}>Import PRD</button>
+              <button className={`tab ${createTab === 'quick' ? 'is-active' : ''}`} onClick={() => setCreateTab('quick')}>Quick Action</button>
+            </div>
+
+            {createTab === 'task' ? (
+              <form className="form-stack" onSubmit={(event) => void submitTask(event)}>
+                <label className="field-label" htmlFor="task-title">Title</label>
+                <input id="task-title" value={newTaskTitle} onChange={(event) => setNewTaskTitle(event.target.value)} required />
+                <label className="field-label" htmlFor="task-description">Description</label>
+                <textarea id="task-description" rows={4} value={newTaskDescription} onChange={(event) => setNewTaskDescription(event.target.value)} />
+                <label className="field-label" htmlFor="task-priority">Priority</label>
+                <select id="task-priority" value={newTaskPriority} onChange={(event) => setNewTaskPriority(event.target.value)}>
+                  <option value="P0">P0</option>
+                  <option value="P1">P1</option>
+                  <option value="P2">P2</option>
+                  <option value="P3">P3</option>
+                </select>
+                <button className="button button-primary" type="submit">Create Task</button>
+              </form>
+            ) : null}
+
+            {createTab === 'import' ? (
+              <div className="form-stack">
+                <form className="form-stack" onSubmit={(event) => void previewImport(event)}>
+                  <label className="field-label" htmlFor="prd-text">PRD text</label>
+                  <textarea id="prd-text" rows={8} value={importText} onChange={(event) => setImportText(event.target.value)} placeholder="- Task 1\n- Task 2" required />
+                  <button className="button" type="submit">Preview</button>
+                </form>
+                {importJobId ? (
+                  <div className="preview-box">
+                    <p>Preview ready: {importJobId}</p>
+                    {importPreview ? (
+                      <div className="import-preview-graph">
+                        <p className="field-label">Preview Graph</p>
+                        {importPreview.nodes.map((node) => (
+                          <div key={node.id} className="import-node">
+                            <span>{node.id}</span>
+                            <span>{node.title}</span>
+                            <span>{node.priority}</span>
+                          </div>
+                        ))}
+                        {importPreview.edges.length > 0 ? (
+                          <p className="field-label">
+                            Edges: {importPreview.edges.map((edge) => `${edge.from} -> ${edge.to}`).join(', ')}
+                          </p>
+                        ) : (
+                          <p className="field-label">Edges: none</p>
+                        )}
+                      </div>
+                    ) : null}
+                    <button className="button button-primary" onClick={() => void commitImport()}>Commit to board</button>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+
+            {createTab === 'quick' ? (
+              <form className="form-stack" onSubmit={(event) => void submitQuickAction(event)}>
+                <p className="hint">Quick Action is ephemeral. Promote explicitly if you want it on the board.</p>
+                <label className="field-label" htmlFor="quick-prompt">Prompt</label>
+                <textarea id="quick-prompt" rows={6} value={quickPrompt} onChange={(event) => setQuickPrompt(event.target.value)} required />
+                <button className="button button-primary" type="submit">Run Quick Action</button>
+              </form>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
   )
 }
-
-function App() {
-  return (
-    <AppThemeProvider>
-      <CockpitThemeRoot />
-    </AppThemeProvider>
-  )
-}
-
-export default App

@@ -59,7 +59,7 @@ export default function AgentPanel({ projectDir }: Props) {
   const fetchAgents = useCallback(async () => {
     try {
       const resp = await fetch(
-        buildApiUrl('/api/v2/agents', projectDir),
+        buildApiUrl('/api/v3/agents', projectDir),
         { headers: buildAuthHeaders() }
       )
       if (resp.ok) {
@@ -74,7 +74,7 @@ export default function AgentPanel({ projectDir }: Props) {
   const fetchTypes = useCallback(async () => {
     try {
       const resp = await fetch(
-        buildApiUrl('/api/v2/agents/types', projectDir),
+        buildApiUrl('/api/v3/agents/types', projectDir),
         { headers: buildAuthHeaders() }
       )
       if (resp.ok) {
@@ -99,7 +99,7 @@ export default function AgentPanel({ projectDir }: Props) {
   const handleSpawn = async () => {
     try {
       await fetch(
-        buildApiUrl('/api/v2/agents/spawn', projectDir),
+        buildApiUrl('/api/v3/agents/spawn', projectDir),
         {
           method: 'POST',
           headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -116,7 +116,7 @@ export default function AgentPanel({ projectDir }: Props) {
   const handleAction = async (agentId: string, action: string) => {
     try {
       await fetch(
-        buildApiUrl(`/api/v2/agents/${agentId}/${action}`, projectDir),
+        buildApiUrl(`/api/v3/agents/${agentId}/${action}`, projectDir),
         { method: 'POST', headers: buildAuthHeaders() }
       )
       fetchAgents()

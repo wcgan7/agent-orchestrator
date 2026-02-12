@@ -74,7 +74,7 @@ export default function FeedbackPanel({ taskId, projectDir }: Props) {
   const fetchFeedback = useCallback(async () => {
     try {
       const resp = await fetch(
-        buildApiUrl(`/api/v2/collaboration/feedback/${taskId}`, projectDir),
+        buildApiUrl(`/api/v3/collaboration/feedback/${taskId}`, projectDir),
         { headers: buildAuthHeaders() }
       )
       if (resp.ok) {
@@ -95,7 +95,7 @@ export default function FeedbackPanel({ taskId, projectDir }: Props) {
     setSubmitting(true)
     try {
       await fetch(
-        buildApiUrl('/api/v2/collaboration/feedback', projectDir),
+        buildApiUrl('/api/v3/collaboration/feedback', projectDir),
         {
           method: 'POST',
           headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
@@ -121,7 +121,7 @@ export default function FeedbackPanel({ taskId, projectDir }: Props) {
 
   const handleDismiss = async (feedbackId: string) => {
     await fetch(
-      buildApiUrl(`/api/v2/collaboration/feedback/${feedbackId}/dismiss`, projectDir),
+      buildApiUrl(`/api/v3/collaboration/feedback/${feedbackId}/dismiss`, projectDir),
       { method: 'POST', headers: buildAuthHeaders() }
     )
     fetchFeedback()

@@ -1,5 +1,9 @@
 # Unified Task Orchestration Spec
 
+> **Status (2026-02-11):** Implemented v2 baseline spec for the current codebase.
+> **Forward plan:** [`ORCHESTRATOR_FIRST_REVAMP_PLAN.md`](ORCHESTRATOR_FIRST_REVAMP_PLAN.md)
+> **Docs index:** [`README.md`](README.md)
+
 Status: Implemented
 Owner: Core platform (backend + web)
 Last updated: 2026-02-11

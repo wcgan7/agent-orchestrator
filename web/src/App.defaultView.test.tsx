@@ -1,59 +1,100 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import App from './App'
 
-describe('App default view', () => {
+class MockWebSocket {
+  static instances: MockWebSocket[] = []
+  url: string
+  listeners: Record<string, Array<(event?: unknown) => void>> = {}
+
+  constructor(url: string) {
+    this.url = url
+    MockWebSocket.instances.push(this)
+    setTimeout(() => this.dispatch('open'), 0)
+  }
+
+  addEventListener(event: string, cb: (event?: unknown) => void) {
+    this.listeners[event] = this.listeners[event] || []
+    this.listeners[event].push(cb)
+  }
+
+  send() {}
+
+  close() {}
+
+  dispatch(event: string) {
+    for (const cb of this.listeners[event] || []) {
+      cb({})
+    }
+  }
+}
+
+describe('App default route', () => {
   beforeEach(() => {
     vi.clearAllMocks()
-    global.localStorage.clear()
+    localStorage.clear()
+    window.location.hash = ''
+    ;(globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = MockWebSocket as unknown as typeof WebSocket
+
     global.fetch = vi.fn().mockImplementation((url) => {
-      const urlString = url.toString()
-      if (urlString.includes('/api/auth/status')) {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({
-            enabled: false,
-            authenticated: true,
-            username: null,
-          }),
-        })
+      const u = String(url)
+      if (u.includes('/api/v3/tasks/board')) {
+        return Promise.resolve({ ok: true, json: async () => ({ columns: { backlog: [], ready: [], in_progress: [], in_review: [], blocked: [], done: [] } }) })
       }
-      if (urlString.includes('/api/status')) {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({
-            project_dir: '',
-            status: 'idle',
-            phases_completed: 0,
-            phases_total: 0,
-            tasks_ready: 0,
-            tasks_running: 0,
-            tasks_done: 0,
-            tasks_blocked: 0,
-          }),
-        })
+      if (u.includes('/api/v3/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
       }
-      return Promise.resolve({
-        ok: true,
-        json: async () => ({}),
-      })
-    })
+      if (u.includes('/api/v3/review-queue')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/v3/agents')) {
+        return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      }
+      if (u.includes('/api/v3/projects')) {
+        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    }) as unknown as typeof fetch
   })
 
-  it('lands on tasks when there is no saved view', async () => {
+  it('lands on Board by default', async () => {
     render(<App />)
 
     await waitFor(() => {
-      expect(screen.getByText(/task workflow/i)).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: /board/i })).toBeInTheDocument()
     })
   })
 
-  it('keeps an explicit saved view preference', async () => {
-    global.localStorage.setItem('feature-prd-runner-view', 'diagnostics')
+  it('supports the Create Work modal tabs', async () => {
     render(<App />)
 
     await waitFor(() => {
-      expect(screen.getByText(/diagnostics workflow/i)).toBeInTheDocument()
+      expect(screen.getAllByRole('button', { name: /^Create Work$/i }).length).toBeGreaterThan(0)
+    })
+
+    fireEvent.click(screen.getAllByRole('button', { name: /^Create Work$/i })[0])
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: /Create Task/i }).length).toBeGreaterThan(0)
+      expect(screen.getByRole('button', { name: /Import PRD/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Quick Action/i })).toBeInTheDocument()
+    })
+  })
+
+  it('refreshes surfaces when websocket events arrive', async () => {
+    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
+    render(<App />)
+
+    await waitFor(() => {
+      expect(mockedFetch).toHaveBeenCalled()
+    })
+    const baselineCalls = mockedFetch.mock.calls.length
+
+    expect(MockWebSocket.instances.length).toBeGreaterThan(0)
+    MockWebSocket.instances[0].dispatch('message')
+
+    await waitFor(() => {
+      expect(mockedFetch.mock.calls.length).toBeGreaterThan(baselineCalls)
     })
   })
 })

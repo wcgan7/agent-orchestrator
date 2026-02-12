@@ -110,7 +110,7 @@ export default function LiveLog({ runId, projectDir }: Props) {
 
   const fetchLogs = async () => {
     try {
-      const response = await fetch(buildApiUrl(`/api/logs/${runId}`, projectDir, { lines: 100 }), {
+      const response = await fetch(buildApiUrl(`/api/v3/logs/${runId}`, projectDir, { lines: 100 }), {
         headers: buildAuthHeaders(),
       })
       if (response.ok) {

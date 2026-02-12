@@ -40,7 +40,7 @@ export function CreateTaskModal({ projectDir, onCreated, onClose }: Props) {
 
     try {
       const resp = await fetch(
-        buildApiUrl('/api/v2/tasks', projectDir),
+        buildApiUrl('/api/v3/tasks', projectDir),
         {
           method: 'POST',
           headers: buildAuthHeaders({ 'Content-Type': 'application/json' }),
