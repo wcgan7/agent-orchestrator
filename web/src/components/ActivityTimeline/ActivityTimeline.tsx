@@ -5,6 +5,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Box, Card, Chip, Stack, Typography } from '@mui/material'
 import { buildApiUrl, buildAuthHeaders } from '../../api'
+import { humanizeLabel } from '../../ui/labels'
 
 interface ActivityEvent {
   id: string
@@ -123,7 +124,7 @@ export default function ActivityTimeline({ taskId, projectDir }: Props) {
                     </Typography>
                     <Chip
                       className={`timeline-event-type type-${event.type}`}
-                      label={event.type.replace('_', ' ')}
+                      label={humanizeLabel(event.type)}
                       size="small"
                       variant="outlined"
                       sx={{ height: 20, textTransform: 'capitalize' }}

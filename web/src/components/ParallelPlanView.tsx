@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Box, Chip, Paper, Typography } from '@mui/material'
 import { fetchExecutionOrder } from '../api'
+import { humanizeLabel } from '../ui/labels'
 
 interface Props {
   projectDir?: string
@@ -114,7 +115,7 @@ export default function ParallelPlanView({ projectDir }: Props) {
                   )}
                   {task.status && (
                     <Typography variant="caption" sx={{ mt: 0.25, display: 'block' }}>
-                      {task.status}
+                      {humanizeLabel(task.status)}
                     </Typography>
                   )}
                 </Paper>

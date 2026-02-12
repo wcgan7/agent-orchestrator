@@ -23,6 +23,7 @@ import {
   Typography,
 } from '@mui/material'
 import { buildApiUrl, buildAuthHeaders, fetchInspect, fetchExplain, fetchTaskLogs, fetchTrace } from '../../api'
+import { humanizeLabel } from '../../ui/labels'
 import FeedbackPanel from '../FeedbackPanel/FeedbackPanel'
 import ActivityTimeline from '../ActivityTimeline/ActivityTimeline'
 import ReasoningViewer from '../ReasoningViewer/ReasoningViewer'
@@ -219,7 +220,7 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated, onNavigateTas
       <Stack sx={{ height: '100%' }}>
         <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ p: 2, borderBottom: 1, borderColor: 'divider' }}>
           <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
-            <Chip size="small" label={task.task_type} sx={{ bgcolor: 'text.primary', color: 'background.paper' }} />
+            <Chip size="small" label={humanizeLabel(task.task_type)} sx={{ bgcolor: 'text.primary', color: 'background.paper' }} />
             <Typography variant="caption" color="text.secondary" sx={{ fontFamily: '"IBM Plex Mono", monospace' }}>
               {task.id}
             </Typography>
@@ -320,7 +321,7 @@ export function TaskDetail({ task, projectDir, onClose, onUpdated, onNavigateTas
               <Box>
                 <Typography variant="overline" color="text.secondary">Status</Typography>
                 <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap" sx={{ mt: 0.5 }}>
-                  <Chip size="small" color={STATUS_COLORS[task.status] || 'default'} label={task.status} />
+                  <Chip size="small" color={STATUS_COLORS[task.status] || 'default'} label={humanizeLabel(task.status)} />
                   <Stack direction="row" spacing={0.75} useFlexGap flexWrap="wrap">
                     {task.status === 'backlog' && (
                       <>
@@ -603,7 +604,7 @@ function BlockedTaskAssistant({
                 <Stack spacing={0.5}>
                   <Stack direction="row" spacing={1} alignItems="center" useFlexGap flexWrap="wrap">
                     <Typography variant="body2" sx={{ fontWeight: 700 }}>{blocker.title}</Typography>
-                    <Chip size="small" label={blocker.status} color={STATUS_COLORS[blocker.status] || 'default'} />
+                    <Chip size="small" label={humanizeLabel(blocker.status)} color={STATUS_COLORS[blocker.status] || 'default'} />
                     <Typography variant="caption" color="text.secondary" sx={{ fontFamily: '"IBM Plex Mono", monospace' }}>
                       {blocker.id}
                     </Typography>

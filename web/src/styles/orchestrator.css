@@ -11,6 +11,12 @@
   --shadow: 0 20px 40px rgba(18, 35, 26, 0.08);
 }
 
+html.modal-open,
+body.modal-open {
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
 .orchestrator-app {
   min-height: 100vh;
   position: relative;
@@ -227,14 +233,17 @@ h1 {
   color: var(--ink-1);
 }
 
-input,
+input:not([type='checkbox']):not([type='radio']),
 textarea,
 select {
   width: 100%;
   border: 1px solid var(--line);
   border-radius: 10px;
+  min-height: 2.6rem;
   padding: 0.56rem 0.62rem;
+  line-height: 1.35;
   background: #fff;
+  box-sizing: border-box;
 }
 
 .checkbox-row {
@@ -281,10 +290,50 @@ select {
   display: grid;
   place-items: center;
   padding: 1rem;
+  overscroll-behavior: contain;
 }
 
 .modal-card {
   width: min(760px, 96vw);
+  max-height: calc(100vh - 2rem);
+  overflow: auto;
+}
+
+.create-work-modal .modal-sticky-top {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--bg-2);
+  padding: 1rem 1rem 0.1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.create-work-modal .modal-sticky-top .panel-head {
+  margin-bottom: 0.55rem;
+}
+
+.create-work-modal {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.create-work-modal .modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0.9rem 1rem 1rem;
+}
+
+.create-task-form {
+  padding-bottom: 0.2rem;
+}
+
+.create-work-modal .modal-footer {
+  border-top: 1px solid var(--line);
+  padding: 0.75rem 1rem 1rem;
+  background: var(--bg-2);
 }
 
 .tab-row {
@@ -303,6 +352,46 @@ select {
 .tab.is-active {
   background: #d9efe2;
   border-color: #8ab79a;
+}
+
+.toggle-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.toggle-button {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--ink-0);
+  padding: 0.4rem 0.78rem;
+  min-height: 2.2rem;
+}
+
+.toggle-button.is-active {
+  background: #d9efe2;
+  border-color: #8ab79a;
+  color: #165638;
+}
+
+.advanced-fields {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 0.55rem 0.7rem;
+  background: rgba(246, 248, 247, 0.7);
+}
+
+.advanced-fields summary {
+  cursor: pointer;
+  color: var(--ink-1);
+  font-size: 0.84rem;
+  font-weight: 600;
+  user-select: none;
+}
+
+.advanced-fields-body {
+  margin-top: 0.65rem;
 }
 
 .preview-box {

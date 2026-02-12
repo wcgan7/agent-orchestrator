@@ -19,6 +19,7 @@ import {
 } from '@mui/material'
 import ExpandMoreIcon from '@mui/icons-material/ExpandMore'
 import { buildApiUrl, buildAuthHeaders } from '../../api'
+import { humanizeLabel } from '../../ui/labels'
 
 interface FeedbackItem {
   id: string
@@ -200,7 +201,7 @@ export default function FeedbackPanel({ taskId, projectDir }: Props) {
               <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 0.5 }}>
                 <Chip
                   size="small"
-                  label={fb.feedback_type.replace('_', ' ')}
+                  label={humanizeLabel(fb.feedback_type)}
                   variant="outlined"
                   sx={{ textTransform: 'capitalize' }}
                 />

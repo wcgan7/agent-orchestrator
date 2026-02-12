@@ -8,6 +8,7 @@ import {
 } from '@mui/material'
 import { buildApiUrl, buildAuthHeaders } from '../api'
 import { useChannel } from '../contexts/WebSocketContext'
+import { humanizeLabel } from '../ui/labels'
 import EmptyState from './EmptyState'
 import LoadingSpinner from './LoadingSpinner'
 
@@ -112,7 +113,7 @@ export default function PhaseTimeline({ projectDir }: Props) {
                 <Typography className="phase-name" fontWeight={600}>
                   {phase.name || phase.id}
                 </Typography>
-                <Chip size="small" className="phase-status" label={phase.status || 'unknown'} variant="outlined" />
+                <Chip size="small" className="phase-status" label={humanizeLabel(phase.status || 'unknown')} variant="outlined" />
               </Stack>
 
               {phase.description && (

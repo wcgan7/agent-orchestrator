@@ -3,6 +3,7 @@ import { buildApiUrl } from './api'
 import { ImportJobPanel } from './components/AppPanels/ImportJobPanel'
 import { QuickActionDetailPanel } from './components/AppPanels/QuickActionDetailPanel'
 import { TaskExplorerPanel } from './components/AppPanels/TaskExplorerPanel'
+import { humanizeLabel } from './ui/labels'
 import './styles/orchestrator.css'
 
 type RouteKey = 'board' | 'execution' | 'review' | 'agents' | 'settings'
@@ -262,6 +263,16 @@ export default function App() {
       localStorage.removeItem(STORAGE_PROJECT)
     }
   }, [projectDir])
+
+  useEffect(() => {
+    const hasModalOpen = workOpen || browseOpen
+    document.documentElement.classList.toggle('modal-open', hasModalOpen)
+    document.body.classList.toggle('modal-open', hasModalOpen)
+    return () => {
+      document.documentElement.classList.remove('modal-open')
+      document.body.classList.remove('modal-open')
+    }
+  }, [workOpen, browseOpen])
 
   useEffect(() => {
     const columns = ['backlog', 'ready', 'in_progress', 'in_review', 'blocked', 'done'] as const
@@ -763,7 +774,7 @@ export default function App() {
             <div className="board-grid">
               {columns.map((column) => (
                 <article className="board-col" key={column}>
-                  <h3>{column.replace('_', ' ')}</h3>
+                  <h3>{humanizeLabel(column)}</h3>
                   <div className="card-list">
                     {(board.columns[column] || []).map((task) => (
                       <button className="task-card task-card-button" key={task.id} onClick={() => setSelectedTaskId(task.id)}>
@@ -783,7 +794,7 @@ export default function App() {
               <div className="detail-card">
                 {selectedTaskDetailLoading ? <p className="field-label">Loading full task detail...</p> : null}
                 <p className="task-title">{selectedTaskView.title}</p>
-                <p className="task-meta">{selectedTaskView.id} · {selectedTaskView.priority} · {selectedTaskView.status} · {selectedTaskView.task_type || 'feature'}</p>
+                <p className="task-meta">{selectedTaskView.id} · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.status)} · {humanizeLabel(selectedTaskView.task_type || 'feature')}</p>
                 {selectedTaskView.description ? <p className="task-desc">{selectedTaskView.description}</p> : <p className="task-desc">No description.</p>}
                 <p className="field-label">Blockers: {(selectedTaskView.blocked_by || []).join(', ') || 'None'}</p>
                 <div className="form-stack">
@@ -794,7 +805,7 @@ export default function App() {
                   <div className="inline-actions">
                     <select value={editTaskType} onChange={(event) => setEditTaskType(event.target.value)}>
                       {TASK_TYPE_OPTIONS.map((taskType) => (
-                        <option key={taskType} value={taskType}>{taskType}</option>
+                        <option key={taskType} value={taskType}>{humanizeLabel(taskType)}</option>
                       ))}
                     </select>
                     <select value={editTaskPriority} onChange={(event) => setEditTaskPriority(event.target.value)}>
@@ -804,8 +815,8 @@ export default function App() {
                       <option value="P3">P3</option>
                     </select>
                     <select value={editTaskApprovalMode} onChange={(event) => setEditTaskApprovalMode(event.target.value as 'human_review' | 'auto_approve')}>
-                      <option value="human_review">human_review</option>
-                      <option value="auto_approve">auto_approve</option>
+                      <option value="human_review">{humanizeLabel('human_review')}</option>
+                      <option value="auto_approve">{humanizeLabel('auto_approve')}</option>
                     </select>
                   </div>
                   <label className="field-label" htmlFor="edit-task-labels">Labels (comma-separated)</label>
@@ -820,7 +831,7 @@ export default function App() {
                 <div className="inline-actions">
                   <select value={selectedTaskTransition} onChange={(event) => setSelectedTaskTransition(event.target.value)}>
                     {TASK_STATUS_OPTIONS.map((status) => (
-                      <option key={status} value={status}>{status}</option>
+                      <option key={status} value={status}>{humanizeLabel(status)}</option>
                     ))}
                   </select>
                   <button className="button" onClick={() => void transitionTask(selectedTaskView.id)}>Transition</button>
@@ -859,15 +870,15 @@ export default function App() {
               {queueTasks.slice(0, 5).map((task) => (
                 <div key={task.id} className="row-card">
                   <p className="task-title">{task.title}</p>
-                  <p className="task-meta">{task.status}</p>
+                  <p className="task-meta">{humanizeLabel(task.status)}</p>
                 </div>
               ))}
               {queueTasks.length === 0 ? <p className="empty">No queued or running tasks.</p> : null}
               <p className="field-label">Agents ({agents.length})</p>
               {agents.slice(0, 4).map((agent) => (
                 <div key={agent.id} className="row-card">
-                  <p className="task-title">{agent.role}</p>
-                  <p className="task-meta">{agent.status}</p>
+                  <p className="task-title">{humanizeLabel(agent.role)}</p>
+                  <p className="task-meta">{humanizeLabel(agent.status)}</p>
                 </div>
               ))}
               <TaskExplorerPanel
@@ -922,7 +933,7 @@ export default function App() {
         <div className="status-grid">
           <div className="status-card">
             <span>State</span>
-            <strong>{orchestrator?.status ?? 'unknown'}</strong>
+            <strong>{humanizeLabel(orchestrator?.status ?? 'unknown')}</strong>
           </div>
           <div className="status-card">
             <span>Queue</span>
@@ -991,7 +1002,7 @@ export default function App() {
           <div className="inline-actions">
             <select value={spawnRole} onChange={(event) => setSpawnRole(event.target.value)}>
               {AGENT_ROLE_OPTIONS.map((role) => (
-                <option key={role} value={role}>{role}</option>
+                <option key={role} value={role}>{humanizeLabel(role)}</option>
               ))}
             </select>
             <input
@@ -1013,8 +1024,8 @@ export default function App() {
           {agents.map((agent) => (
             <div className="row-card" key={agent.id}>
               <div>
-                <p className="task-title">{agent.role}</p>
-                <p className="task-meta">{agent.id} · {agent.status}</p>
+                <p className="task-title">{humanizeLabel(agent.role)}</p>
+                <p className="task-meta">{agent.id} · {humanizeLabel(agent.status)}</p>
               </div>
               <div className="inline-actions">
                 <button className="button" onClick={() => void agentAction(agent.id, 'pause')}>Pause</button>
@@ -1055,7 +1066,7 @@ export default function App() {
               <option value="">Current workspace</option>
               {filteredProjects.map((project) => (
                 <option key={`${project.id}-${project.path}`} value={project.path}>
-                  {project.path} ({project.source})
+                  {project.path} ({humanizeLabel(project.source)})
                 </option>
               ))}
             </select>
@@ -1097,7 +1108,7 @@ export default function App() {
           <article className="settings-card">
             <h3>Diagnostics</h3>
             <p>Schema version: 3</p>
-            <p>Selected route: {route}</p>
+            <p>Selected route: {humanizeLabel(route)}</p>
             <p>Project dir: {projectDir || 'current workspace'}</p>
           </article>
         </div>
@@ -1164,125 +1175,159 @@ export default function App() {
 
       {workOpen ? (
         <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Create Work modal">
-          <div className="modal-card">
-            <header className="panel-head">
-              <h2>Create Work</h2>
-              <button className="button" onClick={() => setWorkOpen(false)}>Close</button>
-            </header>
+          <div className="modal-card create-work-modal">
+            <div className="modal-sticky-top">
+              <header className="panel-head">
+                <h2>Create Work</h2>
+                <button className="button" onClick={() => setWorkOpen(false)}>Close</button>
+              </header>
 
-            <div className="tab-row">
-              <button className={`tab ${createTab === 'task' ? 'is-active' : ''}`} onClick={() => setCreateTab('task')}>Create Task</button>
-              <button className={`tab ${createTab === 'import' ? 'is-active' : ''}`} onClick={() => setCreateTab('import')}>Import PRD</button>
-              <button className={`tab ${createTab === 'quick' ? 'is-active' : ''}`} onClick={() => setCreateTab('quick')}>Quick Action</button>
+              <div className="tab-row">
+                <button className={`tab ${createTab === 'task' ? 'is-active' : ''}`} onClick={() => setCreateTab('task')}>Create Task</button>
+                <button className={`tab ${createTab === 'import' ? 'is-active' : ''}`} onClick={() => setCreateTab('import')}>Import PRD</button>
+                <button className={`tab ${createTab === 'quick' ? 'is-active' : ''}`} onClick={() => setCreateTab('quick')}>Quick Action</button>
+              </div>
             </div>
 
+            <div className="modal-body">
+              {createTab === 'task' ? (
+                <form id="create-task-form" className="form-stack create-task-form" onSubmit={(event) => void submitTask(event)}>
+                  <label className="field-label" htmlFor="task-title">Title</label>
+                  <input id="task-title" value={newTaskTitle} onChange={(event) => setNewTaskTitle(event.target.value)} required />
+                  <label className="field-label" htmlFor="task-description">Description</label>
+                  <textarea id="task-description" rows={4} value={newTaskDescription} onChange={(event) => setNewTaskDescription(event.target.value)} />
+                  <label className="field-label" htmlFor="task-type">Task Type</label>
+                  <select id="task-type" value={newTaskType} onChange={(event) => setNewTaskType(event.target.value)}>
+                    {TASK_TYPE_OPTIONS.map((taskType) => (
+                      <option key={taskType} value={taskType}>{humanizeLabel(taskType)}</option>
+                    ))}
+                  </select>
+                  <label className="field-label">Priority</label>
+                  <div className="toggle-group" role="group" aria-label="Task priority">
+                    {['P0', 'P1', 'P2', 'P3'].map((priority) => (
+                      <button
+                        key={priority}
+                        type="button"
+                        className={`toggle-button ${newTaskPriority === priority ? 'is-active' : ''}`}
+                        aria-pressed={newTaskPriority === priority}
+                        onClick={() => setNewTaskPriority(priority)}
+                      >
+                        {priority}
+                      </button>
+                    ))}
+                  </div>
+                  <details className="advanced-fields">
+                    <summary>Advanced</summary>
+                    <div className="form-stack advanced-fields-body">
+                      <label className="field-label">Approval mode</label>
+                      <div className="toggle-group" role="group" aria-label="Task approval mode">
+                        <button
+                          type="button"
+                          className={`toggle-button ${newTaskApprovalMode === 'human_review' ? 'is-active' : ''}`}
+                          aria-pressed={newTaskApprovalMode === 'human_review'}
+                          onClick={() => setNewTaskApprovalMode('human_review')}
+                        >
+                          {humanizeLabel('human_review')}
+                        </button>
+                        <button
+                          type="button"
+                          className={`toggle-button ${newTaskApprovalMode === 'auto_approve' ? 'is-active' : ''}`}
+                          aria-pressed={newTaskApprovalMode === 'auto_approve'}
+                          onClick={() => setNewTaskApprovalMode('auto_approve')}
+                        >
+                          {humanizeLabel('auto_approve')}
+                        </button>
+                      </div>
+                      <label className="field-label" htmlFor="task-labels">Labels (comma-separated)</label>
+                      <input
+                        id="task-labels"
+                        value={newTaskLabels}
+                        onChange={(event) => setNewTaskLabels(event.target.value)}
+                        placeholder="frontend, urgent"
+                      />
+                      <label className="field-label" htmlFor="task-blocked-by">Blocked by task IDs (comma-separated)</label>
+                      <input
+                        id="task-blocked-by"
+                        value={newTaskBlockedBy}
+                        onChange={(event) => setNewTaskBlockedBy(event.target.value)}
+                        placeholder="task-abc123, task-def456"
+                      />
+                      <label className="field-label" htmlFor="task-parent-id">Parent task ID (optional)</label>
+                      <input
+                        id="task-parent-id"
+                        value={newTaskParentId}
+                        onChange={(event) => setNewTaskParentId(event.target.value)}
+                        placeholder="task-parent-id"
+                      />
+                      <label className="field-label" htmlFor="task-pipeline-template">Pipeline template steps (comma-separated, optional)</label>
+                      <input
+                        id="task-pipeline-template"
+                        value={newTaskPipelineTemplate}
+                        onChange={(event) => setNewTaskPipelineTemplate(event.target.value)}
+                        placeholder="plan, implement, verify, review"
+                      />
+                      <label className="field-label" htmlFor="task-metadata">Metadata JSON object (optional)</label>
+                      <textarea
+                        id="task-metadata"
+                        rows={4}
+                        value={newTaskMetadata}
+                        onChange={(event) => setNewTaskMetadata(event.target.value)}
+                        placeholder='{"epic":"checkout","owner":"web"}'
+                      />
+                    </div>
+                  </details>
+                </form>
+              ) : null}
+
+              {createTab === 'import' ? (
+                <div className="form-stack">
+                  <form className="form-stack" onSubmit={(event) => void previewImport(event)}>
+                    <label className="field-label" htmlFor="prd-text">PRD text</label>
+                    <textarea id="prd-text" rows={8} value={importText} onChange={(event) => setImportText(event.target.value)} placeholder="- Task 1\n- Task 2" required />
+                    <button className="button" type="submit">Preview</button>
+                  </form>
+                  <ImportJobPanel
+                    importJobId={importJobId}
+                    importPreview={importPreview}
+                    recentImportJobIds={recentImportJobIds}
+                    selectedImportJobId={selectedImportJobId}
+                    selectedImportJob={selectedImportJob}
+                    selectedImportJobLoading={selectedImportJobLoading}
+                    selectedImportJobError={`${selectedImportJobError}${selectedImportJobErrorAt ? ` at ${selectedImportJobErrorAt}` : ''}`}
+                    selectedCreatedTaskIds={recentImportCommitMap[selectedImportJobId] || selectedImportJob?.created_task_ids || []}
+                    onCommitImport={() => void commitImport()}
+                    onSelectImportJob={setSelectedImportJobId}
+                    onRefreshImportJob={() => void loadImportJobDetail(selectedImportJobId)}
+                    onRetryLoadImportJob={() => void loadImportJobDetail(selectedImportJobId)}
+                  />
+                </div>
+              ) : null}
+
+              {createTab === 'quick' ? (
+                <div className="form-stack">
+                  <form className="form-stack" onSubmit={(event) => void submitQuickAction(event)}>
+                    <p className="hint">Quick Action is ephemeral. Promote explicitly if you want it on the board.</p>
+                    <label className="field-label" htmlFor="quick-prompt">Prompt</label>
+                    <textarea id="quick-prompt" rows={6} value={quickPrompt} onChange={(event) => setQuickPrompt(event.target.value)} required />
+                    <button className="button button-primary" type="submit">Run Quick Action</button>
+                  </form>
+                  <QuickActionDetailPanel
+                    quickActions={quickActions}
+                    selectedQuickActionId={selectedQuickActionId}
+                    selectedQuickActionDetail={selectedQuickActionDetail}
+                    selectedQuickActionLoading={selectedQuickActionLoading}
+                    selectedQuickActionError={`${selectedQuickActionError}${selectedQuickActionErrorAt ? ` at ${selectedQuickActionErrorAt}` : ''}`}
+                    onSelectQuickAction={setSelectedQuickActionId}
+                    onPromoteQuickAction={(quickActionId) => void promoteQuickAction(quickActionId)}
+                    onRefreshQuickActionDetail={() => void loadQuickActionDetail(selectedQuickActionId)}
+                    onRetryLoadQuickActionDetail={() => void loadQuickActionDetail(selectedQuickActionId)}
+                  />
+                </div>
+              ) : null}
+            </div>
             {createTab === 'task' ? (
-              <form className="form-stack" onSubmit={(event) => void submitTask(event)}>
-                <label className="field-label" htmlFor="task-title">Title</label>
-                <input id="task-title" value={newTaskTitle} onChange={(event) => setNewTaskTitle(event.target.value)} required />
-                <label className="field-label" htmlFor="task-description">Description</label>
-                <textarea id="task-description" rows={4} value={newTaskDescription} onChange={(event) => setNewTaskDescription(event.target.value)} />
-                <label className="field-label" htmlFor="task-type">Task Type</label>
-                <select id="task-type" value={newTaskType} onChange={(event) => setNewTaskType(event.target.value)}>
-                  {TASK_TYPE_OPTIONS.map((taskType) => (
-                    <option key={taskType} value={taskType}>{taskType}</option>
-                  ))}
-                </select>
-                <label className="field-label" htmlFor="task-priority">Priority</label>
-                <select id="task-priority" value={newTaskPriority} onChange={(event) => setNewTaskPriority(event.target.value)}>
-                  <option value="P0">P0</option>
-                  <option value="P1">P1</option>
-                  <option value="P2">P2</option>
-                  <option value="P3">P3</option>
-                </select>
-                <label className="field-label" htmlFor="task-approval-mode">Approval mode</label>
-                <select id="task-approval-mode" value={newTaskApprovalMode} onChange={(event) => setNewTaskApprovalMode(event.target.value as 'human_review' | 'auto_approve')}>
-                  <option value="human_review">human_review</option>
-                  <option value="auto_approve">auto_approve</option>
-                </select>
-                <label className="field-label" htmlFor="task-labels">Labels (comma-separated)</label>
-                <input
-                  id="task-labels"
-                  value={newTaskLabels}
-                  onChange={(event) => setNewTaskLabels(event.target.value)}
-                  placeholder="frontend, urgent"
-                />
-                <label className="field-label" htmlFor="task-blocked-by">Blocked by task IDs (comma-separated)</label>
-                <input
-                  id="task-blocked-by"
-                  value={newTaskBlockedBy}
-                  onChange={(event) => setNewTaskBlockedBy(event.target.value)}
-                  placeholder="task-abc123, task-def456"
-                />
-                <label className="field-label" htmlFor="task-parent-id">Parent task ID (optional)</label>
-                <input
-                  id="task-parent-id"
-                  value={newTaskParentId}
-                  onChange={(event) => setNewTaskParentId(event.target.value)}
-                  placeholder="task-parent-id"
-                />
-                <label className="field-label" htmlFor="task-pipeline-template">Pipeline template steps (comma-separated, optional)</label>
-                <input
-                  id="task-pipeline-template"
-                  value={newTaskPipelineTemplate}
-                  onChange={(event) => setNewTaskPipelineTemplate(event.target.value)}
-                  placeholder="plan, implement, verify, review"
-                />
-                <label className="field-label" htmlFor="task-metadata">Metadata JSON object (optional)</label>
-                <textarea
-                  id="task-metadata"
-                  rows={4}
-                  value={newTaskMetadata}
-                  onChange={(event) => setNewTaskMetadata(event.target.value)}
-                  placeholder='{"epic":"checkout","owner":"web"}'
-                />
-                <button className="button button-primary" type="submit">Create Task</button>
-              </form>
-            ) : null}
-
-            {createTab === 'import' ? (
-              <div className="form-stack">
-                <form className="form-stack" onSubmit={(event) => void previewImport(event)}>
-                  <label className="field-label" htmlFor="prd-text">PRD text</label>
-                  <textarea id="prd-text" rows={8} value={importText} onChange={(event) => setImportText(event.target.value)} placeholder="- Task 1\n- Task 2" required />
-                  <button className="button" type="submit">Preview</button>
-                </form>
-                <ImportJobPanel
-                  importJobId={importJobId}
-                  importPreview={importPreview}
-                  recentImportJobIds={recentImportJobIds}
-                  selectedImportJobId={selectedImportJobId}
-                  selectedImportJob={selectedImportJob}
-                  selectedImportJobLoading={selectedImportJobLoading}
-                  selectedImportJobError={`${selectedImportJobError}${selectedImportJobErrorAt ? ` at ${selectedImportJobErrorAt}` : ''}`}
-                  selectedCreatedTaskIds={recentImportCommitMap[selectedImportJobId] || selectedImportJob?.created_task_ids || []}
-                  onCommitImport={() => void commitImport()}
-                  onSelectImportJob={setSelectedImportJobId}
-                  onRefreshImportJob={() => void loadImportJobDetail(selectedImportJobId)}
-                  onRetryLoadImportJob={() => void loadImportJobDetail(selectedImportJobId)}
-                />
-              </div>
-            ) : null}
-
-            {createTab === 'quick' ? (
-              <div className="form-stack">
-                <form className="form-stack" onSubmit={(event) => void submitQuickAction(event)}>
-                  <p className="hint">Quick Action is ephemeral. Promote explicitly if you want it on the board.</p>
-                  <label className="field-label" htmlFor="quick-prompt">Prompt</label>
-                  <textarea id="quick-prompt" rows={6} value={quickPrompt} onChange={(event) => setQuickPrompt(event.target.value)} required />
-                  <button className="button button-primary" type="submit">Run Quick Action</button>
-                </form>
-                <QuickActionDetailPanel
-                  quickActions={quickActions}
-                  selectedQuickActionId={selectedQuickActionId}
-                  selectedQuickActionDetail={selectedQuickActionDetail}
-                  selectedQuickActionLoading={selectedQuickActionLoading}
-                  selectedQuickActionError={`${selectedQuickActionError}${selectedQuickActionErrorAt ? ` at ${selectedQuickActionErrorAt}` : ''}`}
-                  onSelectQuickAction={setSelectedQuickActionId}
-                  onPromoteQuickAction={(quickActionId) => void promoteQuickAction(quickActionId)}
-                  onRefreshQuickActionDetail={() => void loadQuickActionDetail(selectedQuickActionId)}
-                  onRetryLoadQuickActionDetail={() => void loadQuickActionDetail(selectedQuickActionId)}
-                />
+              <div className="modal-footer">
+                <button className="button button-primary" type="submit" form="create-task-form">Create Task</button>
               </div>
             ) : null}
           </div>

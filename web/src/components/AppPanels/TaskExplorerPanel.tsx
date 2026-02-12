@@ -1,3 +1,5 @@
+import { humanizeLabel } from '../../ui/labels'
+
 type TaskExplorerItem = {
   id: string
   title: string
@@ -68,19 +70,19 @@ export function TaskExplorerPanel({
           aria-label="Task explorer search"
         />
         <select value={status} onChange={(event) => onStatusChange(event.target.value)}>
-          <option value="">all status</option>
+          <option value="">All Statuses</option>
           {statusOptions.map((optionStatus) => (
-            <option key={optionStatus} value={optionStatus}>{optionStatus}</option>
+            <option key={optionStatus} value={optionStatus}>{humanizeLabel(optionStatus)}</option>
           ))}
         </select>
         <select value={taskType} onChange={(event) => onTypeChange(event.target.value)}>
-          <option value="">all types</option>
+          <option value="">All Types</option>
           {typeOptions.map((optionType) => (
-            <option key={optionType} value={optionType}>{optionType}</option>
+            <option key={optionType} value={optionType}>{humanizeLabel(optionType)}</option>
           ))}
         </select>
         <select value={priority} onChange={(event) => onPriorityChange(event.target.value)}>
-          <option value="">all priorities</option>
+          <option value="">All Priorities</option>
           <option value="P0">P0</option>
           <option value="P1">P1</option>
           <option value="P2">P2</option>
@@ -105,7 +107,7 @@ export function TaskExplorerPanel({
       {items.map((task) => (
         <button key={`task-explorer-${task.id}`} className="task-card task-card-button" onClick={() => onSelectTask(task.id)}>
           <p className="task-title">{task.title}</p>
-          <p className="task-meta">{task.status} · {task.priority} · {task.id}</p>
+          <p className="task-meta">{humanizeLabel(task.status)} · {task.priority} · {task.id}</p>
         </button>
       ))}
       {!loading && !error && totalItems > 0 ? (

@@ -20,6 +20,7 @@ import {
 import '@xyflow/react/dist/style.css'
 import { buildApiUrl, buildAuthHeaders } from '../api'
 import { useChannel } from '../contexts/WebSocketContext'
+import { humanizeLabel } from '../ui/labels'
 import EmptyState from './EmptyState'
 
 interface Phase {
@@ -112,7 +113,7 @@ export default function DependencyGraph({ projectDir }: Props) {
           label: (
             <div style={{ textAlign: 'center', padding: '8px' }}>
               <div style={{ fontWeight: 600, fontSize: '0.875rem', marginBottom: '4px' }}>{phase.name || phase.id}</div>
-              <div style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.85)' }}>{phase.status}</div>
+              <div style={{ fontSize: '0.75rem', color: 'rgba(255,255,255,0.85)' }}>{humanizeLabel(phase.status)}</div>
               {phase.progress > 0 && (
                 <div
                   style={{

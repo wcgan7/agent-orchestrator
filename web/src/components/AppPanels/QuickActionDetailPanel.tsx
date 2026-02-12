@@ -1,3 +1,5 @@
+import { humanizeLabel } from '../../ui/labels'
+
 type QuickActionRecord = {
   id: string
   prompt: string
@@ -39,7 +41,7 @@ export function QuickActionDetailPanel({
           <div className="row-card" key={action.id}>
             <div>
               <p className="task-title">{action.prompt}</p>
-              <p className="task-meta">{action.id} · {action.status}</p>
+              <p className="task-meta">{action.id} · {humanizeLabel(action.status)}</p>
             </div>
             <div className="inline-actions">
               <button className="button" onClick={() => onSelectQuickAction(action.id)}>View</button>
@@ -68,7 +70,7 @@ export function QuickActionDetailPanel({
           {selectedQuickActionDetail ? (
             <div className="form-stack">
               <p className="task-meta">ID: {selectedQuickActionDetail.id}</p>
-              <p className="task-meta">Status: {selectedQuickActionDetail.status}</p>
+              <p className="task-meta">Status: {humanizeLabel(selectedQuickActionDetail.status)}</p>
               <p className="task-meta">Started: {selectedQuickActionDetail.started_at || '-'}</p>
               <p className="task-meta">Finished: {selectedQuickActionDetail.finished_at || '-'}</p>
               <p className="task-meta">Result: {selectedQuickActionDetail.result_summary || '-'}</p>

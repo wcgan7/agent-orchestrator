@@ -1,3 +1,5 @@
+import { humanizeLabel } from '../../ui/labels'
+
 type PreviewNode = {
   id: string
   title: string
@@ -67,7 +69,7 @@ export function ImportJobPanel({
                 <div key={node.id} className="import-node">
                   <span>{node.id}</span>
                   <span>{node.title}</span>
-                  <span>{node.priority}</span>
+                  <span>{humanizeLabel(node.priority)}</span>
                 </div>
               ))}
               {importPreview.edges.length > 0 ? (
@@ -105,7 +107,7 @@ export function ImportJobPanel({
           {selectedImportJob ? (
             <div className="form-stack">
               <p className="task-meta">ID: {selectedImportJob.id}</p>
-              <p className="task-meta">Status: {selectedImportJob.status || '-'}</p>
+              <p className="task-meta">Status: {selectedImportJob.status ? humanizeLabel(selectedImportJob.status) : '-'}</p>
               <p className="task-meta">Title: {selectedImportJob.title || '-'}</p>
               <p className="task-meta">Created: {selectedImportJob.created_at || '-'}</p>
               <p className="task-meta">Tasks: {(selectedImportJob.tasks || []).length}</p>
