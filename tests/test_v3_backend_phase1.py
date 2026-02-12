@@ -6,6 +6,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from feature_prd_runner.server.api import create_app
+from feature_prd_runner.v3.orchestrator import DefaultWorkerAdapter
 from feature_prd_runner.v3.domain.models import Task
 from feature_prd_runner.v3.storage.bootstrap import ensure_v3_state_root
 from feature_prd_runner.v3.storage.container import V3Container
@@ -53,7 +54,7 @@ def test_cutover_forces_schema_version_3(tmp_path: Path) -> None:
 
 
 def test_task_dependency_guard_blocks_ready_transition(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         blocker = client.post(
             "/api/v3/tasks",
@@ -86,7 +87,7 @@ def test_task_dependency_guard_blocks_ready_transition(tmp_path: Path) -> None:
 
 
 def test_patch_rejects_direct_status_changes(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         task = client.post("/api/v3/tasks", json={"title": "Patch guarded"}).json()["task"]
         response = client.patch(f"/api/v3/tasks/{task['id']}", json={"status": "done"})
@@ -95,7 +96,7 @@ def test_patch_rejects_direct_status_changes(tmp_path: Path) -> None:
 
 
 def test_review_actions_require_in_review_state(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         task = client.post("/api/v3/tasks", json={"title": "Needs status guard"}).json()["task"]
         approve = client.post(f"/api/v3/review/{task['id']}/approve", json={})
@@ -105,7 +106,7 @@ def test_review_actions_require_in_review_state(tmp_path: Path) -> None:
 
 
 def test_quick_action_promotion_is_singleton(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         qrun = client.post("/api/v3/quick-actions", json={"prompt": "Do thing"}).json()["quick_action"]
 
@@ -124,7 +125,7 @@ def test_quick_action_promotion_is_singleton(tmp_path: Path) -> None:
 
 
 def test_project_pin_requires_git_unless_override(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     plain_dir = tmp_path / "plain"
     plain_dir.mkdir()
 
@@ -142,7 +143,7 @@ def test_project_pin_requires_git_unless_override(tmp_path: Path) -> None:
 
 
 def test_import_preview_commit_creates_dependency_chain(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         preview = client.post(
             "/api/v3/import/prd/preview",
@@ -167,7 +168,7 @@ def test_import_preview_commit_creates_dependency_chain(tmp_path: Path) -> None:
 
 
 def test_legacy_compat_endpoints_available(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         created = client.post("/api/v3/tasks", json={"title": "Compat seed"}).json()["task"]
 
@@ -242,7 +243,7 @@ def test_claim_lock_prevents_double_claim(tmp_path: Path) -> None:
 
 
 def test_state_machine_allows_and_rejects_expected_transitions(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         task = client.post("/api/v3/tasks", json={"title": "FSM"}).json()["task"]
         task_id = task["id"]
@@ -256,7 +257,7 @@ def test_state_machine_allows_and_rejects_expected_transitions(tmp_path: Path) -
 
 
 def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         task = client.post(
             "/api/v3/tasks",

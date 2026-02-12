@@ -11,11 +11,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from ..v3.api import create_v3_router
 from ..v3.events import EventBus
 from ..v3.events import hub
-from ..v3.orchestrator import create_orchestrator
+from ..v3.orchestrator import WorkerAdapter, create_orchestrator
 from ..v3.storage import V3Container
 
 
-def create_app(project_dir: Optional[Path] = None, enable_cors: bool = True) -> FastAPI:
+def create_app(
+    project_dir: Optional[Path] = None,
+    enable_cors: bool = True,
+    worker_adapter: Optional[WorkerAdapter] = None,
+) -> FastAPI:
     app = FastAPI(
         title="Feature PRD Runner",
         description="Orchestrator-first AI engineering control center",
@@ -57,7 +61,7 @@ def create_app(project_dir: Optional[Path] = None, enable_cors: bool = True) -> 
         cache = app.state.v3_orchestrators
         if key not in cache:
             container = _resolve_container(project_dir_param)
-            cache[key] = create_orchestrator(container, bus=app.state.v3_bus_factory(container))
+            cache[key] = create_orchestrator(container, bus=app.state.v3_bus_factory(container), worker_adapter=worker_adapter)
         return cache[key]
 
     app.state.v3_bus_factory = lambda container: EventBus(container.events, container.project_id)

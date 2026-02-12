@@ -11,6 +11,7 @@ class StepResult:
     status: str = "ok"
     summary: str | None = None
     findings: list[dict[str, Any]] | None = None
+    generated_tasks: list[dict[str, Any]] | None = None
 
 
 class WorkerAdapter(Protocol):
@@ -35,6 +36,7 @@ class DefaultWorkerAdapter:
                     status=str(raw.get("status") or "ok"),
                     summary=raw.get("summary"),
                     findings=list(raw.get("findings") or []) if isinstance(raw.get("findings"), list) else None,
+                    generated_tasks=list(raw.get("generated_tasks") or []) if isinstance(raw.get("generated_tasks"), list) else None,
                 )
 
         if step == "review":
@@ -43,5 +45,10 @@ class DefaultWorkerAdapter:
                 item = scripted_findings[attempt - 1]
                 findings = list(item) if isinstance(item, list) else []
                 return StepResult(status="ok", findings=findings)
+
+        if step == "generate_tasks":
+            scripted = task.metadata.get("scripted_generated_tasks") if isinstance(task.metadata, dict) else None
+            if isinstance(scripted, list):
+                return StepResult(status="ok", generated_tasks=scripted)
 
         return StepResult(status="ok")

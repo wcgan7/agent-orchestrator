@@ -23,31 +23,9 @@ Repository rules (AGENTS.md):
 def _human_feedback_block(task_id: str) -> str:
     """Inject active human feedback for a task into the prompt.
 
-    Returns an empty string if no feedback store is available or no feedback exists.
+    Returns an empty string — the legacy FeedbackStore has been removed.
     """
-    try:
-        from .collaboration.feedback import FeedbackStore
-
-        # Try to get the store from the FastAPI app state (runtime)
-        # This import pattern lets prompts work with or without the server
-        import sys
-        store = None
-        if "feature_prd_runner.server.api" in sys.modules:
-            api_mod = sys.modules["feature_prd_runner.server.api"]
-            app = getattr(api_mod, "app", None)
-            if app and hasattr(app, "state") and hasattr(app.state, "feedback_store"):
-                store = app.state.feedback_store
-
-        if store is None:
-            return ""
-
-        instructions = store.get_prompt_instructions(task_id)
-        if not instructions:
-            return ""
-
-        return f"\n## Human Guidance\n{instructions}\n"
-    except Exception:
-        return ""
+    return ""
 
 
 def build_local_plan_prompt(

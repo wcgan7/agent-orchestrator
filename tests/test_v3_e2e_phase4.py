@@ -6,10 +6,11 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from feature_prd_runner.server.api import create_app
+from feature_prd_runner.v3.orchestrator import DefaultWorkerAdapter
 
 
 def test_pin_create_run_review_approve_done(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     repo = tmp_path / 'repo'
     repo.mkdir()
     (repo / '.git').mkdir()
@@ -29,7 +30,7 @@ def test_pin_create_run_review_approve_done(tmp_path: Path) -> None:
 
 
 def test_import_dependency_execution_order(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         preview = client.post('/api/v3/import/prd/preview', json={'content': '- Step A\n- Step B'}).json()
         commit = client.post('/api/v3/import/prd/commit', json={'job_id': preview['job_id']}).json()
@@ -47,7 +48,7 @@ def test_import_dependency_execution_order(tmp_path: Path) -> None:
 
 
 def test_quick_action_stays_off_board_until_promoted(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         quick = client.post('/api/v3/quick-actions', json={'prompt': 'One-off command'}).json()['quick_action']
         tasks_before = client.get('/api/v3/tasks').json()['tasks']
@@ -63,7 +64,7 @@ def test_quick_action_stays_off_board_until_promoted(tmp_path: Path) -> None:
 
 
 def test_findings_loop_until_zero_open_then_done(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         task = client.post(
             '/api/v3/tasks',
@@ -85,7 +86,7 @@ def test_findings_loop_until_zero_open_then_done(tmp_path: Path) -> None:
 
 
 def test_request_changes_reopens_task_with_feedback(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         task = client.post('/api/v3/tasks', json={'title': 'Needs feedback', 'metadata': {'scripted_findings': [[]]}}).json()['task']
         client.post(f"/api/v3/tasks/{task['id']}/run")
@@ -108,7 +109,7 @@ def test_single_run_branch_commits_in_task_order(tmp_path: Path) -> None:
     subprocess.run(['git', 'add', 'seed.txt'], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(['git', 'commit', '-m', 'seed'], cwd=tmp_path, check=True, capture_output=True)
 
-    app = create_app(project_dir=tmp_path)
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         first = client.post('/api/v3/tasks', json={'title': 'First', 'approval_mode': 'auto_approve'}).json()['task']
         second = client.post('/api/v3/tasks', json={'title': 'Second', 'approval_mode': 'auto_approve'}).json()['task']

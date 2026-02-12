@@ -92,7 +92,7 @@ class Task:
     parent_id: Optional[str] = None
     children_ids: list[str] = field(default_factory=list)
 
-    pipeline_template: list[str] = field(default_factory=lambda: ["plan", "implement", "verify", "review"])
+    pipeline_template: list[str] = field(default_factory=list)
     current_step: Optional[str] = None
     current_agent_id: Optional[str] = None
     run_ids: list[str] = field(default_factory=list)
@@ -127,7 +127,7 @@ class Task:
         payload["children_ids"] = list(data.get("children_ids") or [])
         payload["run_ids"] = list(data.get("run_ids") or [])
         payload["labels"] = list(data.get("labels") or [])
-        payload["pipeline_template"] = list(data.get("pipeline_template") or ["plan", "implement", "verify", "review"])
+        payload["pipeline_template"] = list(data.get("pipeline_template") or [])
         payload["quality_gate"] = dict(data.get("quality_gate") or {"critical": 0, "high": 0, "medium": 0, "low": 0})
         payload["metadata"] = dict(data.get("metadata") or {})
         payload["hitl_mode"] = str(data.get("hitl_mode") or "autopilot")

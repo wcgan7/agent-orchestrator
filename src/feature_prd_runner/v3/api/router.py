@@ -9,6 +9,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ...collaboration.modes import MODE_CONFIGS
+from ...pipelines.registry import PipelineRegistry
 from ..domain.models import AgentRecord, QuickActionRun, Task, now_iso
 from ..events.bus import EventBus
 from ..orchestrator.service import OrchestratorService
@@ -23,7 +24,7 @@ class CreateTaskRequest(BaseModel):
     labels: list[str] = Field(default_factory=list)
     blocked_by: list[str] = Field(default_factory=list)
     parent_id: Optional[str] = None
-    pipeline_template: list[str] = Field(default_factory=lambda: ["plan", "implement", "verify", "review"])
+    pipeline_template: Optional[list[str]] = None
     approval_mode: str = "human_review"
     hitl_mode: str = "autopilot"
     source: str = "manual"
@@ -304,6 +305,11 @@ def create_v3_router(
     @router.post("/tasks")
     async def create_task(body: CreateTaskRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         container, bus, _ = _ctx(project_dir)
+        pipeline_steps = body.pipeline_template
+        if pipeline_steps is None:
+            registry = PipelineRegistry()
+            template = registry.resolve_for_task_type(body.task_type)
+            pipeline_steps = template.step_names()
         task = Task(
             title=body.title,
             description=body.description,
@@ -312,7 +318,7 @@ def create_v3_router(
             labels=body.labels,
             blocked_by=body.blocked_by,
             parent_id=body.parent_id,
-            pipeline_template=body.pipeline_template,
+            pipeline_template=pipeline_steps,
             approval_mode=body.approval_mode,
             hitl_mode=body.hitl_mode,
             source=body.source,
