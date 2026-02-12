@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -80,6 +81,24 @@ class ReviewActionRequest(BaseModel):
     guidance: Optional[str] = None
 
 
+class AddFeedbackRequest(BaseModel):
+    task_id: str
+    feedback_type: str = "general"
+    priority: str = "should"
+    summary: str
+    details: str = ""
+    target_file: Optional[str] = None
+
+
+class AddCommentRequest(BaseModel):
+    task_id: str
+    file_path: str
+    line_number: int = 0
+    body: str
+    line_type: Optional[str] = None
+    parent_id: Optional[str] = None
+
+
 VALID_TRANSITIONS: dict[str, set[str]] = {
     "backlog": {"ready", "cancelled"},
     "ready": {"in_progress", "blocked", "backlog", "cancelled"},
@@ -157,6 +176,30 @@ def create_v3_router(
         bus = EventBus(container.events, container.project_id)
         orchestrator: OrchestratorService = resolve_orchestrator(project_dir)
         return container, bus, orchestrator
+
+    def _load_feedback_records(container: V3Container) -> list[dict[str, Any]]:
+        cfg = container.config.load()
+        raw = cfg.get("collaboration_feedback")
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if isinstance(item, dict)]
+
+    def _save_feedback_records(container: V3Container, items: list[dict[str, Any]]) -> None:
+        cfg = container.config.load()
+        cfg["collaboration_feedback"] = items
+        container.config.save(cfg)
+
+    def _load_comment_records(container: V3Container) -> list[dict[str, Any]]:
+        cfg = container.config.load()
+        raw = cfg.get("collaboration_comments")
+        if not isinstance(raw, list):
+            return []
+        return [item for item in raw if isinstance(item, dict)]
+
+    def _save_comment_records(container: V3Container, items: list[dict[str, Any]]) -> None:
+        cfg = container.config.load()
+        cfg["collaboration_comments"] = items
+        container.config.save(cfg)
 
     @router.get("/projects")
     async def list_projects(project_dir: Optional[str] = Query(None), include_non_git: bool = Query(False)) -> dict[str, Any]:
@@ -467,6 +510,7 @@ def create_v3_router(
             created.append(task.id)
             previous = task
         job["status"] = "committed"
+        job["created_task_ids"] = created
         bus.emit(channel="tasks", event_type="import.committed", entity_id=body.job_id, payload={"created_task_ids": created})
         return {"job_id": body.job_id, "created_task_ids": created}
 
@@ -476,6 +520,324 @@ def create_v3_router(
         if not job:
             raise HTTPException(status_code=404, detail="Import job not found")
         return {"job": job}
+
+    @router.get("/metrics")
+    async def get_metrics(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, orchestrator = _ctx(project_dir)
+        status = orchestrator.status()
+        tasks = container.tasks.list()
+        runs = container.runs.list()
+        events = container.events.list_recent(limit=2000)
+        phases_completed = sum(len(list(run.steps or [])) for run in runs)
+        phases_total = sum(max(1, len(list(task.pipeline_template or []))) for task in tasks)
+        wall_time_seconds = 0.0
+        for run in runs:
+            if not run.started_at:
+                continue
+            try:
+                start = datetime.fromisoformat(str(run.started_at).replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if run.finished_at:
+                try:
+                    end = datetime.fromisoformat(str(run.finished_at).replace("Z", "+00:00"))
+                except ValueError:
+                    continue
+            else:
+                end = datetime.now(timezone.utc)
+            wall_time_seconds += max((end - start).total_seconds(), 0.0)
+        api_calls = len(events)
+        return {
+            "tokens_used": 0,
+            "api_calls": api_calls,
+            "estimated_cost_usd": 0.0,
+            "wall_time_seconds": int(wall_time_seconds),
+            "phases_completed": phases_completed,
+            "phases_total": phases_total,
+            "files_changed": 0,
+            "lines_added": 0,
+            "lines_removed": 0,
+            "queue_depth": int(status.get("queue_depth", 0)),
+            "in_progress": int(status.get("in_progress", 0)),
+        }
+
+    @router.get("/phases")
+    async def get_phases(project_dir: Optional[str] = Query(None)) -> list[dict[str, Any]]:
+        container, _, _ = _ctx(project_dir)
+        phases: list[dict[str, Any]] = []
+        for task in container.tasks.list():
+            total_steps = max(1, len(list(task.pipeline_template or [])))
+            completed_steps = 0
+            if task.status == "done":
+                completed_steps = total_steps
+            elif task.status == "in_review":
+                completed_steps = max(total_steps - 1, 1)
+            elif task.status == "in_progress":
+                completed_steps = 2
+            elif task.status in {"ready", "blocked"}:
+                completed_steps = 1
+            progress = {
+                "backlog": 0.0,
+                "ready": 0.1,
+                "blocked": 0.1,
+                "in_progress": 0.6,
+                "in_review": 0.9,
+                "done": 1.0,
+                "cancelled": 1.0,
+            }.get(task.status, min(completed_steps / total_steps, 1.0))
+            phases.append(
+                {
+                    "id": task.id,
+                    "name": task.title,
+                    "description": task.description,
+                    "status": task.status,
+                    "deps": list(task.blocked_by),
+                    "progress": progress,
+                }
+            )
+        return phases
+
+    @router.get("/agents/types")
+    async def get_agent_types(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        cfg = container.config.load()
+        routing = dict(cfg.get("agent_routing") or {})
+        task_role_map = dict(routing.get("task_type_roles") or {})
+        role_affinity: dict[str, list[str]] = {}
+        for task_type, role in task_role_map.items():
+            role_name = str(role or "")
+            if not role_name:
+                continue
+            role_affinity.setdefault(role_name, []).append(str(task_type))
+        roles = ["general", "implementer", "reviewer", "researcher", "tester", "planner", "debugger"]
+        return {
+            "types": [
+                {
+                    "role": role,
+                    "display_name": role.replace("_", " ").title(),
+                    "description": f"{role.replace('_', ' ').title()} agent",
+                    "task_type_affinity": sorted(role_affinity.get(role, [])),
+                    "allowed_steps": ["plan", "implement", "verify", "review"],
+                    "limits": {"max_tokens": 0, "max_time_seconds": 0, "max_cost_usd": 0.0},
+                }
+                for role in roles
+            ]
+        }
+
+    @router.get("/collaboration/modes")
+    async def get_collaboration_modes() -> dict[str, Any]:
+        return {
+            "modes": [
+                {
+                    "mode": "autopilot",
+                    "display_name": "Autopilot",
+                    "description": "Agents run freely.",
+                    "approve_before_plan": False,
+                    "approve_before_implement": False,
+                    "approve_before_commit": False,
+                    "approve_after_implement": False,
+                    "allow_unattended": True,
+                    "require_reasoning": False,
+                },
+                {
+                    "mode": "supervised",
+                    "display_name": "Supervised",
+                    "description": "Approve each step.",
+                    "approve_before_plan": True,
+                    "approve_before_implement": True,
+                    "approve_before_commit": True,
+                    "approve_after_implement": False,
+                    "allow_unattended": False,
+                    "require_reasoning": True,
+                },
+                {
+                    "mode": "collaborative",
+                    "display_name": "Collaborative",
+                    "description": "Work together with agents.",
+                    "approve_before_plan": False,
+                    "approve_before_implement": False,
+                    "approve_before_commit": True,
+                    "approve_after_implement": True,
+                    "allow_unattended": False,
+                    "require_reasoning": True,
+                },
+                {
+                    "mode": "review_only",
+                    "display_name": "Review Only",
+                    "description": "Review all changes before commit.",
+                    "approve_before_plan": False,
+                    "approve_before_implement": False,
+                    "approve_before_commit": True,
+                    "approve_after_implement": True,
+                    "allow_unattended": True,
+                    "require_reasoning": False,
+                },
+            ]
+        }
+
+    @router.get("/collaboration/presence")
+    async def get_collaboration_presence() -> dict[str, Any]:
+        return {"users": []}
+
+    @router.get("/collaboration/timeline/{task_id}")
+    async def get_collaboration_timeline(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            return {"events": []}
+
+        events: list[dict[str, Any]] = [
+            {
+                "id": f"task-{task.id}",
+                "type": "status_change",
+                "timestamp": task.updated_at or task.created_at,
+                "actor": "system",
+                "actor_type": "system",
+                "summary": f"Task status: {task.status}",
+                "details": task.description or "",
+            }
+        ]
+        for event in container.events.list_recent(limit=2000):
+            if event.get("entity_id") != task_id:
+                continue
+            payload = event.get("payload")
+            payload_dict = payload if isinstance(payload, dict) else {}
+            events.append(
+                {
+                    "id": str(event.get("id") or f"evt-{uuid.uuid4().hex[:10]}"),
+                    "type": str(event.get("type") or "event"),
+                    "timestamp": str(event.get("ts") or task.created_at),
+                    "actor": "system",
+                    "actor_type": "system",
+                    "summary": str(event.get("type") or "event"),
+                    "details": str(payload_dict.get("error") or payload_dict.get("guidance") or ""),
+                }
+            )
+        for item in _load_feedback_records(container):
+            if item.get("task_id") != task_id:
+                continue
+            events.append(
+                {
+                    "id": f"feedback-{item.get('id')}",
+                    "type": "feedback",
+                    "timestamp": item.get("created_at") or task.created_at,
+                    "actor": str(item.get("created_by") or "human"),
+                    "actor_type": "human",
+                    "summary": str(item.get("summary") or "Feedback added"),
+                    "details": str(item.get("details") or ""),
+                }
+            )
+        for item in _load_comment_records(container):
+            if item.get("task_id") != task_id:
+                continue
+            events.append(
+                {
+                    "id": f"comment-{item.get('id')}",
+                    "type": "comment",
+                    "timestamp": item.get("created_at") or task.created_at,
+                    "actor": str(item.get("author") or "human"),
+                    "actor_type": "human",
+                    "summary": str(item.get("body") or "Comment added"),
+                    "details": "",
+                }
+            )
+        events.sort(key=lambda event: str(event.get("timestamp") or ""), reverse=True)
+        return {"events": events}
+
+    @router.get("/collaboration/feedback/{task_id}")
+    async def get_collaboration_feedback(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        items = [item for item in _load_feedback_records(container) if item.get("task_id") == task_id]
+        items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
+        return {"feedback": items}
+
+    @router.post("/collaboration/feedback")
+    async def add_collaboration_feedback(body: AddFeedbackRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, bus, _ = _ctx(project_dir)
+        task = container.tasks.get(body.task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        item = {
+            "id": f"fb-{uuid.uuid4().hex[:10]}",
+            "task_id": body.task_id,
+            "feedback_type": body.feedback_type,
+            "priority": body.priority,
+            "status": "active",
+            "summary": body.summary,
+            "details": body.details,
+            "target_file": body.target_file,
+            "action": f"{body.feedback_type}: {body.summary}",
+            "created_by": "human",
+            "created_at": now_iso(),
+            "agent_response": None,
+        }
+        items = _load_feedback_records(container)
+        items.append(item)
+        _save_feedback_records(container, items)
+        bus.emit(channel="review", event_type="feedback.added", entity_id=body.task_id, payload={"feedback_id": item["id"]})
+        return {"feedback": item}
+
+    @router.post("/collaboration/feedback/{feedback_id}/dismiss")
+    async def dismiss_collaboration_feedback(feedback_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, bus, _ = _ctx(project_dir)
+        items = _load_feedback_records(container)
+        for item in items:
+            if item.get("id") == feedback_id:
+                item["status"] = "addressed"
+                item["agent_response"] = item.get("agent_response") or "Dismissed by reviewer"
+                _save_feedback_records(container, items)
+                bus.emit(channel="review", event_type="feedback.dismissed", entity_id=str(item.get("task_id") or ""), payload={"feedback_id": feedback_id})
+                return {"feedback": item}
+        raise HTTPException(status_code=404, detail="Feedback not found")
+
+    @router.get("/collaboration/comments/{task_id}")
+    async def get_collaboration_comments(task_id: str, project_dir: Optional[str] = Query(None), file_path: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        items = []
+        for item in _load_comment_records(container):
+            if item.get("task_id") != task_id:
+                continue
+            if file_path and item.get("file_path") != file_path:
+                continue
+            items.append(item)
+        items.sort(key=lambda item: str(item.get("created_at") or ""))
+        return {"comments": items}
+
+    @router.post("/collaboration/comments")
+    async def add_collaboration_comment(body: AddCommentRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, bus, _ = _ctx(project_dir)
+        task = container.tasks.get(body.task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        item = {
+            "id": f"cm-{uuid.uuid4().hex[:10]}",
+            "task_id": body.task_id,
+            "file_path": body.file_path,
+            "line_number": body.line_number,
+            "line_type": body.line_type,
+            "body": body.body,
+            "author": "human",
+            "created_at": now_iso(),
+            "resolved": False,
+            "parent_id": body.parent_id,
+        }
+        items = _load_comment_records(container)
+        items.append(item)
+        _save_comment_records(container, items)
+        bus.emit(channel="review", event_type="comment.added", entity_id=body.task_id, payload={"comment_id": item["id"], "file_path": body.file_path})
+        return {"comment": item}
+
+    @router.post("/collaboration/comments/{comment_id}/resolve")
+    async def resolve_collaboration_comment(comment_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, bus, _ = _ctx(project_dir)
+        items = _load_comment_records(container)
+        for item in items:
+            if item.get("id") == comment_id:
+                item["resolved"] = True
+                _save_comment_records(container, items)
+                bus.emit(channel="review", event_type="comment.resolved", entity_id=str(item.get("task_id") or ""), payload={"comment_id": comment_id})
+                return {"comment": item}
+        raise HTTPException(status_code=404, detail="Comment not found")
 
     @router.post("/quick-actions")
     async def create_quick_action(body: QuickActionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:

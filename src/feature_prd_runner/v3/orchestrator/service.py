@@ -91,7 +91,11 @@ class OrchestratorService:
             task = self.container.tasks.get(task_id)
             if not task:
                 raise ValueError(f"Task not found: {task_id}")
-            if task.status in {"done", "cancelled", "in_review", "in_progress"}:
+            # Make explicit run idempotent when a worker already started or finished
+            # the same task; this avoids request races with the background loop.
+            if task.status in {"in_progress", "in_review", "done"}:
+                return task
+            if task.status in {"cancelled"}:
                 raise ValueError(f"Task {task_id} cannot be run from status={task.status}")
             terminal = {"done", "cancelled"}
             for dep_id in task.blocked_by:

@@ -161,6 +161,69 @@ def test_import_preview_commit_creates_dependency_chain(tmp_path: Path) -> None:
         assert tasks[created_ids[1]]["blocked_by"] == [created_ids[0]]
         assert tasks[created_ids[2]]["blocked_by"] == [created_ids[1]]
 
+        job = client.get(f"/api/v3/import/{job_id}")
+        assert job.status_code == 200
+        assert job.json()["job"]["created_task_ids"] == created_ids
+
+
+def test_legacy_compat_endpoints_available(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/v3/tasks", json={"title": "Compat seed"}).json()["task"]
+
+        metrics = client.get("/api/v3/metrics")
+        assert metrics.status_code == 200
+        assert "phases_total" in metrics.json()
+
+        phases = client.get("/api/v3/phases")
+        assert phases.status_code == 200
+        assert isinstance(phases.json(), list)
+
+        agent_types = client.get("/api/v3/agents/types")
+        assert agent_types.status_code == 200
+        assert len(agent_types.json()["types"]) > 0
+
+        modes = client.get("/api/v3/collaboration/modes")
+        assert modes.status_code == 200
+        assert len(modes.json()["modes"]) > 0
+
+        add_feedback = client.post(
+            "/api/v3/collaboration/feedback",
+            json={"task_id": created["id"], "summary": "Need stricter checks"},
+        )
+        assert add_feedback.status_code == 200
+        feedback_id = add_feedback.json()["feedback"]["id"]
+
+        add_comment = client.post(
+            "/api/v3/collaboration/comments",
+            json={"task_id": created["id"], "file_path": "main.py", "line_number": 1, "body": "Looks good"},
+        )
+        assert add_comment.status_code == 200
+        comment_id = add_comment.json()["comment"]["id"]
+
+        feedback_list = client.get(f"/api/v3/collaboration/feedback/{created['id']}")
+        assert feedback_list.status_code == 200
+        assert any(item["id"] == feedback_id for item in feedback_list.json()["feedback"])
+
+        comment_list = client.get(f"/api/v3/collaboration/comments/{created['id']}")
+        assert comment_list.status_code == 200
+        assert any(item["id"] == comment_id for item in comment_list.json()["comments"])
+
+        dismissed = client.post(f"/api/v3/collaboration/feedback/{feedback_id}/dismiss")
+        assert dismissed.status_code == 200
+        assert dismissed.json()["feedback"]["status"] == "addressed"
+
+        resolved = client.post(f"/api/v3/collaboration/comments/{comment_id}/resolve")
+        assert resolved.status_code == 200
+        assert resolved.json()["comment"]["resolved"] is True
+
+        timeline = client.get(f"/api/v3/collaboration/timeline/{created['id']}")
+        assert timeline.status_code == 200
+        assert len(timeline.json()["events"]) >= 1
+        types = {event["type"] for event in timeline.json()["events"]}
+        assert "feedback" in types
+        assert "comment" in types
+
 
 def test_claim_lock_prevents_double_claim(tmp_path: Path) -> None:
     container = V3Container(tmp_path)
