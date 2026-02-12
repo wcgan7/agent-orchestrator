@@ -5,8 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
-from ..models import TaskStep
-
 WorkerProviderType = Literal["codex", "ollama"]
 
 
@@ -37,9 +35,7 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _step_key(step: TaskStep | str) -> str:
-    if isinstance(step, TaskStep):
-        return step.value
+def _step_key(step: str) -> str:
     return str(step or "").strip()
 
 
@@ -106,7 +102,7 @@ def get_workers_runtime_config(
     )
 
 
-def resolve_worker_for_step(runtime: WorkersRuntimeConfig, step: TaskStep | str) -> WorkerProviderSpec:
+def resolve_worker_for_step(runtime: WorkersRuntimeConfig, step: str) -> WorkerProviderSpec:
     """Resolve which worker provider should handle a given task step.
 
     Note: plan tasks are routed via the special key `"plan"` (since planning is
