@@ -546,6 +546,122 @@ class GenerateTasksStep(PipelineStep):
 
 
 # ---------------------------------------------------------------------------
+# Performance pipeline steps
+# ---------------------------------------------------------------------------
+
+@step_registry.register
+class ProfileStep(PipelineStep):
+    @property
+    def name(self) -> str:
+        return "profile"
+
+    @property
+    def display_name(self) -> str:
+        return "Profile Baseline"
+
+    async def execute(self, ctx: StepContext) -> StepResult:
+        code_files = _walk_files(ctx.project_dir, _CODE_EXTENSIONS)
+        total_lines = 0
+        large_files: list[dict[str, Any]] = []
+        for f in code_files[:200]:
+            lc = _count_lines(f)
+            total_lines += lc
+            if lc > 300:
+                try:
+                    rel = str(f.relative_to(ctx.project_dir))
+                except ValueError:
+                    rel = str(f)
+                large_files.append({"file": rel, "lines": lc})
+        large_files.sort(key=lambda x: x["lines"], reverse=True)
+
+        # Check for build output sizes
+        bundle_size = 0
+        bundle_assets: list[dict[str, int]] = []
+        for dist_name in ("dist", "build", "web/dist", "frontend/dist"):
+            dist_dir = ctx.project_dir / dist_name
+            if dist_dir.is_dir():
+                for f in dist_dir.rglob("*"):
+                    if f.is_file() and f.suffix in (".js", ".css", ".map"):
+                        size = f.stat().st_size
+                        bundle_size += size
+                        try:
+                            rel = str(f.relative_to(ctx.project_dir))
+                        except ValueError:
+                            rel = str(f)
+                        bundle_assets.append({"file": rel, "size_kb": size // 1024})
+        bundle_assets.sort(key=lambda x: x["size_kb"], reverse=True)
+
+        return StepResult(
+            outcome=StepOutcome.SUCCESS,
+            message="Baseline profile captured.",
+            artifacts={
+                "step": "profile",
+                "code_file_count": len(code_files),
+                "total_code_lines": total_lines,
+                "large_files": large_files[:20],
+                "bundle_size_kb": bundle_size // 1024,
+                "bundle_assets": bundle_assets[:15],
+            },
+        )
+
+
+@step_registry.register
+class BenchmarkStep(PipelineStep):
+    @property
+    def name(self) -> str:
+        return "benchmark"
+
+    @property
+    def display_name(self) -> str:
+        return "Benchmark"
+
+    async def execute(self, ctx: StepContext) -> StepResult:
+        # Re-measure the same metrics captured in profile to compare
+        baseline = ctx.previous_results.get("profile")
+        baseline_artifacts = baseline.artifacts if baseline else {}
+
+        code_files = _walk_files(ctx.project_dir, _CODE_EXTENSIONS)
+        total_lines = 0
+        large_files: list[dict[str, Any]] = []
+        for f in code_files[:200]:
+            lc = _count_lines(f)
+            total_lines += lc
+            if lc > 300:
+                try:
+                    rel = str(f.relative_to(ctx.project_dir))
+                except ValueError:
+                    rel = str(f)
+                large_files.append({"file": rel, "lines": lc})
+
+        bundle_size = 0
+        for dist_name in ("dist", "build", "web/dist", "frontend/dist"):
+            dist_dir = ctx.project_dir / dist_name
+            if dist_dir.is_dir():
+                for f in dist_dir.rglob("*"):
+                    if f.is_file() and f.suffix in (".js", ".css", ".map"):
+                        bundle_size += f.stat().st_size
+
+        # Compute deltas against baseline
+        baseline_lines = baseline_artifacts.get("total_code_lines", total_lines)
+        baseline_bundle = baseline_artifacts.get("bundle_size_kb", bundle_size // 1024)
+        baseline_large = len(baseline_artifacts.get("large_files", []))
+
+        return StepResult(
+            outcome=StepOutcome.SUCCESS,
+            message="Benchmark complete.",
+            artifacts={
+                "step": "benchmark",
+                "total_code_lines": total_lines,
+                "lines_delta": total_lines - baseline_lines,
+                "large_file_count": len(large_files),
+                "large_file_delta": len(large_files) - baseline_large,
+                "bundle_size_kb": bundle_size // 1024,
+                "bundle_delta_kb": (bundle_size // 1024) - baseline_bundle,
+            },
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test-specific steps
 # ---------------------------------------------------------------------------
 

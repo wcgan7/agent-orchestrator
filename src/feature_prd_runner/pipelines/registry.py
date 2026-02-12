@@ -161,12 +161,39 @@ SECURITY_AUDIT_PIPELINE = PipelineTemplate(
     id="security_audit",
     display_name="Security Audit",
     description="Scan dependencies and code for security issues.",
-    task_types=("security_audit",),
+    task_types=("security", "security_audit"),
     steps=(
         StepDef(name="scan_deps", display_name="Scan Dependencies"),
         StepDef(name="scan_code", display_name="Scan Code"),
         StepDef(name="report", display_name="Generate Report"),
         StepDef(name="generate_tasks", display_name="Generate Fix Tasks"),
+    ),
+)
+
+REVIEW_PIPELINE = PipelineTemplate(
+    id="review",
+    display_name="Code Review",
+    description="Analyze existing work, review changes, and produce a report.",
+    task_types=("review",),
+    steps=(
+        StepDef(name="analyze", display_name="Analyze"),
+        StepDef(name="review", display_name="Review"),
+        StepDef(name="report", display_name="Report", required=False),
+    ),
+)
+
+PERFORMANCE_PIPELINE = PipelineTemplate(
+    id="performance",
+    display_name="Performance Optimization",
+    description="Profile baseline, plan optimization, implement, benchmark to verify improvement.",
+    task_types=("performance",),
+    steps=(
+        StepDef(name="profile", display_name="Profile Baseline"),
+        StepDef(name="plan", display_name="Plan Optimization"),
+        StepDef(name="implement", display_name="Implement"),
+        StepDef(name="benchmark", display_name="Benchmark"),
+        StepDef(name="review", display_name="Review"),
+        StepDef(name="commit", display_name="Commit"),
     ),
 )
 
@@ -182,6 +209,8 @@ BUILTIN_TEMPLATES: dict[str, PipelineTemplate] = {
         TEST_PIPELINE,
         REPO_REVIEW_PIPELINE,
         SECURITY_AUDIT_PIPELINE,
+        REVIEW_PIPELINE,
+        PERFORMANCE_PIPELINE,
     ]
 }
 

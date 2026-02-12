@@ -3,6 +3,8 @@
 ## Core
 
 - `ORCHESTRATOR_FIRST_REVAMP_PLAN.md`: execution plan and implementation log.
+- `WEB_UI_FEATURE_GAPS.md`: v3 backend-vs-mounted-UI parity audit and prioritized gap list.
+- `REMAINING_UI_INTEGRATION_PLAN.md`: implementation plan for the final UI parity gaps.
 
 ## Operating Model
 

@@ -83,6 +83,9 @@ type QuickActionRecord = {
   finished_at?: string | null
   result_summary?: string | null
   promoted_task_id?: string | null
+  kind?: string | null
+  command?: string | null
+  exit_code?: number | null
 }
 
 type ImportJobRecord = {
@@ -467,8 +470,16 @@ export default function App() {
     socket.addEventListener('open', () => {
       socket.send(JSON.stringify({ action: 'subscribe', channels: ['tasks', 'queue', 'agents', 'review', 'quick_actions', 'notifications', 'system'] }))
     })
-    socket.addEventListener('message', () => {
+    socket.addEventListener('message', (event) => {
       void reloadAll()
+      try {
+        const data = JSON.parse(event.data)
+        if (data.channel === 'quick_actions' && selectedQuickActionId) {
+          void loadQuickActionDetail(selectedQuickActionId)
+        }
+      } catch {
+        // ignore non-JSON messages
+      }
     })
     socket.addEventListener('error', () => {
       socket.close()
@@ -567,15 +578,14 @@ export default function App() {
   async function submitQuickAction(event: FormEvent): Promise<void> {
     event.preventDefault()
     if (!quickPrompt.trim()) return
-    await requestJson<{ quick_action: { id: string } }>(buildApiUrl('/api/v3/quick-actions', projectDir), {
+    const resp = await requestJson<{ quick_action: QuickActionRecord }>(buildApiUrl('/api/v3/quick-actions', projectDir), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt: quickPrompt.trim() }),
     })
-    const recent = await requestJson<{ quick_actions?: QuickActionRecord[] }>(buildApiUrl('/api/v3/quick-actions', projectDir))
-    if ((recent.quick_actions || []).length > 0) {
-      setSelectedQuickActionId((recent.quick_actions || [])[0].id)
-      setSelectedQuickActionDetail((recent.quick_actions || [])[0])
+    if (resp.quick_action) {
+      setSelectedQuickActionId(resp.quick_action.id)
+      setSelectedQuickActionDetail(resp.quick_action)
     }
     setQuickPrompt('')
     setWorkOpen(false)

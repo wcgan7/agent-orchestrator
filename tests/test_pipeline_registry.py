@@ -11,7 +11,10 @@ from feature_prd_runner.pipelines.registry import (
 
 class TestPipelineTemplate:
     def test_builtin_templates_exist(self):
-        expected = {"feature", "bug_fix", "refactor", "research", "docs", "test", "repo_review", "security_audit"}
+        expected = {
+            "feature", "bug_fix", "refactor", "research", "docs",
+            "test", "repo_review", "security_audit", "review", "performance",
+        }
         assert expected == set(BUILTIN_TEMPLATES.keys())
 
     def test_feature_pipeline_steps(self):
@@ -27,6 +30,21 @@ class TestPipelineTemplate:
     def test_research_pipeline_steps(self):
         tmpl = BUILTIN_TEMPLATES["research"]
         assert tmpl.step_names() == ["gather", "analyze", "summarize", "report"]
+
+    def test_review_pipeline_steps(self):
+        tmpl = BUILTIN_TEMPLATES["review"]
+        assert tmpl.step_names() == ["analyze", "review", "report"]
+        assert tmpl.task_types == ("review",)
+
+    def test_performance_pipeline_steps(self):
+        tmpl = BUILTIN_TEMPLATES["performance"]
+        assert tmpl.step_names() == ["profile", "plan", "implement", "benchmark", "review", "commit"]
+        assert tmpl.task_types == ("performance",)
+
+    def test_security_audit_maps_security_type(self):
+        tmpl = BUILTIN_TEMPLATES["security_audit"]
+        assert "security" in tmpl.task_types
+        assert "security_audit" in tmpl.task_types
 
     def test_step_names(self):
         tmpl = PipelineTemplate(
@@ -46,7 +64,7 @@ class TestPipelineRegistry:
     def test_list_templates(self):
         reg = PipelineRegistry()
         templates = reg.list_templates()
-        assert len(templates) == 8
+        assert len(templates) == 10
 
     def test_get_template(self):
         reg = PipelineRegistry()
@@ -66,6 +84,9 @@ class TestPipelineRegistry:
         assert reg.resolve_for_task_type("research").id == "research"
         assert reg.resolve_for_task_type("docs").id == "docs"
         assert reg.resolve_for_task_type("test").id == "test"
+        assert reg.resolve_for_task_type("security").id == "security_audit"
+        assert reg.resolve_for_task_type("review").id == "review"
+        assert reg.resolve_for_task_type("performance").id == "performance"
 
     def test_resolve_unknown_type_defaults_to_feature(self):
         reg = PipelineRegistry()

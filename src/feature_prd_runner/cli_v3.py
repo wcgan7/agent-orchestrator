@@ -98,13 +98,16 @@ def _task_run(args: argparse.Namespace) -> int:
 
 
 def _quick_action(args: argparse.Namespace) -> int:
-    container, _ = _ctx(args.project_dir)
-    from .v3.domain.models import QuickActionRun, now_iso
+    container, orchestrator = _ctx(args.project_dir)
+    from .v3.domain.models import QuickActionRun
+    from .v3.quick_actions.executor import QuickActionExecutor
 
-    run = QuickActionRun(prompt=args.prompt, status='completed', started_at=now_iso(), finished_at=now_iso(), result_summary='Quick action executed')
-    container.quick_actions.upsert(run)
+    bus = EventBus(container.events, container.project_id)
+    run = QuickActionRun(prompt=args.prompt)
+    executor = QuickActionExecutor(container, bus)
+    run = executor.execute(run)
     sys.stdout.write(json.dumps({'quick_action': run.to_dict()}, indent=2) + '\n')
-    return 0
+    return 0 if run.status == 'completed' else 1
 
 
 def _orchestrator_status(args: argparse.Namespace) -> int:
