@@ -8,6 +8,7 @@ from typing import Any, Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from ...collaboration.modes import MODE_CONFIGS
 from ..domain.models import AgentRecord, QuickActionRun, Task, now_iso
 from ..events.bus import EventBus
 from ..orchestrator.service import OrchestratorService
@@ -24,6 +25,7 @@ class CreateTaskRequest(BaseModel):
     parent_id: Optional[str] = None
     pipeline_template: list[str] = Field(default_factory=lambda: ["plan", "implement", "verify", "review"])
     approval_mode: str = "human_review"
+    hitl_mode: str = "autopilot"
     source: str = "manual"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -37,6 +39,7 @@ class UpdateTaskRequest(BaseModel):
     labels: Optional[list[str]] = None
     blocked_by: Optional[list[str]] = None
     approval_mode: Optional[str] = None
+    hitl_mode: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
 
 
@@ -65,6 +68,10 @@ class QuickActionRequest(BaseModel):
 class PromoteQuickActionRequest(BaseModel):
     title: Optional[str] = None
     priority: str = "P2"
+
+
+class ApproveGateRequest(BaseModel):
+    gate: Optional[str] = None
 
 
 class OrchestratorControlRequest(BaseModel):
@@ -307,6 +314,7 @@ def create_v3_router(
             parent_id=body.parent_id,
             pipeline_template=body.pipeline_template,
             approval_mode=body.approval_mode,
+            hitl_mode=body.hitl_mode,
             source=body.source,
             metadata=body.metadata,
         )
@@ -440,6 +448,23 @@ def create_v3_router(
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.cancelled", entity_id=task.id, payload={})
         return {"task": task.to_dict()}
+
+    @router.post("/tasks/{task_id}/approve-gate")
+    async def approve_gate(task_id: str, body: ApproveGateRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, bus, _ = _ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        if not task.pending_gate:
+            raise HTTPException(status_code=400, detail="No pending gate on this task")
+        if body.gate and body.gate != task.pending_gate:
+            raise HTTPException(status_code=400, detail=f"Gate mismatch: pending={task.pending_gate}, requested={body.gate}")
+        cleared_gate = task.pending_gate
+        task.pending_gate = None
+        task.updated_at = now_iso()
+        container.tasks.upsert(task)
+        bus.emit(channel="tasks", event_type="task.gate_approved", entity_id=task.id, payload={"gate": cleared_gate})
+        return {"task": task.to_dict(), "cleared_gate": cleared_gate}
 
     @router.post("/tasks/{task_id}/dependencies")
     async def add_dependency(task_id: str, body: AddDependencyRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -626,54 +651,7 @@ def create_v3_router(
 
     @router.get("/collaboration/modes")
     async def get_collaboration_modes() -> dict[str, Any]:
-        return {
-            "modes": [
-                {
-                    "mode": "autopilot",
-                    "display_name": "Autopilot",
-                    "description": "Agents run freely.",
-                    "approve_before_plan": False,
-                    "approve_before_implement": False,
-                    "approve_before_commit": False,
-                    "approve_after_implement": False,
-                    "allow_unattended": True,
-                    "require_reasoning": False,
-                },
-                {
-                    "mode": "supervised",
-                    "display_name": "Supervised",
-                    "description": "Approve each step.",
-                    "approve_before_plan": True,
-                    "approve_before_implement": True,
-                    "approve_before_commit": True,
-                    "approve_after_implement": False,
-                    "allow_unattended": False,
-                    "require_reasoning": True,
-                },
-                {
-                    "mode": "collaborative",
-                    "display_name": "Collaborative",
-                    "description": "Work together with agents.",
-                    "approve_before_plan": False,
-                    "approve_before_implement": False,
-                    "approve_before_commit": True,
-                    "approve_after_implement": True,
-                    "allow_unattended": False,
-                    "require_reasoning": True,
-                },
-                {
-                    "mode": "review_only",
-                    "display_name": "Review Only",
-                    "description": "Review all changes before commit.",
-                    "approve_before_plan": False,
-                    "approve_before_implement": False,
-                    "approve_before_commit": True,
-                    "approve_after_implement": True,
-                    "allow_unattended": True,
-                    "require_reasoning": False,
-                },
-            ]
-        }
+        return {"modes": [config.to_dict() for config in MODE_CONFIGS.values()]}
 
     @router.get("/collaboration/presence")
     async def get_collaboration_presence() -> dict[str, Any]:
@@ -841,11 +819,21 @@ def create_v3_router(
 
     @router.post("/quick-actions")
     async def create_quick_action(body: QuickActionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        import asyncio
+        from ..quick_actions.executor import QuickActionExecutor
+
         container, bus, _ = _ctx(project_dir)
-        run = QuickActionRun(prompt=body.prompt, status="completed", started_at=now_iso(), finished_at=now_iso(), result_summary="Quick action executed")
+        run = QuickActionRun(prompt=body.prompt, status="queued")
         container.quick_actions.upsert(run)
-        bus.emit(channel="quick_actions", event_type="quick_action.completed", entity_id=run.id, payload={"status": run.status})
-        return {"quick_action": run.to_dict()}
+        bus.emit(channel="quick_actions", event_type="quick_action.queued", entity_id=run.id, payload={"status": run.status})
+
+        response_snapshot = run.to_dict()
+
+        executor = QuickActionExecutor(container, bus)
+        loop = asyncio.get_running_loop()
+        loop.run_in_executor(None, executor.execute, run)
+
+        return {"quick_action": response_snapshot}
 
     @router.get("/quick-actions")
     async def list_quick_actions(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:

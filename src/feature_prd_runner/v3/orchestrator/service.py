@@ -5,6 +5,7 @@ import threading
 import time
 from typing import Any, Optional
 
+from ...collaboration.modes import should_gate
 from ..domain.models import ReviewCycle, ReviewFinding, RunRecord, Task, now_iso
 from ..events.bus import EventBus
 from ..storage.container import V3Container
@@ -238,6 +239,50 @@ class OrchestratorService:
             )
         return findings
 
+    def _wait_for_gate(self, task: Task, gate_name: str, timeout: int = 3600) -> bool:
+        """Block until ``pending_gate`` is cleared (via approve-gate API).
+
+        Returns True if gate was approved, False on timeout/stop/cancel.
+        """
+        task.pending_gate = gate_name
+        task.updated_at = now_iso()
+        self.container.tasks.upsert(task)
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.gate_waiting",
+            entity_id=task.id,
+            payload={"gate": gate_name},
+        )
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._stop.is_set():
+                return False
+            fresh = self.container.tasks.get(task.id)
+            if fresh is None or fresh.status == "cancelled":
+                return False
+            if fresh.pending_gate is None:
+                return True
+            time.sleep(1)
+        return False
+
+    def _abort_for_gate(self, task: Task, run: RunRecord, gate_name: str) -> None:
+        """Mark task as blocked because a gate was not approved."""
+        task.status = "blocked"
+        task.error = f"Gate '{gate_name}' was not approved in time"
+        task.pending_gate = None
+        self.container.tasks.upsert(task)
+        run.status = "blocked"
+        run.finished_at = now_iso()
+        run.summary = f"Blocked at gate: {gate_name}"
+        self.container.runs.upsert(run)
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.blocked",
+            entity_id=task.id,
+            payload={"error": task.error},
+        )
+
     def _execute_task(self, task: Task) -> None:
         run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), branch=self._ensure_branch())
         run.steps = []
@@ -258,8 +303,20 @@ class OrchestratorService:
             payload={"run_id": run.id, "agent_id": task.current_agent_id},
         )
 
+        mode = getattr(task, "hitl_mode", "autopilot") or "autopilot"
+
         for base_step in ["plan", "implement", "verify"]:
+            gate_name = f"before_{base_step}" if base_step in ("plan", "implement") else None
+            if gate_name and should_gate(mode, gate_name):
+                if not self._wait_for_gate(task, gate_name):
+                    self._abort_for_gate(task, run, gate_name)
+                    return
             if not self._run_non_review_step(task, run, base_step, attempt=1):
+                return
+
+        if should_gate(mode, "after_implement"):
+            if not self._wait_for_gate(task, "after_implement"):
+                self._abort_for_gate(task, run, "after_implement")
                 return
 
         review_attempt = 0
@@ -314,6 +371,11 @@ class OrchestratorService:
             self.container.runs.upsert(run)
             self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
             return
+
+        if should_gate(mode, "before_commit"):
+            if not self._wait_for_gate(task, "before_commit"):
+                self._abort_for_gate(task, run, "before_commit")
+                return
 
         commit_sha = self._commit_for_task(task)
         run.steps.append({"step": "commit", "status": "ok", "ts": now_iso(), "commit": commit_sha})

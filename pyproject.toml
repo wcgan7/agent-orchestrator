@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 test = [
   "pytest>=7",
+  "pytest-xdist>=3",
   "tomli>=2; python_version < '3.11'",
   "httpx>=0.24.0",  # Required for FastAPI TestClient
 ]

@@ -24,5 +24,6 @@ def test_project_pin_list_unpin(tmp_path: Path) -> None:
 
 
 def test_quick_action_and_orchestrator_status(tmp_path: Path) -> None:
-    assert main(['--project-dir', str(tmp_path), 'quick-action', 'Do quick thing']) == 0
+    # Without workers configured, freeform prompts fail gracefully (exit 1)
+    assert main(['--project-dir', str(tmp_path), 'quick-action', 'Do quick thing']) == 1
     assert main(['--project-dir', str(tmp_path), 'orchestrator', 'status']) == 0

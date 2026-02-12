@@ -101,6 +101,8 @@ class Task:
 
     quality_gate: dict[str, int] = field(default_factory=lambda: {"critical": 0, "high": 0, "medium": 0, "low": 0})
     approval_mode: ApprovalMode = "human_review"
+    hitl_mode: str = "autopilot"
+    pending_gate: Optional[str] = None
 
     source: str = "manual"
 
@@ -128,6 +130,11 @@ class Task:
         payload["pipeline_template"] = list(data.get("pipeline_template") or ["plan", "implement", "verify", "review"])
         payload["quality_gate"] = dict(data.get("quality_gate") or {"critical": 0, "high": 0, "medium": 0, "low": 0})
         payload["metadata"] = dict(data.get("metadata") or {})
+        payload["hitl_mode"] = str(data.get("hitl_mode") or "autopilot")
+        payload["pending_gate"] = data.get("pending_gate")
+        if "hitl_mode" not in data:
+            am = str(data.get("approval_mode") or "human_review")
+            payload["hitl_mode"] = "autopilot" if am == "auto_approve" else "review_only"
         return cls(**payload)
 
 
@@ -168,6 +175,9 @@ class QuickActionRun:
     finished_at: Optional[str] = None
     result_summary: Optional[str] = None
     promoted_task_id: Optional[str] = None
+    kind: Optional[str] = None
+    command: Optional[str] = None
+    exit_code: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -182,6 +192,9 @@ class QuickActionRun:
             finished_at=data.get("finished_at"),
             result_summary=data.get("result_summary"),
             promoted_task_id=data.get("promoted_task_id"),
+            kind=data.get("kind"),
+            command=data.get("command"),
+            exit_code=data.get("exit_code"),
         )
 
 
