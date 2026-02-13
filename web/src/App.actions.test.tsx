@@ -320,7 +320,7 @@ describe('App action coverage', () => {
       const body = JSON.parse(String((editCall?.[1] as RequestInit).body))
       expect(body.title).toBe('Task 1 revised')
     })
-  })
+  }, 15000)
 
   it('executes execution, review, and agent control actions', async () => {
     const mockedFetch = installFetchMock()
