@@ -25,6 +25,7 @@ _REVIEW_STEPS = {"review"}
 _REPORT_STEPS = {"report", "summarize"}
 _SCAN_STEPS = {"scan", "scan_deps", "scan_code", "gather"}
 _TASK_GEN_STEPS = {"generate_tasks", "diagnose"}
+_MERGE_RESOLVE_STEPS = {"resolve_merge"}
 
 
 def _step_category(step: str) -> str:
@@ -42,6 +43,8 @@ def _step_category(step: str) -> str:
         return "scanning"
     if step in _TASK_GEN_STEPS:
         return "task_generation"
+    if step in _MERGE_RESOLVE_STEPS:
+        return "merge_resolution"
     return "general"
 
 
@@ -53,6 +56,7 @@ _CATEGORY_INSTRUCTIONS: dict[str, str] = {
     "reporting": "Produce a summary report for the following task.",
     "scanning": "Scan and gather information for the following task.",
     "task_generation": "Generate subtasks for the following task.",
+    "merge_resolution": "Resolve the merge conflicts in the following files. Both tasks' objectives must be fulfilled in the resolution.",
     "general": "Execute the following task step.",
 }
 
@@ -64,6 +68,7 @@ _CATEGORY_JSON_SCHEMAS: dict[str, str] = {
     "reporting": '{"summary": "detailed report text"}',
     "scanning": '{"findings": [{"severity": "critical|high|medium|low", "category": "string", "summary": "string", "file": "path"}]}',
     "task_generation": '{"tasks": [{"title": "string", "description": "string", "task_type": "feature|bugfix|research", "priority": "P0|P1|P2|P3"}]}',
+    "merge_resolution": '{"status": "ok|error", "summary": "string"}',
     "general": '{"status": "ok|error", "summary": "string"}',
 }
 
@@ -97,6 +102,27 @@ def build_step_prompt(*, task: Task, step: str, attempt: int, is_codex: bool) ->
                 line_ = finding.get("line", "")
                 loc = f" ({file_}:{line_})" if file_ else ""
                 parts.append(f"  - [{sev}] {summary}{loc}")
+
+    # Include merge conflict context for resolve_merge step
+    if category == "merge_resolution" and isinstance(task.metadata, dict):
+        conflict_files = task.metadata.get("merge_conflict_files")
+        if isinstance(conflict_files, dict):
+            parts.append("")
+            parts.append("Conflicted files (with <<<<<<< / ======= / >>>>>>> markers):")
+            for fpath, content in conflict_files.items():
+                parts.append(f"\n--- {fpath} ---")
+                parts.append(content)
+
+        other_tasks = task.metadata.get("merge_other_tasks")
+        if isinstance(other_tasks, list) and other_tasks:
+            parts.append("")
+            parts.append("Other task(s) whose changes conflict with this task:")
+            for info in other_tasks:
+                parts.append(str(info))
+
+        parts.append("")
+        parts.append("Edit the conflicted files to resolve all conflicts. "
+                      "Ensure BOTH this task's and the other task(s)' objectives are preserved.")
 
     if not is_codex:
         # Add JSON schema instruction for ollama
@@ -162,11 +188,13 @@ class LiveWorkerAdapter:
         # 3. Execute
         run_dir = Path(tempfile.mkdtemp(dir=str(self._container.v3_root)))
         progress_path = run_dir / "progress.json"
+        worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
+        project_dir = Path(worktree_path) if worktree_path else self._container.project_dir
         try:
             result = run_worker(
                 spec=spec,
                 prompt=prompt,
-                project_dir=self._container.project_dir,
+                project_dir=project_dir,
                 run_dir=run_dir,
                 timeout_seconds=600,
                 heartbeat_seconds=30,

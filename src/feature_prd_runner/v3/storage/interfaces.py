@@ -24,7 +24,7 @@ class TaskRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def claim_next_runnable(self, *, max_in_progress: int, repo_conflicts: set[str]) -> Optional[Task]:
+    def claim_next_runnable(self, *, max_in_progress: int) -> Optional[Task]:
         raise NotImplementedError
 
 

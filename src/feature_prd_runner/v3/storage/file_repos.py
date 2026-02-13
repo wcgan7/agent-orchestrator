@@ -129,7 +129,7 @@ class FileTaskRepository(TaskRepository):
                 self._repo._save(keep)
         return True
 
-    def claim_next_runnable(self, *, max_in_progress: int, repo_conflicts: set[str]) -> Optional[Task]:
+    def claim_next_runnable(self, *, max_in_progress: int) -> Optional[Task]:
         with self._repo._thread_lock:
             with self._repo._lock:
                 tasks = self._repo._load()
@@ -146,9 +146,6 @@ class FileTaskRepository(TaskRepository):
                         dep = by_id.get(dep_id)
                         if dep is None or dep.status not in terminal:
                             return False
-                    repo_hint = str(task.metadata.get("repo_path") or "")
-                    if repo_hint and repo_hint in repo_conflicts:
-                        return False
                     return True
 
                 runnable = [t for t in tasks if _is_runnable(t)]

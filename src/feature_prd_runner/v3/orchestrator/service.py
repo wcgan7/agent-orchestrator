@@ -5,6 +5,7 @@ import subprocess
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 from typing import Any, Optional
 
 from ...collaboration.modes import should_gate
@@ -43,6 +44,8 @@ class OrchestratorService:
         self._pool: ThreadPoolExecutor | None = None
         self._futures: dict[str, Future] = {}
         self._futures_lock = threading.Lock()
+        self._merge_lock = threading.Lock()
+        self._branch_lock = threading.Lock()
 
     def _get_pool(self) -> ThreadPoolExecutor:
         if self._pool is None:
@@ -92,6 +95,7 @@ class OrchestratorService:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
+            self._cleanup_orphaned_worktrees()
             self._stop.clear()
             self._thread = threading.Thread(target=self._loop, daemon=True, name="v3-orchestrator")
             self._thread.start()
@@ -115,8 +119,7 @@ class OrchestratorService:
             return False
 
         max_in_progress = int(orchestrator_cfg.get("concurrency", 2) or 2)
-        conflicts = self._active_repo_conflicts()
-        claimed = self.container.tasks.claim_next_runnable(max_in_progress=max_in_progress, repo_conflicts=conflicts)
+        claimed = self.container.tasks.claim_next_runnable(max_in_progress=max_in_progress)
         if not claimed:
             return False
 
@@ -169,14 +172,150 @@ class OrchestratorService:
                 break
             time.sleep(1 if handled else 2)
 
-    def _active_repo_conflicts(self) -> set[str]:
-        conflicts: set[str] = set()
-        for task in self.container.tasks.list():
-            if task.status == "in_progress":
-                repo_path = str(task.metadata.get("repo_path") or "")
-                if repo_path:
-                    conflicts.add(repo_path)
-        return conflicts
+    def _create_worktree(self, task: Task) -> Optional[Path]:
+        git_dir = self.container.project_dir / ".git"
+        if not git_dir.exists():
+            return None
+        self._ensure_branch()  # ensure run branch exists as merge target
+        worktree_dir = self.container.v3_root / "worktrees" / task.id
+        branch = f"task-{task.id}"
+        subprocess.run(
+            ["git", "worktree", "add", str(worktree_dir), "-b", branch],
+            cwd=self.container.project_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return worktree_dir
+
+    def _merge_and_cleanup(self, task: Task, worktree_dir: Path) -> None:
+        branch = f"task-{task.id}"
+        merge_failed = False
+        with self._merge_lock:
+            try:
+                subprocess.run(
+                    ["git", "merge", branch, "--no-edit"],
+                    cwd=self.container.project_dir,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError:
+                resolved = self._resolve_merge_conflict(task, branch)
+                if not resolved:
+                    subprocess.run(
+                        ["git", "merge", "--abort"],
+                        cwd=self.container.project_dir,
+                        capture_output=True,
+                        text=True,
+                    )
+                    merge_failed = True
+                    task.metadata["merge_conflict"] = True
+        # Always clean up worktree
+        subprocess.run(
+            ["git", "worktree", "remove", str(worktree_dir), "--force"],
+            cwd=self.container.project_dir,
+            capture_output=True,
+            text=True,
+        )
+        # Only delete branch if merge succeeded; preserve it for recovery on failure
+        if not merge_failed:
+            subprocess.run(
+                ["git", "branch", "-D", branch],
+                cwd=self.container.project_dir,
+                capture_output=True,
+                text=True,
+            )
+
+    def _resolve_merge_conflict(self, task: Task, branch: str) -> bool:
+        saved_worktree_dir = task.metadata.get("worktree_dir")
+        try:
+            # Get conflicted files
+            result = subprocess.run(
+                ["git", "diff", "--name-only", "--diff-filter=U"],
+                cwd=self.container.project_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            conflicted_files = [f for f in result.stdout.strip().split("\n") if f]
+            if not conflicted_files:
+                return False
+
+            # Read conflicted file contents
+            conflict_contents: dict[str, str] = {}
+            for fpath in conflicted_files:
+                full = self.container.project_dir / fpath
+                if full.exists():
+                    conflict_contents[fpath] = full.read_text(errors="replace")
+
+            # Identify other recently completed tasks whose changes may conflict
+            other_tasks_info: list[str] = []
+            for other in self.container.tasks.list():
+                if other.id != task.id and other.status == "done":
+                    other_tasks_info.append(f"- {other.title}: {other.description}")
+
+            # Build resolve prompt and store in task metadata.
+            # Temporarily clear worktree_dir so the worker runs in project_dir
+            # (where the merge conflict lives), not the worktree.
+            task.metadata.pop("worktree_dir", None)
+            task.metadata["merge_conflict_files"] = conflict_contents
+            task.metadata["merge_other_tasks"] = other_tasks_info
+            self.container.tasks.upsert(task)
+
+            # Dispatch worker to resolve
+            step_result = self.worker_adapter.run_step(task=task, step="resolve_merge", attempt=1)
+
+            if step_result.status != "ok":
+                return False
+
+            # Stage and commit the resolution
+            subprocess.run(
+                ["git", "add", "-A"],
+                cwd=self.container.project_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run(
+                ["git", "commit", "--no-edit"],
+                cwd=self.container.project_dir,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return True
+        except Exception:
+            logger.exception("Failed to resolve merge conflict for task %s", task.id)
+            return False
+        finally:
+            # Always clean up conflict metadata and restore worktree_dir
+            task.metadata.pop("merge_conflict_files", None)
+            task.metadata.pop("merge_other_tasks", None)
+            if saved_worktree_dir:
+                task.metadata["worktree_dir"] = saved_worktree_dir
+
+    def _cleanup_orphaned_worktrees(self) -> None:
+        worktrees_dir = self.container.v3_root / "worktrees"
+        if not worktrees_dir.exists():
+            return
+        if not (self.container.project_dir / ".git").exists():
+            return
+        for child in worktrees_dir.iterdir():
+            if child.is_dir():
+                branch_name = f"task-{child.name}"
+                subprocess.run(
+                    ["git", "worktree", "remove", str(child), "--force"],
+                    cwd=self.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                )
+                subprocess.run(
+                    ["git", "branch", "-D", branch_name],
+                    cwd=self.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                )
 
     def _role_for_task(self, task: Task) -> str:
         cfg = self.container.config.load()
@@ -209,31 +348,37 @@ class OrchestratorService:
     def _ensure_branch(self) -> Optional[str]:
         if self._run_branch:
             return self._run_branch
-        git_dir = self.container.project_dir / ".git"
-        if not git_dir.exists():
-            return None
-        branch = f"orchestrator-run-{int(time.time())}"
-        try:
-            subprocess.run(["git", "checkout", "-B", branch], cwd=self.container.project_dir, check=True, capture_output=True, text=True)
-            self._run_branch = branch
-            return branch
-        except subprocess.CalledProcessError:
-            return None
+        with self._branch_lock:
+            # Double-check after acquiring lock
+            if self._run_branch:
+                return self._run_branch
+            git_dir = self.container.project_dir / ".git"
+            if not git_dir.exists():
+                return None
+            branch = f"orchestrator-run-{int(time.time())}"
+            try:
+                subprocess.run(["git", "checkout", "-B", branch], cwd=self.container.project_dir, check=True, capture_output=True, text=True)
+                self._run_branch = branch
+                return branch
+            except subprocess.CalledProcessError:
+                return None
 
-    def _commit_for_task(self, task: Task) -> Optional[str]:
-        if not (self.container.project_dir / ".git").exists():
+    def _commit_for_task(self, task: Task, working_dir: Optional[Path] = None) -> Optional[str]:
+        cwd = working_dir or self.container.project_dir
+        if not (cwd / ".git").exists() and not (self.container.project_dir / ".git").exists():
             return None
-        self._ensure_branch()
+        if working_dir is None:
+            self._ensure_branch()
         try:
-            subprocess.run(["git", "add", "-A"], cwd=self.container.project_dir, check=True, capture_output=True, text=True)
+            subprocess.run(["git", "add", "-A"], cwd=cwd, check=True, capture_output=True, text=True)
             subprocess.run(
                 ["git", "commit", "--allow-empty", "-m", f"task({task.id}): {task.title[:60]}"],
-                cwd=self.container.project_dir,
+                cwd=cwd,
                 check=True,
                 capture_output=True,
                 text=True,
             )
-            sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.container.project_dir, check=True, capture_output=True, text=True).stdout.strip()
+            sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
             return sha
         except subprocess.CalledProcessError:
             return None
@@ -375,146 +520,211 @@ class OrchestratorService:
             self.container.tasks.upsert(task)
 
     def _execute_task_inner(self, task: Task) -> None:
-        run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), branch=self._ensure_branch())
-        run.steps = []
-        self.container.runs.upsert(run)
-
-        cfg = self.container.config.load()
-        max_review_attempts = int(dict(cfg.get("orchestrator") or {}).get("max_review_attempts", 3) or 3)
-
-        # Resolve pipeline template from registry
-        registry = PipelineRegistry()
-        template = registry.resolve_for_task_type(task.task_type)
-        steps = task.pipeline_template if task.pipeline_template else template.step_names()
-        task.pipeline_template = steps
-        has_review = "review" in steps
-        has_commit = "commit" in steps
-
-        task.run_ids.append(run.id)
-        task.current_step = steps[0] if steps else None
-        task.status = "in_progress"
-        task.current_agent_id = self._choose_agent_for_task(task)
-        self.container.tasks.upsert(task)
-        self.bus.emit(
-            channel="tasks",
-            event_type="task.started",
-            entity_id=task.id,
-            payload={"run_id": run.id, "agent_id": task.current_agent_id},
-        )
-
-        mode = getattr(task, "hitl_mode", "autopilot") or "autopilot"
-
-        # Phase 1: Run all pre-review/pre-commit steps
-        for step in steps:
-            if step in ("review", "commit"):
-                continue
-            gate_name = self._GATE_MAPPING.get(step)
-            if gate_name and should_gate(mode, gate_name):
-                if not self._wait_for_gate(task, gate_name):
-                    self._abort_for_gate(task, run, gate_name)
-                    return
-            if not self._run_non_review_step(task, run, step, attempt=1):
-                return
-
-        # Phase 2: Review loop (only if template has "review")
-        if has_review:
-            gate_name = self._GATE_MAPPING.get("review")
-            if gate_name and should_gate(mode, gate_name):
-                if not self._wait_for_gate(task, gate_name):
-                    self._abort_for_gate(task, run, gate_name)
-                    return
-
-            review_attempt = 0
-            review_passed = False
-
-            while review_attempt < max_review_attempts:
-                review_attempt += 1
-                task.current_step = "review"
+        worktree_dir: Optional[Path] = None
+        try:
+            worktree_dir = self._create_worktree(task)
+            if worktree_dir:
+                task.metadata["worktree_dir"] = str(worktree_dir)
                 self.container.tasks.upsert(task)
-                findings = self._findings_from_result(task, review_attempt)
-                open_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-                for finding in findings:
-                    if finding.status == "open" and finding.severity in open_counts:
-                        open_counts[finding.severity] += 1
-                cycle = ReviewCycle(
-                    task_id=task.id,
-                    attempt=review_attempt,
-                    findings=findings,
-                    open_counts=open_counts,
-                    decision="changes_requested" if self._exceeds_quality_gate(task, findings) else "approved",
-                )
-                self.container.reviews.append(cycle)
-                run.steps.append({"step": "review", "status": cycle.decision, "ts": now_iso(), "open_counts": open_counts})
-                self.bus.emit(
-                    channel="review",
-                    event_type="task.reviewed",
-                    entity_id=task.id,
-                    payload={"attempt": review_attempt, "decision": cycle.decision, "open_counts": open_counts},
-                )
 
-                if cycle.decision == "approved":
-                    review_passed = True
-                    break
+            task_branch = f"task-{task.id}" if worktree_dir else self._ensure_branch()
+            run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), branch=task_branch)
+            run.steps = []
+            self.container.runs.upsert(run)
 
-                if review_attempt >= max_review_attempts:
-                    break
+            cfg = self.container.config.load()
+            max_review_attempts = int(dict(cfg.get("orchestrator") or {}).get("max_review_attempts", 3) or 3)
 
-                # Attach open findings so the worker knows what to fix
-                open_findings = [f.to_dict() for f in findings if f.status == "open"]
-                task.metadata["review_findings"] = open_findings
-                for fix_step in ["implement_fix", "verify"]:
-                    task.retry_count += 1
-                    self.container.tasks.upsert(task)
-                    if not self._run_non_review_step(task, run, fix_step, attempt=review_attempt):
+            # Resolve pipeline template from registry
+            registry = PipelineRegistry()
+            template = registry.resolve_for_task_type(task.task_type)
+            steps = task.pipeline_template if task.pipeline_template else template.step_names()
+            task.pipeline_template = steps
+            has_review = "review" in steps
+            has_commit = "commit" in steps
+
+            task.run_ids.append(run.id)
+            task.current_step = steps[0] if steps else None
+            task.status = "in_progress"
+            task.current_agent_id = self._choose_agent_for_task(task)
+            self.container.tasks.upsert(task)
+            self.bus.emit(
+                channel="tasks",
+                event_type="task.started",
+                entity_id=task.id,
+                payload={"run_id": run.id, "agent_id": task.current_agent_id},
+            )
+
+            mode = getattr(task, "hitl_mode", "autopilot") or "autopilot"
+
+            # Phase 1: Run all pre-review/pre-commit steps
+            for step in steps:
+                if step in ("review", "commit"):
+                    continue
+                gate_name = self._GATE_MAPPING.get(step)
+                if gate_name and should_gate(mode, gate_name):
+                    if not self._wait_for_gate(task, gate_name):
+                        self._abort_for_gate(task, run, gate_name)
                         return
-                task.metadata.pop("review_findings", None)
-
-            if not review_passed:
-                task.status = "blocked"
-                task.error = "Review attempt cap exceeded"
-                task.current_step = "review"
-                self.container.tasks.upsert(task)
-                run.status = "blocked"
-                run.finished_at = now_iso()
-                run.summary = "Blocked due to unresolved review findings"
-                self.container.runs.upsert(run)
-                self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
-                return
-
-        # Phase 3: Commit (only if template has "commit")
-        if has_commit:
-            if should_gate(mode, "before_commit"):
-                if not self._wait_for_gate(task, "before_commit"):
-                    self._abort_for_gate(task, run, "before_commit")
+                if not self._run_non_review_step(task, run, step, attempt=1):
                     return
 
-            commit_sha = self._commit_for_task(task)
-            run.steps.append({"step": "commit", "status": "ok", "ts": now_iso(), "commit": commit_sha})
+            # Phase 2: Review loop (only if template has "review")
+            if has_review:
+                gate_name = self._GATE_MAPPING.get("review")
+                if gate_name and should_gate(mode, gate_name):
+                    if not self._wait_for_gate(task, gate_name):
+                        self._abort_for_gate(task, run, gate_name)
+                        return
 
-            if task.approval_mode == "auto_approve":
+                review_attempt = 0
+                review_passed = False
+
+                while review_attempt < max_review_attempts:
+                    review_attempt += 1
+                    task.current_step = "review"
+                    self.container.tasks.upsert(task)
+                    findings = self._findings_from_result(task, review_attempt)
+                    open_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+                    for finding in findings:
+                        if finding.status == "open" and finding.severity in open_counts:
+                            open_counts[finding.severity] += 1
+                    cycle = ReviewCycle(
+                        task_id=task.id,
+                        attempt=review_attempt,
+                        findings=findings,
+                        open_counts=open_counts,
+                        decision="changes_requested" if self._exceeds_quality_gate(task, findings) else "approved",
+                    )
+                    self.container.reviews.append(cycle)
+                    run.steps.append({"step": "review", "status": cycle.decision, "ts": now_iso(), "open_counts": open_counts})
+                    self.bus.emit(
+                        channel="review",
+                        event_type="task.reviewed",
+                        entity_id=task.id,
+                        payload={"attempt": review_attempt, "decision": cycle.decision, "open_counts": open_counts},
+                    )
+
+                    if cycle.decision == "approved":
+                        review_passed = True
+                        break
+
+                    if review_attempt >= max_review_attempts:
+                        break
+
+                    # Attach open findings so the worker knows what to fix
+                    open_findings = [f.to_dict() for f in findings if f.status == "open"]
+                    task.metadata["review_findings"] = open_findings
+                    for fix_step in ["implement_fix", "verify"]:
+                        task.retry_count += 1
+                        self.container.tasks.upsert(task)
+                        if not self._run_non_review_step(task, run, fix_step, attempt=review_attempt):
+                            return
+                    task.metadata.pop("review_findings", None)
+
+                if not review_passed:
+                    task.status = "blocked"
+                    task.error = "Review attempt cap exceeded"
+                    task.current_step = "review"
+                    self.container.tasks.upsert(task)
+                    run.status = "blocked"
+                    run.finished_at = now_iso()
+                    run.summary = "Blocked due to unresolved review findings"
+                    self.container.runs.upsert(run)
+                    self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
+                    return
+
+            # Phase 3: Commit (only if template has "commit")
+            if has_commit:
+                if should_gate(mode, "before_commit"):
+                    if not self._wait_for_gate(task, "before_commit"):
+                        self._abort_for_gate(task, run, "before_commit")
+                        return
+
+                commit_sha = self._commit_for_task(task, worktree_dir)
+                run.steps.append({"step": "commit", "status": "ok", "ts": now_iso(), "commit": commit_sha})
+
+                # Merge worktree branch back to run branch
+                if worktree_dir:
+                    self._merge_and_cleanup(task, worktree_dir)
+                    worktree_dir = None  # prevent double-cleanup in finally
+
+                # If merge conflict couldn't be resolved, block the task
+                if task.metadata.get("merge_conflict"):
+                    task.status = "blocked"
+                    task.error = "Merge conflict could not be resolved automatically"
+                    task.metadata["unmerged_branch"] = f"task-{task.id}"
+                    self.container.tasks.upsert(task)
+                    run.status = "blocked"
+                    run.finished_at = now_iso()
+                    run.summary = "Blocked due to unresolved merge conflict"
+                    self.container.runs.upsert(run)
+                    self.bus.emit(
+                        channel="tasks",
+                        event_type="task.blocked",
+                        entity_id=task.id,
+                        payload={"error": task.error},
+                    )
+                    return
+
+                if task.approval_mode == "auto_approve":
+                    task.status = "done"
+                    task.current_step = None
+                    run.status = "done"
+                    run.summary = "Completed with auto-approve"
+                    self.bus.emit(channel="tasks", event_type="task.done", entity_id=task.id, payload={"commit": commit_sha})
+                else:
+                    task.status = "in_review"
+                    task.current_step = None
+                    run.status = "in_review"
+                    run.summary = "Awaiting human review"
+                    self.bus.emit(channel="review", event_type="task.awaiting_human", entity_id=task.id, payload={"commit": commit_sha})
+            else:
+                # Templates without commit (research, repo_review, security_audit, review)
+                # Clean up worktree if present — no merge needed for non-commit pipelines
+                if worktree_dir:
+                    subprocess.run(
+                        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+                        cwd=self.container.project_dir,
+                        capture_output=True,
+                        text=True,
+                    )
+                    subprocess.run(
+                        ["git", "branch", "-D", f"task-{task.id}"],
+                        cwd=self.container.project_dir,
+                        capture_output=True,
+                        text=True,
+                    )
+                    worktree_dir = None  # prevent double-cleanup in finally
+
                 task.status = "done"
                 task.current_step = None
                 run.status = "done"
-                run.summary = "Completed with auto-approve"
-                self.bus.emit(channel="tasks", event_type="task.done", entity_id=task.id, payload={"commit": commit_sha})
-            else:
-                task.status = "in_review"
-                task.current_step = None
-                run.status = "in_review"
-                run.summary = "Awaiting human review"
-                self.bus.emit(channel="review", event_type="task.awaiting_human", entity_id=task.id, payload={"commit": commit_sha})
-        else:
-            # Templates without commit (research, repo_review, security_audit, review)
-            task.status = "done"
-            task.current_step = None
-            run.status = "done"
-            run.summary = "Pipeline completed"
-            self.bus.emit(channel="tasks", event_type="task.done", entity_id=task.id, payload={})
+                run.summary = "Pipeline completed"
+                self.bus.emit(channel="tasks", event_type="task.done", entity_id=task.id, payload={})
 
-        task.error = None
-        self.container.tasks.upsert(task)
-        run.finished_at = now_iso()
-        self.container.runs.upsert(run)
+            task.error = None
+            task.metadata.pop("worktree_dir", None)
+            self.container.tasks.upsert(task)
+            run.finished_at = now_iso()
+            self.container.runs.upsert(run)
+        finally:
+            # Clean up worktree on any failure path
+            if worktree_dir and worktree_dir.exists():
+                subprocess.run(
+                    ["git", "worktree", "remove", str(worktree_dir), "--force"],
+                    cwd=self.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                )
+                subprocess.run(
+                    ["git", "branch", "-D", f"task-{task.id}"],
+                    cwd=self.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                )
+            if task.metadata.pop("worktree_dir", None):
+                self.container.tasks.upsert(task)
 
 
 def create_orchestrator(

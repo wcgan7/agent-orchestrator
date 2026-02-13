@@ -126,24 +126,24 @@ def test_single_run_branch_receives_per_task_commits(tmp_path: Path) -> None:
     assert log[1].startswith(f"task({first.id})")
 
 
-def test_scheduler_respects_priority_dependency_and_repo_conflict(tmp_path: Path) -> None:
+def test_scheduler_respects_priority_and_dependency(tmp_path: Path) -> None:
     container, _ = _service(tmp_path)
-    high = Task(title="High", status="ready", priority="P0", metadata={"repo_path": "/repo/a"})
-    mid = Task(title="Mid", status="ready", priority="P1", metadata={"repo_path": "/repo/b"})
-    low = Task(title="Low", status="ready", priority="P2", metadata={"repo_path": "/repo/c"})
+    high = Task(title="High", status="ready", priority="P0")
+    mid = Task(title="Mid", status="ready", priority="P1")
+    low = Task(title="Low", status="ready", priority="P2")
     blocked = Task(title="Blocked", status="ready", priority="P0", blocked_by=["missing-task"])
     container.tasks.upsert(high)
     container.tasks.upsert(mid)
     container.tasks.upsert(low)
     container.tasks.upsert(blocked)
 
-    claimed_first = container.tasks.claim_next_runnable(max_in_progress=3, repo_conflicts={"/repo/a"})
+    claimed_first = container.tasks.claim_next_runnable(max_in_progress=5)
     assert claimed_first is not None
-    assert claimed_first.id == mid.id
+    assert claimed_first.id == high.id
 
-    claimed_second = container.tasks.claim_next_runnable(max_in_progress=3, repo_conflicts=set())
+    claimed_second = container.tasks.claim_next_runnable(max_in_progress=5)
     assert claimed_second is not None
-    assert claimed_second.id == high.id
+    assert claimed_second.id == mid.id
 
 
 def test_scheduler_enforces_concurrency_cap(tmp_path: Path) -> None:
@@ -153,5 +153,5 @@ def test_scheduler_enforces_concurrency_cap(tmp_path: Path) -> None:
     container.tasks.upsert(running)
     container.tasks.upsert(queued)
 
-    claimed = container.tasks.claim_next_runnable(max_in_progress=1, repo_conflicts=set())
+    claimed = container.tasks.claim_next_runnable(max_in_progress=1)
     assert claimed is None

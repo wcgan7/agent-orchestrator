@@ -151,17 +151,18 @@ def test_concurrency_cap_respected(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Repo conflict prevents parallel execution
+# 3. Same-repo tasks now run in parallel (worktrees provide isolation)
 # ---------------------------------------------------------------------------
 
 
-def test_repo_conflict_prevents_parallel(tmp_path: Path) -> None:
-    """Two tasks with the same repo_path should not run concurrently."""
-    gate = threading.Event()
+def test_same_repo_tasks_run_in_parallel(tmp_path: Path) -> None:
+    """Two tasks with the same repo_path can now run concurrently
+    because worktrees provide isolation."""
+    barrier = threading.Barrier(2, timeout=5)
 
-    class BlockingAdapter:
+    class BarrierAdapter:
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
-            gate.wait(timeout=10)
+            barrier.wait()
             return StepResult(status="ok")
 
     container = V3Container(tmp_path)
@@ -169,7 +170,7 @@ def test_repo_conflict_prevents_parallel(tmp_path: Path) -> None:
     cfg["orchestrator"] = {"concurrency": 4}
     container.config.save(cfg)
     bus = EventBus(container.events, container.project_id)
-    service = OrchestratorService(container, bus, worker_adapter=BlockingAdapter())
+    service = OrchestratorService(container, bus, worker_adapter=BarrierAdapter())
 
     t1 = Task(title="Task A", task_type="chore", status="ready",
               approval_mode="auto_approve", hitl_mode="autopilot",
@@ -180,13 +181,11 @@ def test_repo_conflict_prevents_parallel(tmp_path: Path) -> None:
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
 
-    # First tick claims one task
+    # Both ticks should claim tasks — no repo conflict blocking
     assert service.tick_once() is True
-    # Second tick should be blocked by repo conflict
-    assert service.tick_once() is False
+    assert service.tick_once() is True
 
-    # Release and clean up
-    gate.set()
+    # Wait for both to complete (barrier ensures they ran concurrently)
     deadline = time.time() + 10
     while time.time() < deadline:
         with service._futures_lock:
@@ -194,6 +193,11 @@ def test_repo_conflict_prevents_parallel(tmp_path: Path) -> None:
                 break
         time.sleep(0.1)
     service._sweep_futures()
+
+    for tid in [t1.id, t2.id]:
+        task = container.tasks.get(tid)
+        assert task is not None
+        assert task.status == "done"
 
 
 # ---------------------------------------------------------------------------

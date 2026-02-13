@@ -232,7 +232,7 @@ def test_claim_lock_prevents_double_claim(tmp_path: Path) -> None:
     container.tasks.upsert(task)
 
     def _claim() -> str | None:
-        claimed = container.tasks.claim_next_runnable(max_in_progress=4, repo_conflicts=set())
+        claimed = container.tasks.claim_next_runnable(max_in_progress=4)
         return claimed.id if claimed else None
 
     with ThreadPoolExecutor(max_workers=2) as pool:
