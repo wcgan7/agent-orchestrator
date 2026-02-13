@@ -46,6 +46,8 @@ Run unit/integration tests (Vitest):
 npm test
 ```
 
+This now includes a mounted-surface guard (`check:mounted-api-contracts`) that fails if `main.tsx`-reachable files import `legacyApi`.
+
 Optional:
 
 ```bash
@@ -69,19 +71,17 @@ npm run preview
 
 ## Features
 
-- **Real-time Updates**: WebSocket-based live updates for runs and logs
-- **Project Overview**: Current status, progress, and task breakdown
-- **Tasks & Runs**: Tables for tasks and recent runs
-- **Phase Timeline**: Visual timeline of all phases with dependencies
-- **Live Logs**: Streaming logs from active runs
-- **Metrics Panel**: API usage, costs, timing, and code changes
-- **Controls**: Retry, skip, resume, stop
-- **Approvals**: Pending approvals with approve/reject + feedback
-- **File Review**: Per-file approve/reject flow with diffs
-- **Breakpoints**: Create/toggle/delete/clear breakpoints
-- **Chat**: Send guidance/requirements/corrections during a run
-- **Auth (Optional)**: Token-based login when enabled on the server
-- **Multi-Project**: Select a discovered `.prd_runner` project
+- **Board**: Kanban columns (`backlog` to `done`) with inline task detail/edit/actions.
+- **Execution**: Orchestrator status, queue depth, execution batches, pause/resume/drain/stop controls.
+- **Review Queue**: Approve or request changes with optional guidance.
+- **Agents**: Spawn/pause/resume/terminate agents.
+- **Create Work**:
+  - Create Task
+  - Import PRD (preview/commit + import job detail)
+  - Quick Action (detail + promote to task)
+- **Task Explorer**: Filtered task list with search, blocked-only toggle, and pagination.
+- **Project management**: Active repo selector, pin/unpin project paths, and directory browser.
+- **Realtime refresh**: `/ws` events trigger mounted surface refresh.
 
 ## Architecture
 
@@ -103,43 +103,21 @@ See `vite.config.ts` for proxy configuration.
 
 ## Components
 
-### RunDashboard
+### App
 
-Main overview showing:
-- Phase completion progress
-- Task status breakdown
-- Current phase/task
-- Last error (if any)
+`web/src/App.tsx` is the mounted UI entry and source of truth for active surfaces.
 
-### PhaseTimeline
+### App Panels
 
-List of all phases with:
-- Status (pending, running, done, blocked)
-- Dependencies
-- Progress bars
+- `TaskExplorerPanel`
+- `ImportJobPanel`
+- `QuickActionDetailPanel`
 
-### LiveLog
+### Legacy Components
 
-Real-time log streaming:
-- WebSocket connection
-- Auto-scrolling
-- Connection status indicator
-
-### MetricsPanel
-
-Metrics display:
-- API calls and token usage
-- Estimated costs
-- Wall time
-- Code changes (files, lines added/removed)
+Unmounted cockpit components were pruned from `src` to keep the runtime surface focused on mounted routes only.
 
 ## Development Notes
-
-### Polling
-
-The dashboard uses polling for status and phases (every 5 seconds) as a fallback. WebSocket is used for real-time log streaming.
-
-For better performance, consider implementing WebSocket for all real-time data in a future iteration.
 
 ### Error Handling
 
@@ -154,5 +132,5 @@ The dashboard is responsive and works on mobile devices, tablets, and desktops.
 - [ ] Dark theme
 - [ ] Export reports (PDF, CSV)
 - [ ] Email/Slack notifications
-- [ ] WebSocket for all realtime panels (status/tasks/phases)
+- [ ] Dedicated typed API client for mounted routes
 - [ ] More hardening + E2E tests
