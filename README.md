@@ -89,6 +89,7 @@ Primary configurable areas:
 - `agent_routing` (default role, task-type role routing, provider overrides)
 - `defaults.quality_gate`
 - `workers` (default provider, routing, providers)
+- `project.commands` (per-language test, lint, typecheck, format commands)
 
 ## Verify Locally
 

@@ -103,12 +103,66 @@ Config sections exposed in UI/API:
 - `agent_routing`
 - `defaults.quality_gate`
 - `workers`
+- `project.commands`
 
 Examples:
 - Control concurrency and max review attempts.
 - Route task types to agent roles.
 - Override worker/provider by role or route.
 - Tune quality gate thresholds.
+- Declare project-specific test/lint/typecheck/format commands per language.
+
+### Project Commands
+
+Workers receive generic verification instructions by default ("run the project's tests").
+To give them exact commands, add a `project.commands` section keyed by language:
+
+```yaml
+# .prd_runner/v3/config.yaml
+project:
+  commands:
+    python:
+      test: ".venv/bin/pytest -n auto --tb=short"
+      lint: ".venv/bin/ruff check ."
+      typecheck: ".venv/bin/mypy . --strict"
+      format: ".venv/bin/ruff format ."
+    typescript:
+      test: "npm test"
+      lint: "npx eslint ."
+      typecheck: "npx tsc --noEmit"
+```
+
+Rules:
+- Language keys must be lowercase (`python`, `typescript`, `go`, `rust`, `javascript`).
+- All languages and all fields are optional. Omitted entries mean the worker auto-detects.
+- Commands are injected into **implementation** and **verification** prompts only.
+- Only languages actually detected in the project (via marker files like `pyproject.toml`,
+  `tsconfig.json`, `go.mod`, etc.) are included — extra entries are ignored.
+
+You can also set commands via the API:
+
+```bash
+curl -X PATCH http://localhost:8080/api/v3/settings \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "project": {
+      "commands": {
+        "python": {
+          "test": ".venv/bin/pytest -n auto",
+          "lint": ".venv/bin/ruff check ."
+        }
+      }
+    }
+  }'
+```
+
+To remove a single command, set it to an empty string:
+
+```bash
+curl -X PATCH http://localhost:8080/api/v3/settings \
+  -H 'Content-Type: application/json' \
+  -d '{"project": {"commands": {"python": {"lint": ""}}}}'
+```
 
 ## Realtime Behavior
 
