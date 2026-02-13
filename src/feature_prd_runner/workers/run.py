@@ -7,7 +7,7 @@ import socket
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -31,6 +31,54 @@ class WorkerRunResult:
     timed_out: bool
     no_heartbeat: bool
     response_text: str = ""
+    human_blocking_issues: list[dict[str, str]] = field(default_factory=list)
+
+
+def _extract_human_blocking_issues(progress_path: Path) -> list[dict[str, str]]:
+    """Best-effort parse of human escalation issues from progress.json."""
+    if not progress_path.exists():
+        return []
+    try:
+        raw = json.loads(progress_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(raw, dict):
+        return []
+    issues = raw.get("human_blocking_issues")
+    if not isinstance(issues, list):
+        return []
+
+    normalized: list[dict[str, str]] = []
+    for item in issues:
+        if isinstance(item, str):
+            summary = item.strip()
+            if summary:
+                normalized.append({"summary": summary})
+            continue
+
+        if not isinstance(item, dict):
+            continue
+
+        summary = str(item.get("summary") or item.get("issue") or "").strip()
+        details = str(item.get("details") or item.get("rationale") or "").strip()
+        if not summary and details:
+            summary = details.splitlines()[0][:200].strip()
+        if not summary:
+            continue
+
+        issue: dict[str, str] = {"summary": summary}
+        if details:
+            issue["details"] = details
+        for key in ("category", "action", "blocking_on", "severity"):
+            value = item.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                issue[key] = text
+        normalized.append(issue)
+
+    return normalized[:20]
 
 
 def _run_ollama_generate(
@@ -180,6 +228,7 @@ def run_worker(
             expected_run_id=expected_run_id,
             on_spawn=on_spawn,
         )
+        human_blocking_issues = _extract_human_blocking_issues(progress_path)
         return WorkerRunResult(
             provider=spec.name,
             prompt_path=str(run_result.get("prompt_path") or ""),
@@ -192,6 +241,7 @@ def run_worker(
             timed_out=bool(run_result.get("timed_out")),
             no_heartbeat=bool(run_result.get("no_heartbeat")),
             response_text="",
+            human_blocking_issues=human_blocking_issues,
         )
 
     if spec.type == "ollama":
@@ -201,7 +251,7 @@ def run_worker(
             spec.model,
             timeout_seconds,
         )
-        return _run_ollama_generate(
+        result = _run_ollama_generate(
             endpoint=str(spec.endpoint),
             model=str(spec.model),
             prompt=prompt,
@@ -210,5 +260,9 @@ def run_worker(
             temperature=spec.temperature,
             num_ctx=spec.num_ctx,
         )
+        human_blocking_issues = _extract_human_blocking_issues(progress_path)
+        if human_blocking_issues:
+            return replace(result, human_blocking_issues=human_blocking_issues)
+        return result
 
     raise ValueError(f"Unsupported worker type '{spec.type}'")

@@ -155,3 +155,29 @@ def test_scheduler_enforces_concurrency_cap(tmp_path: Path) -> None:
 
     claimed = container.tasks.claim_next_runnable(max_in_progress=1)
     assert claimed is None
+
+
+def test_human_blocking_step_sets_pending_gate_and_blocks_task(tmp_path: Path) -> None:
+    container, service = _service(tmp_path)
+    task = Task(
+        title="Needs decision",
+        status="ready",
+        approval_mode="auto_approve",
+        metadata={
+            "scripted_steps": {
+                "plan": {
+                    "status": "human_blocked",
+                    "summary": "Need API token",
+                    "human_blocking_issues": [{"summary": "Need API token"}],
+                }
+            }
+        },
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+
+    assert result.status == "blocked"
+    assert result.pending_gate == "human_intervention"
+    assert result.error == "Need API token"
+    assert result.metadata.get("human_blocking_issues") == [{"summary": "Need API token"}]

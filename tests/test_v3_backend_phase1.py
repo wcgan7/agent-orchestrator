@@ -328,6 +328,89 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert reloaded.json() == body
 
 
+def test_project_commands_settings_round_trip(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        # Baseline: empty commands
+        baseline = client.get("/api/v3/settings")
+        assert baseline.status_code == 200
+        assert baseline.json()["project"]["commands"] == {}
+
+        # Set python commands
+        resp = client.patch(
+            "/api/v3/settings",
+            json={"project": {"commands": {"python": {"test": "pytest -n auto", "lint": "ruff check ."}}}},
+        )
+        assert resp.status_code == 200
+        cmds = resp.json()["project"]["commands"]
+        assert cmds["python"]["test"] == "pytest -n auto"
+        assert cmds["python"]["lint"] == "ruff check ."
+
+        # Reload and verify persistence
+        reloaded = client.get("/api/v3/settings")
+        assert reloaded.json()["project"]["commands"] == cmds
+
+        # Merge: add typecheck, leave test and lint untouched
+        resp2 = client.patch(
+            "/api/v3/settings",
+            json={"project": {"commands": {"python": {"typecheck": "mypy ."}}}},
+        )
+        assert resp2.status_code == 200
+        cmds2 = resp2.json()["project"]["commands"]["python"]
+        assert cmds2["test"] == "pytest -n auto"
+        assert cmds2["lint"] == "ruff check ."
+        assert cmds2["typecheck"] == "mypy ."
+
+        # Remove a field by setting to empty string
+        resp3 = client.patch(
+            "/api/v3/settings",
+            json={"project": {"commands": {"python": {"lint": ""}}}},
+        )
+        assert resp3.status_code == 200
+        cmds3 = resp3.json()["project"]["commands"]["python"]
+        assert "lint" not in cmds3
+        assert cmds3["test"] == "pytest -n auto"
+        assert cmds3["typecheck"] == "mypy ."
+
+        # Remove all fields for a language → language entry removed
+        resp4 = client.patch(
+            "/api/v3/settings",
+            json={"project": {"commands": {"python": {"test": "", "typecheck": ""}}}},
+        )
+        assert resp4.status_code == 200
+        assert resp4.json()["project"]["commands"] == {}
+
+
+def test_project_commands_language_key_normalized(tmp_path: Path) -> None:
+    """Uppercase/mixed-case language keys are normalized to lowercase."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        resp = client.patch(
+            "/api/v3/settings",
+            json={"project": {"commands": {"PYTHON": {"test": "pytest"}, "TypeScript": {"lint": "eslint ."}}}},
+        )
+        assert resp.status_code == 200
+        cmds = resp.json()["project"]["commands"]
+        assert "python" in cmds
+        assert "typescript" in cmds
+        assert "PYTHON" not in cmds
+        assert "TypeScript" not in cmds
+
+
+def test_project_commands_empty_language_key_ignored(tmp_path: Path) -> None:
+    """Empty string language key is silently ignored."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        resp = client.patch(
+            "/api/v3/settings",
+            json={"project": {"commands": {"": {"test": "pytest"}, "python": {"lint": "ruff check ."}}}},
+        )
+        assert resp.status_code == 200
+        cmds = resp.json()["project"]["commands"]
+        assert "" not in cmds
+        assert cmds["python"]["lint"] == "ruff check ."
+
+
 def test_claim_lock_prevents_double_claim(tmp_path: Path) -> None:
     container = V3Container(tmp_path)
     task = Task(title="Concurrent claim", status="ready")
@@ -356,6 +439,84 @@ def test_state_machine_allows_and_rejects_expected_transitions(tmp_path: Path) -
         invalid = client.post(f"/api/v3/tasks/{task_id}/transition", json={"status": "done"})
         assert invalid.status_code == 400
         assert "Invalid transition" in invalid.text
+
+
+def test_api_surfaces_human_blocking_issues_on_task_and_timeline(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v3/tasks",
+            json={
+                "title": "Needs credentials",
+                "approval_mode": "auto_approve",
+                "metadata": {
+                    "scripted_steps": {
+                        "plan": {
+                            "status": "human_blocked",
+                            "summary": "Need production API token",
+                            "human_blocking_issues": [
+                                {
+                                    "summary": "Need production API token",
+                                    "details": "Grant read-only access",
+                                    "action": "Provide token",
+                                }
+                            ],
+                        }
+                    }
+                },
+            },
+        ).json()["task"]
+
+        run_resp = client.post(f"/api/v3/tasks/{created['id']}/run")
+        assert run_resp.status_code == 200
+        task = run_resp.json()["task"]
+        assert task["status"] == "blocked"
+        assert task["pending_gate"] == "human_intervention"
+        assert len(task.get("human_blocking_issues") or []) == 1
+        assert task["human_blocking_issues"][0]["summary"] == "Need production API token"
+
+        timeline = client.get(f"/api/v3/collaboration/timeline/{created['id']}")
+        assert timeline.status_code == 200
+        events = timeline.json()["events"]
+        assert any((event.get("human_blocking_issues") or []) for event in events)
+
+
+def test_retry_clears_pending_gate_and_human_blockers(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v3/tasks",
+            json={
+                "title": "Needs credentials",
+                "approval_mode": "auto_approve",
+                "metadata": {
+                    "scripted_steps": {
+                        "plan": {
+                            "status": "human_blocked",
+                            "summary": "Need production API token",
+                            "human_blocking_issues": [{"summary": "Need production API token"}],
+                        }
+                    }
+                },
+            },
+        ).json()["task"]
+
+        run_resp = client.post(f"/api/v3/tasks/{created['id']}/run")
+        assert run_resp.status_code == 200
+        blocked_task = run_resp.json()["task"]
+        assert blocked_task["status"] == "blocked"
+        assert blocked_task["pending_gate"] == "human_intervention"
+        assert blocked_task.get("human_blocking_issues")
+
+        retry_resp = client.post(f"/api/v3/tasks/{created['id']}/retry")
+        assert retry_resp.status_code == 200
+        retried_task = retry_resp.json()["task"]
+        assert retried_task["status"] == "ready"
+        assert retried_task["pending_gate"] is None
+        assert retried_task.get("human_blocking_issues") == []
+
+        rerun_resp = client.post(f"/api/v3/tasks/{created['id']}/run")
+        assert rerun_resp.status_code == 200
 
 
 def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:

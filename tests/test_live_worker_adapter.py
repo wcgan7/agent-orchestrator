@@ -12,6 +12,7 @@ from feature_prd_runner.v3.orchestrator.live_worker_adapter import (
     LiveWorkerAdapter,
     _extract_json,
     build_step_prompt,
+    detect_project_languages,
 )
 from feature_prd_runner.v3.orchestrator.worker_adapter import StepResult
 from feature_prd_runner.v3.storage.container import V3Container
@@ -39,7 +40,9 @@ def _make_run_result(
     *,
     exit_code: int = 0,
     timed_out: bool = False,
+    no_heartbeat: bool = False,
     response_text: str = "",
+    human_blocking_issues: list[dict[str, str]] | None = None,
 ) -> WorkerRunResult:
     return WorkerRunResult(
         provider="test",
@@ -51,8 +54,9 @@ def _make_run_result(
         runtime_seconds=60,
         exit_code=exit_code,
         timed_out=timed_out,
-        no_heartbeat=False,
+        no_heartbeat=no_heartbeat,
         response_text=response_text,
+        human_blocking_issues=list(human_blocking_issues or []),
     )
 
 
@@ -126,7 +130,71 @@ def test_codex_success_maps_to_ok(adapter: LiveWorkerAdapter) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Codex failure maps to error
+# 3. Step timeout can be overridden per task metadata
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_override_from_task_metadata(adapter: LiveWorkerAdapter) -> None:
+    run_result = _make_run_result(exit_code=0)
+    task = _make_task(metadata={"step_timeouts": {"implement": 42}})
+
+    with (
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ) as run_worker_mock,
+    ):
+        result = adapter.run_step(task=task, step="implement", attempt=1)
+
+    assert result.status == "ok"
+    assert run_worker_mock.call_args.kwargs["timeout_seconds"] == 42
+
+
+# ---------------------------------------------------------------------------
+# 4. Template timeout is used when no metadata override exists
+# ---------------------------------------------------------------------------
+
+
+def test_timeout_defaults_from_pipeline_template(adapter: LiveWorkerAdapter) -> None:
+    run_result = _make_run_result(exit_code=0)
+    task = _make_task(task_type="bug")
+
+    with (
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ) as run_worker_mock,
+    ):
+        result = adapter.run_step(task=task, step="reproduce", attempt=1)
+
+    assert result.status == "ok"
+    assert run_worker_mock.call_args.kwargs["timeout_seconds"] == 300
+
+
+# ---------------------------------------------------------------------------
+# 5. Codex failure maps to error
 # ---------------------------------------------------------------------------
 
 
@@ -157,7 +225,7 @@ def test_codex_failure_maps_to_error(adapter: LiveWorkerAdapter) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Codex timeout maps to error
+# 6. Codex timeout maps to error
 # ---------------------------------------------------------------------------
 
 
@@ -188,7 +256,74 @@ def test_codex_timeout_maps_to_error(adapter: LiveWorkerAdapter) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. Ollama review parses findings
+# 7. Codex no-heartbeat maps to explicit stall error
+# ---------------------------------------------------------------------------
+
+
+def test_codex_no_heartbeat_maps_to_stalled_error(adapter: LiveWorkerAdapter) -> None:
+    run_result = _make_run_result(exit_code=1, no_heartbeat=True)
+
+    with (
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ),
+    ):
+        result = adapter.run_step(task=_make_task(), step="implement", attempt=1)
+
+    assert result.status == "error"
+    assert "stalled" in (result.summary or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# 8. Human-blocking issues map to dedicated status
+# ---------------------------------------------------------------------------
+
+
+def test_human_blocking_issues_map_to_human_blocked(adapter: LiveWorkerAdapter) -> None:
+    run_result = _make_run_result(
+        exit_code=0,
+        human_blocking_issues=[{"summary": "Need production API token"}],
+    )
+
+    with (
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ),
+    ):
+        result = adapter.run_step(task=_make_task(), step="implement", attempt=1)
+
+    assert result.status == "human_blocked"
+    assert result.human_blocking_issues is not None
+    assert result.human_blocking_issues[0]["summary"] == "Need production API token"
+    assert "human intervention required" in (result.summary or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# 9. Ollama review parses findings
 # ---------------------------------------------------------------------------
 
 
@@ -223,7 +358,7 @@ def test_ollama_review_parses_findings(adapter: LiveWorkerAdapter) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. Ollama generate_tasks parses tasks
+# 10. Ollama generate_tasks parses tasks
 # ---------------------------------------------------------------------------
 
 
@@ -257,7 +392,7 @@ def test_ollama_generate_tasks_parses_tasks(adapter: LiveWorkerAdapter) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 7. Ollama implement extracts summary
+# 11. Ollama implement extracts summary
 # ---------------------------------------------------------------------------
 
 
@@ -447,3 +582,411 @@ def test_ollama_verify_fail(adapter: LiveWorkerAdapter) -> None:
 
     assert result.status == "error"
     assert result.summary == "3 tests failed"
+
+
+# ---------------------------------------------------------------------------
+# Preamble and guardrails in prompts
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("step", ["plan", "implement", "review", "verify", "report"])
+def test_prompt_includes_preamble(step: str) -> None:
+    task = _make_task()
+    prompt = build_step_prompt(task=task, step=step, attempt=1, is_codex=True)
+    assert "autonomous coding agent" in prompt
+    assert "coordinator" in prompt
+    assert "human-blocking issue" in prompt
+
+
+@pytest.mark.parametrize("step", ["plan", "implement", "review", "verify", "report"])
+def test_prompt_includes_guardrails(step: str) -> None:
+    task = _make_task()
+    prompt = build_step_prompt(task=task, step=step, attempt=1, is_codex=True)
+    assert "Do NOT commit" in prompt
+    assert ".prd_runner/" in prompt
+    assert "suppress" in prompt.lower()
+
+
+# ---------------------------------------------------------------------------
+# Expanded category instructions
+# ---------------------------------------------------------------------------
+
+
+def test_planning_prompt_has_planning_rules() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(task=task, step="plan", attempt=1, is_codex=True)
+    assert "independently testable" in prompt
+    assert "does not modify" in prompt.lower()
+
+
+def test_implementation_prompt_has_impl_rules() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(task=task, step="implement", attempt=1, is_codex=True)
+    assert "entire step fully" in prompt
+    assert "inconsistent state" in prompt
+
+
+def test_review_prompt_has_severity_guidance() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(task=task, step="review", attempt=1, is_codex=True)
+    assert "severity" in prompt.lower()
+    assert "acceptance criterion" in prompt.lower()
+    assert "do not speculate" in prompt.lower()
+
+
+def test_verification_prompt_has_testing_rules() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(task=task, step="verify", attempt=1, is_codex=True)
+    assert "test" in prompt.lower()
+    assert "Do not bypass" in prompt
+    assert "do not\nmask failures" in prompt.lower() or "do not mask failures" in prompt.lower()
+
+
+# ---------------------------------------------------------------------------
+# Dependency analysis prompt includes preamble and guardrails
+# ---------------------------------------------------------------------------
+
+
+def test_dep_analysis_prompt_includes_preamble_and_guardrails() -> None:
+    task = _make_task(
+        metadata={
+            "candidate_tasks": [
+                {"id": "t1", "title": "Add auth", "task_type": "feature"},
+            ],
+        },
+    )
+    prompt = build_step_prompt(task=task, step="analyze_deps", attempt=1, is_codex=True)
+    assert "autonomous coding agent" in prompt
+    assert "Do NOT commit" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Language standards injection
+# ---------------------------------------------------------------------------
+
+
+def test_implementation_prompt_includes_python_standards() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="implement", attempt=1, is_codex=True,
+        project_languages=["python"],
+    )
+    assert "Language standards" in prompt
+    assert "Python" in prompt
+    assert "ruff" in prompt
+
+
+def test_review_prompt_includes_typescript_standards() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="review", attempt=1, is_codex=True,
+        project_languages=["typescript"],
+    )
+    assert "Language standards" in prompt
+    assert "TypeScript" in prompt
+    assert "tsc" in prompt
+
+
+def test_prompt_no_language_when_none() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="implement", attempt=1, is_codex=True, project_languages=None,
+    )
+    assert "Language standards" not in prompt
+
+
+def test_language_not_injected_for_planning() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="plan", attempt=1, is_codex=True,
+        project_languages=["python"],
+    )
+    assert "Language standards" not in prompt
+
+
+def test_mixed_language_prompt_includes_all_standards() -> None:
+    """Full-stack repo: both Python and TypeScript standards are injected."""
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="implement", attempt=1, is_codex=True,
+        project_languages=["python", "typescript"],
+    )
+    assert "Language standards \u2014 Python" in prompt
+    assert "Language standards \u2014 TypeScript" in prompt
+    assert "ruff" in prompt
+    assert "tsc" in prompt
+
+
+# ---------------------------------------------------------------------------
+# detect_project_languages
+# ---------------------------------------------------------------------------
+
+
+def test_detect_languages_python(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[build-system]")
+    assert detect_project_languages(tmp_path) == ["python"]
+
+
+def test_detect_languages_typescript(tmp_path: Path) -> None:
+    (tmp_path / "tsconfig.json").write_text("{}")
+    assert detect_project_languages(tmp_path) == ["typescript"]
+
+
+def test_detect_languages_go(tmp_path: Path) -> None:
+    (tmp_path / "go.mod").write_text("module example")
+    assert detect_project_languages(tmp_path) == ["go"]
+
+
+def test_detect_languages_rust(tmp_path: Path) -> None:
+    (tmp_path / "Cargo.toml").write_text("[package]")
+    assert detect_project_languages(tmp_path) == ["rust"]
+
+
+def test_detect_languages_none(tmp_path: Path) -> None:
+    assert detect_project_languages(tmp_path) == []
+
+
+def test_detect_languages_mixed_python_typescript(tmp_path: Path) -> None:
+    """Full-stack repo with both pyproject.toml and tsconfig.json."""
+    (tmp_path / "pyproject.toml").write_text("[build-system]")
+    (tmp_path / "tsconfig.json").write_text("{}")
+    (tmp_path / "package.json").write_text("{}")
+    langs = detect_project_languages(tmp_path)
+    assert "python" in langs
+    assert "typescript" in langs
+    # JavaScript is subsumed by TypeScript
+    assert "javascript" not in langs
+
+
+def test_detect_languages_deduplicates(tmp_path: Path) -> None:
+    """Both pyproject.toml and setup.py map to python — no duplicates."""
+    (tmp_path / "pyproject.toml").write_text("[build-system]")
+    (tmp_path / "setup.py").write_text("from setuptools import setup")
+    assert detect_project_languages(tmp_path) == ["python"]
+
+
+def test_detect_languages_typescript_subsumes_javascript(tmp_path: Path) -> None:
+    """When tsconfig.json is present, package.json's 'javascript' is dropped."""
+    (tmp_path / "tsconfig.json").write_text("{}")
+    (tmp_path / "package.json").write_text("{}")
+    assert detect_project_languages(tmp_path) == ["typescript"]
+
+
+def test_detect_languages_javascript_alone(tmp_path: Path) -> None:
+    """package.json without tsconfig.json → javascript."""
+    (tmp_path / "package.json").write_text("{}")
+    assert detect_project_languages(tmp_path) == ["javascript"]
+
+
+# ---------------------------------------------------------------------------
+# Project commands injection
+# ---------------------------------------------------------------------------
+
+
+def test_verification_prompt_includes_project_commands() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="verify", attempt=1, is_codex=True,
+        project_languages=["python"],
+        project_commands={"python": {"test": ".venv/bin/pytest -n auto", "lint": ".venv/bin/ruff check ."}},
+    )
+    assert "## Project commands" in prompt
+    assert ".venv/bin/pytest -n auto" in prompt
+    assert ".venv/bin/ruff check ." in prompt
+
+
+def test_implementation_prompt_includes_project_commands() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="implement", attempt=1, is_codex=True,
+        project_languages=["python"],
+        project_commands={"python": {"test": "pytest", "lint": "ruff check ."}},
+    )
+    assert "## Project commands" in prompt
+    assert "pytest" in prompt
+
+
+def test_prompt_no_commands_when_none() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="verify", attempt=1, is_codex=True,
+        project_languages=["python"],
+        project_commands=None,
+    )
+    assert "Project commands" not in prompt
+
+
+def test_prompt_partial_commands() -> None:
+    """Only python test set → only test line appears, no lint/typecheck/format."""
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="verify", attempt=1, is_codex=True,
+        project_languages=["python"],
+        project_commands={"python": {"test": "pytest -x"}},
+    )
+    assert "## Project commands" in prompt
+    assert "Test:" in prompt
+    assert "Lint:" not in prompt
+
+
+def test_multi_language_commands() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="verify", attempt=1, is_codex=True,
+        project_languages=["python", "typescript"],
+        project_commands={
+            "python": {"test": "pytest", "lint": "ruff check ."},
+            "typescript": {"test": "npm test", "lint": "npx eslint ."},
+        },
+    )
+    assert "### Python" in prompt
+    assert "### TypeScript" in prompt
+    assert "pytest" in prompt
+    assert "npm test" in prompt
+
+
+def test_commands_filtered_by_detected_languages() -> None:
+    """Config has python+go but only python detected → only python shown."""
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="verify", attempt=1, is_codex=True,
+        project_languages=["python"],
+        project_commands={
+            "python": {"test": "pytest"},
+            "go": {"test": "go test ./..."},
+        },
+    )
+    assert "pytest" in prompt
+    assert "go test" not in prompt
+
+
+def test_commands_not_injected_for_planning() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="plan", attempt=1, is_codex=True,
+        project_languages=["python"],
+        project_commands={"python": {"test": "pytest"}},
+    )
+    assert "Project commands" not in prompt
+
+
+def test_single_language_omits_subheading() -> None:
+    """Single language uses flat list (no ### Python heading)."""
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="verify", attempt=1, is_codex=True,
+        project_languages=["python"],
+        project_commands={"python": {"test": "pytest", "lint": "ruff check ."}},
+    )
+    assert "## Project commands" in prompt
+    assert "### Python" not in prompt
+
+
+def test_commands_not_injected_for_review() -> None:
+    """Review step gets language standards but not project commands."""
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="review", attempt=1, is_codex=True,
+        project_languages=["python"],
+        project_commands={"python": {"test": "pytest"}},
+    )
+    assert "Language standards" in prompt
+    assert "Project commands" not in prompt
+
+
+def test_commands_empty_strings_skipped() -> None:
+    """Empty or whitespace-only command values are not rendered."""
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="verify", attempt=1, is_codex=True,
+        project_languages=["python"],
+        project_commands={"python": {"test": "", "lint": "   ", "typecheck": "mypy ."}},
+    )
+    assert "## Project commands" in prompt
+    assert "Typecheck:" in prompt
+    assert "Test:" not in prompt
+    assert "Lint:" not in prompt
+
+
+def test_multi_language_display_names_use_correct_casing() -> None:
+    """TypeScript/JavaScript get proper casing, not .title() casing."""
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="verify", attempt=1, is_codex=True,
+        project_languages=["typescript", "javascript"],
+        project_commands={
+            "typescript": {"test": "npm test"},
+            "javascript": {"lint": "eslint ."},
+        },
+    )
+    assert "### TypeScript" in prompt
+    assert "### JavaScript" in prompt
+
+
+def test_commands_non_string_values_skipped() -> None:
+    """Non-string command values in config are silently skipped."""
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="verify", attempt=1, is_codex=True,
+        project_languages=["python"],
+        project_commands={"python": {"test": 42, "lint": "ruff check ."}},  # type: ignore[dict-item]
+    )
+    assert "## Project commands" in prompt
+    assert "Lint:" in prompt
+    assert "Test:" not in prompt
+
+
+def test_commands_non_dict_language_entry_skipped() -> None:
+    """A non-dict language entry in project_commands is skipped."""
+    task = _make_task()
+    prompt = build_step_prompt(
+        task=task, step="verify", attempt=1, is_codex=True,
+        project_languages=["python", "go"],
+        project_commands={"python": {"test": "pytest"}, "go": "not a dict"},  # type: ignore[dict-item]
+    )
+    assert "## Project commands" in prompt
+    assert "pytest" in prompt
+    # "go" entry silently skipped — only one language block, so no subheading
+    assert "### Go" not in prompt
+
+
+def test_run_step_reads_project_commands_from_config(container: V3Container, adapter: LiveWorkerAdapter) -> None:
+    """run_step reads project.commands from config and passes them to the prompt."""
+    # Write project commands to config
+    cfg = container.config.load()
+    cfg["project"] = {"commands": {"python": {"test": ".venv/bin/pytest -x"}}}
+    container.config.save(cfg)
+
+    # Create a pyproject.toml so python is detected
+    (container.project_dir / "pyproject.toml").write_text("[build-system]")
+
+    captured_prompt = {}
+    run_result = _make_run_result(exit_code=0)
+
+    def _capture_run_worker(**kwargs):
+        captured_prompt["text"] = kwargs["prompt"]
+        return run_result
+
+    with (
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            side_effect=_capture_run_worker,
+        ),
+    ):
+        result = adapter.run_step(task=_make_task(), step="verify", attempt=1)
+
+    assert result.status == "ok"
+    prompt = captured_prompt["text"]
+    assert "## Project commands" in prompt
+    assert ".venv/bin/pytest -x" in prompt

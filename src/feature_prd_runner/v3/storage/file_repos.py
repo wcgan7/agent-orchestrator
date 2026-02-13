@@ -143,6 +143,8 @@ class FileTaskRepository(TaskRepository):
                 def _is_runnable(task: Task) -> bool:
                     if task.status != "ready":
                         return False
+                    if task.pending_gate:
+                        return False
                     for dep_id in task.blocked_by:
                         dep = by_id.get(dep_id)
                         if dep is None or dep.status not in terminal:

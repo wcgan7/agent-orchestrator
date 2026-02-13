@@ -13,6 +13,7 @@ class StepResult:
     findings: list[dict[str, Any]] | None = None
     generated_tasks: list[dict[str, Any]] | None = None
     dependency_edges: list[dict[str, str]] | None = None
+    human_blocking_issues: list[dict[str, str]] | None = None
 
 
 class WorkerAdapter(Protocol):
@@ -39,6 +40,11 @@ class DefaultWorkerAdapter:
                     findings=list(raw.get("findings") or []) if isinstance(raw.get("findings"), list) else None,
                     generated_tasks=list(raw.get("generated_tasks") or []) if isinstance(raw.get("generated_tasks"), list) else None,
                     dependency_edges=list(raw.get("dependency_edges") or []) if isinstance(raw.get("dependency_edges"), list) else None,
+                    human_blocking_issues=(
+                        list(raw.get("human_blocking_issues") or [])
+                        if isinstance(raw.get("human_blocking_issues"), list)
+                        else None
+                    ),
                 )
 
         if step == "review":

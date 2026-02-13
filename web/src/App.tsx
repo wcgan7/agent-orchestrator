@@ -29,6 +29,7 @@ type TaskRecord = {
   pending_gate?: string | null
   quality_gate?: Record<string, number>
   metadata?: Record<string, unknown>
+  human_blocking_issues?: HumanBlockingIssue[]
 }
 
 type BoardResponse = {
@@ -132,6 +133,8 @@ type WorkerProviderSettings = {
   num_ctx?: number
 }
 
+type LanguageCommandSettings = Record<string, string>
+
 type SystemSettings = {
   orchestrator: {
     concurrency: number
@@ -155,6 +158,9 @@ type SystemSettings = {
     default: string
     routing: Record<string, string>
     providers: Record<string, WorkerProviderSettings>
+  }
+  project: {
+    commands: Record<string, LanguageCommandSettings>
   }
 }
 
@@ -209,6 +215,16 @@ type CollaborationTimelineEvent = {
   actor_type: string
   summary: string
   details: string
+  human_blocking_issues?: HumanBlockingIssue[]
+}
+
+type HumanBlockingIssue = {
+  summary: string
+  details?: string
+  category?: string
+  action?: string
+  blocking_on?: string
+  severity?: string
 }
 
 type CollaborationFeedbackItem = {
@@ -296,6 +312,9 @@ const DEFAULT_SETTINGS: SystemSettings = {
       codex: { type: 'codex', command: 'codex' },
     },
   },
+  project: {
+    commands: {},
+  },
 }
 
 function routeFromHash(hash: string): RouteKey {
@@ -343,6 +362,41 @@ function parseStringMap(input: string, label: string): Record<string, string> {
     const normalizedValue = String(value || '').trim()
     if (normalizedKey && normalizedValue) {
       out[normalizedKey] = normalizedValue
+    }
+  }
+  return out
+}
+
+function parseProjectCommands(input: string): Record<string, LanguageCommandSettings> {
+  if (!input.trim()) return {}
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(input)
+  } catch {
+    throw new Error('Project commands must be valid JSON')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Project commands must be a JSON object')
+  }
+
+  const out: Record<string, LanguageCommandSettings> = {}
+  for (const [rawLanguage, rawCommands] of Object.entries(parsed as Record<string, unknown>)) {
+    const language = String(rawLanguage || '').trim().toLowerCase()
+    if (!language) continue
+    if (!rawCommands || typeof rawCommands !== 'object' || Array.isArray(rawCommands)) {
+      throw new Error(`Project commands for "${language}" must be a JSON object`)
+    }
+    const commands: LanguageCommandSettings = {}
+    for (const [rawField, rawValue] of Object.entries(rawCommands as Record<string, unknown>)) {
+      const field = String(rawField || '').trim()
+      if (!field) continue
+      if (typeof rawValue !== 'string') {
+        throw new Error(`Project command "${language}.${field}" must be a string`)
+      }
+      commands[field] = rawValue
+    }
+    if (Object.keys(commands).length > 0) {
+      out[language] = commands
     }
   }
   return out
@@ -461,6 +515,23 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
   const defaults: Partial<SystemSettings['defaults']> = payload?.defaults || {}
   const qualityGate: Partial<SystemSettings['defaults']['quality_gate']> = defaults.quality_gate || {}
   const workers = normalizeWorkers(payload?.workers)
+  const projectCommandsRaw = payload?.project?.commands
+  const projectCommands: Record<string, LanguageCommandSettings> = {}
+  if (projectCommandsRaw && typeof projectCommandsRaw === 'object') {
+    for (const [rawLanguage, rawCommands] of Object.entries(projectCommandsRaw)) {
+      const language = String(rawLanguage || '').trim().toLowerCase()
+      if (!language || !rawCommands || typeof rawCommands !== 'object' || Array.isArray(rawCommands)) continue
+      const commands: LanguageCommandSettings = {}
+      for (const [rawField, rawValue] of Object.entries(rawCommands as Record<string, unknown>)) {
+        const field = String(rawField || '').trim()
+        if (!field || typeof rawValue !== 'string') continue
+        commands[field] = rawValue
+      }
+      if (Object.keys(commands).length > 0) {
+        projectCommands[language] = commands
+      }
+    }
+  }
 
   const maybeConcurrency = Number(orchestrator.concurrency)
   const maybeMaxReviewAttempts = Number(orchestrator.max_review_attempts)
@@ -489,6 +560,9 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
       },
     },
     workers,
+    project: {
+      commands: projectCommands,
+    },
   }
 }
 
@@ -502,6 +576,29 @@ function describeTask(taskId: string, taskIndex: Map<string, TaskRecord>): { lab
     label: `${title} (${task.id})`,
     status: task.status || 'unknown',
   }
+}
+
+function normalizeHumanBlockingIssues(value: unknown): HumanBlockingIssue[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
+    .map((item) => {
+      const summary = String(item.summary || item.issue || '').trim()
+      const details = String(item.details || item.rationale || '').trim()
+      const category = String(item.category || '').trim()
+      const action = String(item.action || '').trim()
+      const blockingOn = String(item.blocking_on || '').trim()
+      const severity = String(item.severity || '').trim()
+      return {
+        summary: summary || (details ? details.split('\n')[0] : ''),
+        details: details || undefined,
+        category: category || undefined,
+        action: action || undefined,
+        blocking_on: blockingOn || undefined,
+        severity: severity || undefined,
+      }
+    })
+    .filter((item) => !!item.summary)
 }
 
 function presenceStatusClass(status: string): string {
@@ -624,6 +721,7 @@ function normalizeTimelineEvents(payload: unknown): CollaborationTimelineEvent[]
       actor_type: String(item.actor_type || 'system').trim(),
       summary: String(item.summary || '').trim(),
       details: String(item.details || '').trim(),
+      human_blocking_issues: normalizeHumanBlockingIssues(item.human_blocking_issues),
     }))
     .filter((item) => !!item.id)
 }
@@ -804,6 +902,7 @@ export default function App() {
   const [settingsWorkerDefault, setSettingsWorkerDefault] = useState(DEFAULT_SETTINGS.workers.default)
   const [settingsWorkerRouting, setSettingsWorkerRouting] = useState('{}')
   const [settingsWorkerProviders, setSettingsWorkerProviders] = useState(JSON.stringify(DEFAULT_SETTINGS.workers.providers, null, 2))
+  const [settingsProjectCommands, setSettingsProjectCommands] = useState(JSON.stringify(DEFAULT_SETTINGS.project.commands, null, 2))
   const [settingsGateCritical, setSettingsGateCritical] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.critical))
   const [settingsGateHigh, setSettingsGateHigh] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.high))
   const [settingsGateMedium, setSettingsGateMedium] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.medium))
@@ -918,6 +1017,7 @@ export default function App() {
     setSettingsWorkerDefault(payload.workers.default || 'codex')
     setSettingsWorkerRouting(JSON.stringify(payload.workers.routing || {}, null, 2))
     setSettingsWorkerProviders(JSON.stringify(payload.workers.providers || {}, null, 2))
+    setSettingsProjectCommands(JSON.stringify(payload.project.commands || {}, null, 2))
     setSettingsGateCritical(String(payload.defaults.quality_gate.critical))
     setSettingsGateHigh(String(payload.defaults.quality_gate.high))
     setSettingsGateMedium(String(payload.defaults.quality_gate.medium))
@@ -1768,6 +1868,7 @@ export default function App() {
       const roleProviderOverrides = parseStringMap(settingsRoleProviderOverrides, 'Role provider overrides')
       const workerRouting = parseStringMap(settingsWorkerRouting, 'Worker routing map')
       const workerProviders = parseWorkerProviders(settingsWorkerProviders)
+      const projectCommands = parseProjectCommands(settingsProjectCommands)
       const payload: SystemSettings = {
         orchestrator: {
           concurrency: Math.max(1, parseNonNegativeInt(settingsConcurrency, DEFAULT_SETTINGS.orchestrator.concurrency)),
@@ -1791,6 +1892,9 @@ export default function App() {
           default: settingsWorkerDefault.trim() || 'codex',
           routing: workerRouting,
           providers: workerProviders,
+        },
+        project: {
+          commands: projectCommands,
         },
       }
       const updated = await requestJson<Partial<SystemSettings>>(buildApiUrl('/api/v3/settings', projectDir), {
@@ -2038,6 +2142,28 @@ export default function App() {
                     </button>
                   </div>
                 ) : null}
+                {Array.isArray(selectedTaskView.human_blocking_issues) && selectedTaskView.human_blocking_issues.length > 0 ? (
+                  <div className="preview-box">
+                    <p className="field-label">Human blocking issues</p>
+                    {selectedTaskView.human_blocking_issues.map((issue, index) => (
+                      <div className="row-card" key={`task-human-issue-${index}`}>
+                        <p className="task-title">{issue.summary}</p>
+                        {issue.details ? <p className="task-desc">{issue.details}</p> : null}
+                        {(issue.action || issue.blocking_on || issue.category || issue.severity) ? (
+                          <p className="task-meta">
+                            {issue.action ? `action: ${issue.action}` : null}
+                            {issue.action && issue.blocking_on ? ' · ' : null}
+                            {issue.blocking_on ? `blocking on: ${issue.blocking_on}` : null}
+                            {(issue.action || issue.blocking_on) && issue.category ? ' · ' : null}
+                            {issue.category ? `category: ${issue.category}` : null}
+                            {(issue.action || issue.blocking_on || issue.category) && issue.severity ? ' · ' : null}
+                            {issue.severity ? `severity: ${issue.severity}` : null}
+                          </p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
                 <div className="form-stack">
                   <label className="field-label" htmlFor="edit-task-title">Edit title</label>
                   <input id="edit-task-title" value={editTaskTitle} onChange={(event) => setEditTaskTitle(event.target.value)} />
@@ -2130,6 +2256,14 @@ export default function App() {
                         <p className="task-meta">{humanizeLabel(event.type)} · {event.actor} · {toLocaleTimestamp(event.timestamp) || '-'}</p>
                       </div>
                       {event.details ? <p className="task-desc">{event.details}</p> : null}
+                      {event.human_blocking_issues && event.human_blocking_issues.length > 0 ? (
+                        <div className="list-stack">
+                          <p className="field-label">Required human input</p>
+                          {event.human_blocking_issues.map((issue, idx) => (
+                            <p className="task-meta" key={`${event.id}-issue-${idx}`}>- {issue.summary}</p>
+                          ))}
+                        </div>
+                      ) : null}
                     </div>
                   ))}
                   {collaborationTimeline.length === 0 && !collaborationLoading ? <p className="empty">No collaboration events for this task yet.</p> : null}
@@ -2644,6 +2778,14 @@ export default function App() {
                 value={settingsWorkerProviders}
                 onChange={(event) => setSettingsWorkerProviders(event.target.value)}
                 placeholder='{"codex":{"type":"codex","command":"codex"},"ollama-dev":{"type":"ollama","endpoint":"http://localhost:11434","model":"llama3.1:8b"}}'
+              />
+              <label className="field-label" htmlFor="settings-project-commands">Project commands by language (JSON object)</label>
+              <textarea
+                id="settings-project-commands"
+                rows={8}
+                value={settingsProjectCommands}
+                onChange={(event) => setSettingsProjectCommands(event.target.value)}
+                placeholder='{"python":{"test":".venv/bin/pytest -n auto","lint":".venv/bin/ruff check .","typecheck":".venv/bin/mypy . --strict","format":".venv/bin/ruff format ."}}'
               />
               <p className="field-label">Default quality gate thresholds</p>
               <div className="inline-actions">

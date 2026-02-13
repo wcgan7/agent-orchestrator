@@ -13,7 +13,7 @@ from ...pipelines.registry import PipelineRegistry
 from ..domain.models import ReviewCycle, ReviewFinding, RunRecord, Task, now_iso
 from ..events.bus import EventBus
 from ..storage.container import V3Container
-from .worker_adapter import DefaultWorkerAdapter, WorkerAdapter
+from .worker_adapter import DefaultWorkerAdapter, StepResult, WorkerAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,7 @@ class OrchestratorService:
         "review": "after_implement",
         "commit": "before_commit",
     }
+    _HUMAN_INTERVENTION_GATE = "human_intervention"
 
     def __init__(
         self,
@@ -207,6 +208,8 @@ class OrchestratorService:
             task = self.container.tasks.get(task_id)
             if not task:
                 raise ValueError(f"Task not found: {task_id}")
+            if task.pending_gate and task.status != "in_progress":
+                raise ValueError(f"Task {task_id} is waiting for gate approval: {task.pending_gate}")
             # Make explicit run idempotent when a worker already started or finished
             # the same task; this avoids request races with the background loop.
             if task.status in {"in_review", "done"}:
@@ -482,12 +485,19 @@ class OrchestratorService:
 
     def _run_non_review_step(self, task: Task, run: RunRecord, step: str, attempt: int = 1) -> bool:
         result = self.worker_adapter.run_step(task=task, step=step, attempt=attempt)
-        run.steps.append({"step": step, "status": result.status, "ts": now_iso(), "summary": result.summary})
+        step_log: dict[str, Any] = {"step": step, "status": result.status, "ts": now_iso(), "summary": result.summary}
+        if result.human_blocking_issues:
+            step_log["human_blocking_issues"] = result.human_blocking_issues
+        run.steps.append(step_log)
         task.current_step = step
         self.container.tasks.upsert(task)
+        if result.human_blocking_issues:
+            self._block_for_human_issues(task, run, step, result.summary, result.human_blocking_issues)
+            return False
         if result.status != "ok":
             task.status = "blocked"
             task.error = result.summary or f"{step} failed"
+            task.pending_gate = None
             task.current_step = step
             self.container.tasks.upsert(task)
             run.status = "blocked"
@@ -496,6 +506,8 @@ class OrchestratorService:
             self.container.runs.upsert(run)
             self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
             return False
+
+        task.metadata.pop("human_blocking_issues", None)
 
         # Handle generate_tasks: create child tasks from step output
         if step == "generate_tasks" and result.generated_tasks:
@@ -531,7 +543,7 @@ class OrchestratorService:
             self.container.tasks.upsert(parent)
         return created_ids
 
-    def _findings_from_result(self, task: Task, review_attempt: int) -> list[ReviewFinding]:
+    def _findings_from_result(self, task: Task, review_attempt: int) -> tuple[list[ReviewFinding], StepResult]:
         result = self.worker_adapter.run_step(task=task, step="review", attempt=review_attempt)
         raw_findings = list(result.findings or [])
         findings: list[ReviewFinding] = []
@@ -551,7 +563,45 @@ class OrchestratorService:
                     status=str(finding.get("status") or "open"),
                 )
             )
-        return findings
+        return findings, result
+
+    def _block_for_human_issues(
+        self,
+        task: Task,
+        run: RunRecord,
+        step: str,
+        summary: str | None,
+        issues: list[dict[str, str]],
+    ) -> None:
+        task.status = "blocked"
+        task.current_step = step
+        task.pending_gate = self._HUMAN_INTERVENTION_GATE
+        task.error = summary or "Human intervention required to continue"
+        task.metadata["human_blocking_issues"] = issues
+        self.container.tasks.upsert(task)
+
+        run.status = "blocked"
+        run.finished_at = now_iso()
+        run.summary = f"Blocked during {step}: human intervention required"
+        self.container.runs.upsert(run)
+
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.gate_waiting",
+            entity_id=task.id,
+            payload={"gate": self._HUMAN_INTERVENTION_GATE, "step": step, "issues": issues},
+        )
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.blocked",
+            entity_id=task.id,
+            payload={
+                "error": task.error,
+                "gate": self._HUMAN_INTERVENTION_GATE,
+                "step": step,
+                "issues": issues,
+            },
+        )
 
     def _wait_for_gate(self, task: Task, gate_name: str, timeout: int = 3600) -> bool:
         """Block until ``pending_gate`` is cleared (via approve-gate API).
@@ -808,7 +858,28 @@ class OrchestratorService:
                     review_attempt += 1
                     task.current_step = "review"
                     self.container.tasks.upsert(task)
-                    findings = self._findings_from_result(task, review_attempt)
+                    findings, review_result = self._findings_from_result(task, review_attempt)
+                    if review_result.human_blocking_issues:
+                        self._block_for_human_issues(
+                            task,
+                            run,
+                            "review",
+                            review_result.summary,
+                            review_result.human_blocking_issues,
+                        )
+                        return
+                    if review_result.status != "ok":
+                        task.status = "blocked"
+                        task.error = review_result.summary or "Review step failed"
+                        task.pending_gate = None
+                        task.current_step = "review"
+                        self.container.tasks.upsert(task)
+                        run.status = "blocked"
+                        run.finished_at = now_iso()
+                        run.summary = "Blocked during review"
+                        self.container.runs.upsert(run)
+                        self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
+                        return
                     open_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
                     for finding in findings:
                         if finding.status == "open" and finding.severity in open_counts:

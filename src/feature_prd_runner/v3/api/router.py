@@ -117,11 +117,23 @@ class DefaultsSettingsRequest(BaseModel):
     quality_gate: QualityGateSettingsRequest = Field(default_factory=QualityGateSettingsRequest)
 
 
+class LanguageCommandsRequest(BaseModel):
+    test: Optional[str] = None
+    lint: Optional[str] = None
+    typecheck: Optional[str] = None
+    format: Optional[str] = None
+
+
+class ProjectSettingsRequest(BaseModel):
+    commands: Optional[dict[str, LanguageCommandsRequest]] = None
+
+
 class UpdateSettingsRequest(BaseModel):
     orchestrator: Optional[OrchestratorSettingsRequest] = None
     agent_routing: Optional[AgentRoutingSettingsRequest] = None
     defaults: Optional[DefaultsSettingsRequest] = None
     workers: Optional[WorkersSettingsRequest] = None
+    project: Optional[ProjectSettingsRequest] = None
 
 
 class SpawnAgentRequest(BaseModel):
@@ -241,6 +253,45 @@ def _normalize_str_map(value: Any) -> dict[str, str]:
     return out
 
 
+def _normalize_human_blocking_issues(value: Any) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in value:
+        if isinstance(item, str):
+            summary = item.strip()
+            if summary:
+                out.append({"summary": summary})
+            continue
+        if not isinstance(item, dict):
+            continue
+        summary = str(item.get("summary") or item.get("issue") or "").strip()
+        details = str(item.get("details") or item.get("rationale") or "").strip()
+        if not summary and details:
+            summary = details.splitlines()[0][:200].strip()
+        if not summary:
+            continue
+        issue: dict[str, str] = {"summary": summary}
+        if details:
+            issue["details"] = details
+        for key in ("category", "action", "blocking_on", "severity"):
+            raw = item.get(key)
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if text:
+                issue[key] = text
+        out.append(issue)
+    return out[:20]
+
+
+def _task_payload(task: Task) -> dict[str, Any]:
+    payload = task.to_dict()
+    metadata = task.metadata if isinstance(task.metadata, dict) else {}
+    payload["human_blocking_issues"] = _normalize_human_blocking_issues(metadata.get("human_blocking_issues"))
+    return payload
+
+
 def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
     raw_providers = value if isinstance(value, dict) else {}
     providers: dict[str, dict[str, Any]] = {}
@@ -315,6 +366,9 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             "default": workers_default,
             "routing": _normalize_str_map(workers_cfg.get("routing")),
             "providers": workers_providers,
+        },
+        "project": {
+            "commands": dict((cfg.get("project") or {}).get("commands") or {}),
         },
     }
 
@@ -571,7 +625,7 @@ def create_v3_router(
                 container.tasks.upsert(parent)
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.created", entity_id=task.id, payload={"status": task.status})
-        return {"task": task.to_dict()}
+        return {"task": _task_payload(task)}
 
     @router.get("/tasks")
     async def list_tasks(
@@ -592,14 +646,14 @@ def create_v3_router(
                 continue
             filtered.append(task)
         filtered.sort(key=lambda t: (_priority_rank(t.priority), t.created_at))
-        return {"tasks": [task.to_dict() for task in filtered], "total": len(filtered)}
+        return {"tasks": [_task_payload(task) for task in filtered], "total": len(filtered)}
 
     @router.get("/tasks/board")
     async def board(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         container, _, _ = _ctx(project_dir)
         columns = {name: [] for name in ["backlog", "ready", "in_progress", "in_review", "blocked", "done", "cancelled"]}
         for task in container.tasks.list():
-            columns.setdefault(task.status, []).append(task.to_dict())
+            columns.setdefault(task.status, []).append(_task_payload(task))
         for key, items in columns.items():
             items.sort(key=lambda x: (_priority_rank(str(x.get("priority") or "P3")), str(x.get("created_at") or "")))
         return {"columns": columns}
@@ -616,7 +670,7 @@ def create_v3_router(
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        return {"task": task.to_dict()}
+        return {"task": _task_payload(task)}
 
     @router.patch("/tasks/{task_id}")
     async def patch_task(task_id: str, body: UpdateTaskRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -635,7 +689,7 @@ def create_v3_router(
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.updated", entity_id=task.id, payload={"status": task.status})
-        return {"task": task.to_dict()}
+        return {"task": _task_payload(task)}
 
     @router.post("/tasks/{task_id}/transition")
     async def transition_task(task_id: str, body: TransitionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -655,7 +709,7 @@ def create_v3_router(
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.transitioned", entity_id=task.id, payload={"status": task.status})
-        return {"task": task.to_dict()}
+        return {"task": _task_payload(task)}
 
     @router.post("/tasks/{task_id}/run")
     async def run_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -666,7 +720,7 @@ def create_v3_router(
             if "Task not found" in str(exc):
                 raise HTTPException(status_code=404, detail=str(exc))
             raise HTTPException(status_code=400, detail=str(exc))
-        return {"task": task.to_dict()}
+        return {"task": _task_payload(task)}
 
     @router.post("/tasks/{task_id}/retry")
     async def retry_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -680,9 +734,13 @@ def create_v3_router(
         task.retry_count += 1
         task.status = "ready"
         task.error = None
+        task.pending_gate = None
+        if isinstance(task.metadata, dict):
+            task.metadata.pop("human_blocking_issues", None)
+        task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.retry", entity_id=task.id, payload={"retry_count": task.retry_count})
-        return {"task": task.to_dict()}
+        return {"task": _task_payload(task)}
 
     @router.post("/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -693,7 +751,7 @@ def create_v3_router(
         task.status = "cancelled"
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.cancelled", entity_id=task.id, payload={})
-        return {"task": task.to_dict()}
+        return {"task": _task_payload(task)}
 
     @router.post("/tasks/{task_id}/approve-gate")
     async def approve_gate(task_id: str, body: ApproveGateRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -710,7 +768,7 @@ def create_v3_router(
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.gate_approved", entity_id=task.id, payload={"gate": cleared_gate})
-        return {"task": task.to_dict(), "cleared_gate": cleared_gate}
+        return {"task": _task_payload(task), "cleared_gate": cleared_gate}
 
     @router.post("/tasks/{task_id}/dependencies")
     async def add_dependency(task_id: str, body: AddDependencyRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -726,7 +784,7 @@ def create_v3_router(
         container.tasks.upsert(task)
         container.tasks.upsert(blocker)
         bus.emit(channel="tasks", event_type="task.dependency_added", entity_id=task.id, payload={"depends_on": body.depends_on})
-        return {"task": task.to_dict()}
+        return {"task": _task_payload(task)}
 
     @router.delete("/tasks/{task_id}/dependencies/{dep_id}")
     async def remove_dependency(task_id: str, dep_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -741,7 +799,7 @@ def create_v3_router(
             blocker.blocks = [item for item in blocker.blocks if item != task.id]
             container.tasks.upsert(blocker)
         bus.emit(channel="tasks", event_type="task.dependency_removed", entity_id=task.id, payload={"dep_id": dep_id})
-        return {"task": task.to_dict()}
+        return {"task": _task_payload(task)}
 
     @router.post("/tasks/analyze-dependencies")
     async def analyze_dependencies(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -779,7 +837,7 @@ def create_v3_router(
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.dep_analysis_reset", entity_id=task.id, payload={})
-        return {"task": task.to_dict()}
+        return {"task": _task_payload(task)}
 
     @router.post("/import/prd/preview")
     async def preview_import(body: PrdPreviewRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -960,6 +1018,15 @@ def create_v3_router(
         if not task:
             return {"events": []}
 
+        task_issues = _normalize_human_blocking_issues(
+            task.metadata.get("human_blocking_issues") if isinstance(task.metadata, dict) else None
+        )
+        task_details = task.description or ""
+        if task_issues:
+            issue_summary = "; ".join(issue.get("summary", "") for issue in task_issues if issue.get("summary"))
+            if issue_summary:
+                task_details = (f"{task_details}\n\n" if task_details else "") + f"Human blockers: {issue_summary}"
+
         events: list[dict[str, Any]] = [
             {
                 "id": f"task-{task.id}",
@@ -968,7 +1035,8 @@ def create_v3_router(
                 "actor": "system",
                 "actor_type": "system",
                 "summary": f"Task status: {task.status}",
-                "details": task.description or "",
+                "details": task_details,
+                "human_blocking_issues": task_issues,
             }
         ]
         for event in container.events.list_recent(limit=2000):
@@ -976,6 +1044,12 @@ def create_v3_router(
                 continue
             payload = event.get("payload")
             payload_dict = payload if isinstance(payload, dict) else {}
+            issues = _normalize_human_blocking_issues(
+                payload_dict.get("issues") if "issues" in payload_dict else payload_dict.get("human_blocking_issues")
+            )
+            details = str(payload_dict.get("error") or payload_dict.get("guidance") or "")
+            if not details and issues:
+                details = "; ".join(issue.get("summary", "") for issue in issues if issue.get("summary"))
             events.append(
                 {
                     "id": str(event.get("id") or f"evt-{uuid.uuid4().hex[:10]}"),
@@ -984,7 +1058,8 @@ def create_v3_router(
                     "actor": "system",
                     "actor_type": "system",
                     "summary": str(event.get("type") or "event"),
-                    "details": str(payload_dict.get("error") or payload_dict.get("guidance") or ""),
+                    "details": details,
+                    "human_blocking_issues": issues,
                 }
             )
         for item in _load_feedback_records(container):
@@ -1156,19 +1231,19 @@ def create_v3_router(
             raise HTTPException(status_code=404, detail="Quick action not found")
         if run.promoted_task_id:
             task = container.tasks.get(run.promoted_task_id)
-            return {"task": task.to_dict() if task else None, "already_promoted": True}
+            return {"task": _task_payload(task) if task else None, "already_promoted": True}
         title = body.title or f"Promoted quick action: {run.prompt[:50]}"
         task = Task(title=title, description=run.prompt, source="promoted_quick_action", priority=body.priority)
         container.tasks.upsert(task)
         run.promoted_task_id = task.id
         container.quick_actions.upsert(run)
         bus.emit(channel="quick_actions", event_type="quick_action.promoted", entity_id=run.id, payload={"task_id": task.id})
-        return {"task": task.to_dict(), "already_promoted": False}
+        return {"task": _task_payload(task), "already_promoted": False}
 
     @router.get("/review-queue")
     async def review_queue(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         container, _, _ = _ctx(project_dir)
-        items = [task.to_dict() for task in container.tasks.list() if task.status == "in_review"]
+        items = [_task_payload(task) for task in container.tasks.list() if task.status == "in_review"]
         return {"tasks": items, "total": len(items)}
 
     @router.post("/review/{task_id}/approve")
@@ -1183,7 +1258,7 @@ def create_v3_router(
         task.metadata["last_review_approval"] = {"ts": now_iso(), "guidance": body.guidance}
         container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={})
-        return {"task": task.to_dict()}
+        return {"task": _task_payload(task)}
 
     @router.post("/review/{task_id}/request-changes")
     async def request_review_changes(task_id: str, body: ReviewActionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1197,7 +1272,7 @@ def create_v3_router(
         task.metadata["requested_changes"] = {"ts": now_iso(), "guidance": body.guidance}
         container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.changes_requested", entity_id=task.id, payload={"guidance": body.guidance})
-        return {"task": task.to_dict()}
+        return {"task": _task_payload(task)}
 
     @router.get("/orchestrator/status")
     async def orchestrator_status(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1257,6 +1332,30 @@ def create_v3_router(
             normalized_workers = _settings_payload({"workers": workers_cfg})["workers"]
             cfg["workers"] = normalized_workers
             touched_sections.append("workers")
+
+        if body.project is not None and body.project.commands is not None:
+            project_cfg = dict(cfg.get("project") or {})
+            existing_commands = dict(project_cfg.get("commands") or {})
+            for raw_lang, lang_req in body.project.commands.items():
+                lang = raw_lang.strip().lower()
+                if not lang:
+                    continue
+                lang_entry = dict(existing_commands.get(lang) or {})
+                for field in ("test", "lint", "typecheck", "format"):
+                    value = getattr(lang_req, field)
+                    if value is None:
+                        continue
+                    if value == "":
+                        lang_entry.pop(field, None)
+                    else:
+                        lang_entry[field] = value
+                if lang_entry:
+                    existing_commands[lang] = lang_entry
+                else:
+                    existing_commands.pop(lang, None)
+            project_cfg["commands"] = existing_commands
+            cfg["project"] = project_cfg
+            touched_sections.append("project.commands")
 
         container.config.save(cfg)
         bus.emit(
