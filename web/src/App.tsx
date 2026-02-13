@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react'
+import { FormEvent, useEffect, useRef, useState } from 'react'
 import { buildApiUrl } from './api'
 import { ImportJobPanel } from './components/AppPanels/ImportJobPanel'
 import { QuickActionDetailPanel } from './components/AppPanels/QuickActionDetailPanel'
@@ -245,6 +245,11 @@ export default function App() {
   const [browseLoading, setBrowseLoading] = useState(false)
   const [browseError, setBrowseError] = useState('')
   const [browseAllowNonGit, setBrowseAllowNonGit] = useState(false)
+  const selectedQuickActionIdRef = useRef('')
+
+  useEffect(() => {
+    selectedQuickActionIdRef.current = selectedQuickActionId
+  }, [selectedQuickActionId])
 
   useEffect(() => {
     const syncFromHash = () => {
@@ -474,8 +479,8 @@ export default function App() {
       void reloadAll()
       try {
         const data = JSON.parse(event.data)
-        if (data.channel === 'quick_actions' && selectedQuickActionId) {
-          void loadQuickActionDetail(selectedQuickActionId)
+        if (data.channel === 'quick_actions' && selectedQuickActionIdRef.current) {
+          void loadQuickActionDetail(selectedQuickActionIdRef.current)
         }
       } catch {
         // ignore non-JSON messages

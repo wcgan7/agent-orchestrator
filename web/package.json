@@ -4,9 +4,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "check:mounted-api-contracts": "node ./scripts/check-mounted-api-contracts.mjs",
+    "build": "npm run check:mounted-api-contracts && tsc && vite build",
     "preview": "vite preview",
-    "test": "vitest run",
+    "test": "npm run check:mounted-api-contracts && vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "test:coverage": "vitest --coverage"
