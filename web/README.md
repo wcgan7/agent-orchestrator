@@ -1,8 +1,8 @@
 # Feature PRD Runner - Web Dashboard
 
 > **Status (2026-02-11):** Current frontend setup/development guide.
-> **Product direction:** [`../docs/ORCHESTRATOR_FIRST_REVAMP_PLAN.md`](../docs/ORCHESTRATOR_FIRST_REVAMP_PLAN.md)
 > **Docs index:** [`../docs/README.md`](../docs/README.md)
+> **User guide:** [`../docs/USER_GUIDE.md`](../docs/USER_GUIDE.md)
 
 Modern web dashboard for monitoring and controlling Feature PRD Runner.
 
@@ -115,8 +115,8 @@ npm run preview
 
 The frontend connects to the FastAPI backend:
 
-- REST API (`/api/*`) for data fetching
-- WebSocket (`/ws/*`) for real-time updates
+- REST API (`/api/v3/*`) for data fetching
+- WebSocket (`/ws`) for real-time updates
 
 See `vite.config.ts` for proxy configuration.
 

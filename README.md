@@ -3,6 +3,33 @@
 Feature PRD Runner is an orchestration-first AI engineering control center.
 `Task` is the primary unit. PRD import is one intake mode, not the core model.
 
+## Quick Start
+
+Install and run the backend:
+
+```bash
+python -m pip install -e ".[server]"
+feature-prd-runner server --project-dir /path/to/workspace
+```
+
+Run the web UI:
+
+```bash
+npm --prefix web install
+npm --prefix web run dev
+```
+
+## Documentation
+
+User-facing docs:
+- `README.md` (this file): product overview and quick start.
+- `docs/USER_GUIDE.md`: complete workflows and lifecycle behavior.
+- `docs/API_REFERENCE.md`: REST + WebSocket reference.
+- `docs/CLI_REFERENCE.md`: command-line reference.
+- `docs/README.md`: docs index.
+- `web/README.md`: web dashboard usage and frontend test/build commands.
+- `example/README.md`: sample project assets and example inputs.
+
 ## Product Model
 
 Primary intake:

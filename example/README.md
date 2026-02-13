@@ -1,19 +1,30 @@
 # Feature PRD Runner Example
 
-This example is intentionally small and deterministic so you can verify that the
-runner creates phases, runs them, and commits changes. It includes a tiny Python
-module, a PRD with two phases, and a simple unittest suite.
+This example is intentionally small and deterministic so you can validate the
+v3 task + PRD workflows locally. It includes a tiny Python module, a PRD sample,
+and a small unittest suite.
 
 ## What's Included
 
-- `feature_prd.md`: PRD describing two phases.
+- `feature_prd.md`: sample PRD content you can paste into Import PRD.
 - `project/`: Minimal Python package with tests.
 
-## Run
+## Run With Web UI
 
 ```bash
-cd feature_prd_runner/example
-python -m feature_prd_runner.runner --project-dir ./project --prd-file ./feature_prd.md --test-command "python -m unittest -q"
+feature-prd-runner server --project-dir ./example/project
+npm --prefix web run dev
 ```
 
-After the run, inspect `.prd_runner/` inside `project/` for state, logs, and progress.
+In the dashboard, use:
+- `Create Work` -> `Create Task` for manual tasks.
+- `Create Work` -> `Import PRD` and paste `example/feature_prd.md`.
+
+## Run With CLI
+
+```bash
+feature-prd-runner --project-dir ./example/project task create "Smoke test example project"
+feature-prd-runner --project-dir ./example/project task list
+```
+
+After running flows, inspect `.prd_runner/v3/` inside `example/project/` for state and events.

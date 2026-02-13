@@ -1,39 +1,25 @@
-# Docs Index (v3)
+# Documentation
 
-## Core
+This project now keeps only user-facing documentation.
 
-- `ORCHESTRATOR_FIRST_REVAMP_PLAN.md`: execution plan and implementation log.
-- `WEB_UI_FEATURE_GAPS.md`: v3 backend-vs-mounted-UI parity audit and prioritized gap list.
-- `REMAINING_UI_INTEGRATION_PLAN.md`: implementation plan for the final UI parity gaps.
+## Start Here
 
-## Operating Model
+- `../README.md`: product overview and quick start.
+- `USER_GUIDE.md`: complete usage guide for board, execution, review, agents, and settings.
+- `API_REFERENCE.md`: REST and WebSocket reference for `/api/v3`.
+- `CLI_REFERENCE.md`: command-line reference for `feature-prd-runner`.
+- `../web/README.md`: frontend setup, testing, and UI-specific workflows.
+- `../example/README.md`: example assets and local sandbox walkthrough.
 
-- Orchestrator-first control plane.
-- Task-centric execution lifecycle.
-- Human-review default with strict quality gate.
+## Runtime Data
 
-## API Reference (high-level)
+Runtime state is stored under `.prd_runner/v3/` in your selected project directory.
+On first v3 startup, legacy `.prd_runner` state is archived to `.prd_runner_legacy_<timestamp>/`.
 
-Base path: `/api/v3`
+## Support Endpoints
 
-- `/projects`, `/projects/pinned`
-- `/tasks`, `/tasks/board`, `/tasks/{id}` and task actions
-- `/import/prd/preview`, `/import/prd/commit`, `/import/{job_id}`
-- `/quick-actions`, `/quick-actions/{id}/promote`
-- `/review-queue`, `/review/{task_id}/approve`, `/review/{task_id}/request-changes`
-- `/orchestrator/status`, `/orchestrator/control`
-- `/agents` and agent control endpoints
+- `GET /healthz`
+- `GET /readyz`
+- `GET /`
 
-WebSocket: `/ws` (v3 channels only)
-
-## State Layout
-
-- `.prd_runner/v3/tasks.yaml`
-- `.prd_runner/v3/runs.yaml`
-- `.prd_runner/v3/review_cycles.yaml`
-- `.prd_runner/v3/agents.yaml`
-- `.prd_runner/v3/quick_actions.yaml`
-- `.prd_runner/v3/events.jsonl`
-- `.prd_runner/v3/config.yaml`
-
-Legacy state is archived on first v3 boot; no auto-migration.
+Use these for local health and project-target diagnostics.
