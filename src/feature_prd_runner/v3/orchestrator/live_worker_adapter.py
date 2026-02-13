@@ -31,6 +31,128 @@ _DEP_ANALYSIS_STEPS = {"analyze_deps"}
 _STEP_TIMEOUT_ALIASES = {"implement_fix": "implement"}
 _DEFAULT_STEP_TIMEOUT_SECONDS = 600
 
+# ---------------------------------------------------------------------------
+# Prompt layers
+# ---------------------------------------------------------------------------
+
+_PREAMBLE = (
+    "You are an autonomous coding agent managed by a coordinator process.\n"
+    "The coordinator is the final authority on task state — it assigns steps,\n"
+    "tracks progress, and handles all git commits.\n\n"
+    "## Human-blocking issues\n"
+    "If you encounter a problem that genuinely cannot be resolved without human\n"
+    "intervention, report it as a human-blocking issue. Valid reasons:\n"
+    "specification is missing or contradictory, required credentials or access\n"
+    "are unavailable. Do NOT escalate code-quality concerns, design preferences,\n"
+    "refactoring suggestions, or review feedback — handle those within your\n"
+    "step output."
+)
+
+_GUARDRAILS = (
+    "## Guardrails\n"
+    "- Do NOT commit, push, or rebase — the coordinator handles all commits.\n"
+    "- Do NOT modify files under `.prd_runner/` — those are coordinator state.\n"
+    "- Do NOT suppress or down-rank review findings.\n"
+    "- Prefer fixing issues over escalating; escalate only when truly stuck.\n"
+    "- Be explicit about risks, uncertainty, and assumptions."
+)
+
+_LANGUAGE_STANDARDS: dict[str, str] = {
+    "python": (
+        "## Language standards — Python\n"
+        "- Google-style docstrings; module-level docstring in every file.\n"
+        "- Type hints (Python 3.10+ syntax). Aim for mypy strict compliance.\n"
+        "- Format with ruff; lint with ruff check."
+    ),
+    "typescript": (
+        "## Language standards — TypeScript\n"
+        "- JSDoc on exported symbols. Strict tsconfig (no `any`).\n"
+        "- Compile-check with tsc --noEmit. Lint with ESLint."
+    ),
+    "javascript": (
+        "## Language standards — JavaScript\n"
+        "- JSDoc on exported symbols.\n"
+        "- Lint with ESLint; format with Prettier."
+    ),
+    "go": (
+        "## Language standards — Go\n"
+        "- Godoc conventions on exported symbols.\n"
+        "- Format with gofmt; lint with golangci-lint."
+    ),
+    "rust": (
+        "## Language standards — Rust\n"
+        "- `///` doc comments on public items.\n"
+        "- Format with cargo fmt; lint with cargo clippy."
+    ),
+}
+
+_LANGUAGE_MARKERS: list[tuple[str, str]] = [
+    ("pyproject.toml", "python"),
+    ("setup.py", "python"),
+    ("tsconfig.json", "typescript"),
+    ("package.json", "javascript"),
+    ("go.mod", "go"),
+    ("Cargo.toml", "rust"),
+]
+
+
+def detect_project_languages(project_dir: Path) -> list[str]:
+    """Return all detected project languages based on marker files.
+
+    Multiple markers for the same language are deduplicated (e.g. pyproject.toml
+    and setup.py both map to "python").  If a tsconfig.json is found alongside
+    package.json, only "typescript" is returned (it subsumes "javascript").
+    """
+    seen: dict[str, None] = {}  # ordered set
+    for marker, lang in _LANGUAGE_MARKERS:
+        if (project_dir / marker).exists() and lang not in seen:
+            seen[lang] = None
+    langs = list(seen)
+    # TypeScript subsumes JavaScript — drop the weaker signal
+    if "typescript" in seen and "javascript" in seen:
+        langs.remove("javascript")
+    return langs
+
+
+_LANGUAGE_DISPLAY_NAMES: dict[str, str] = {
+    "python": "Python",
+    "typescript": "TypeScript",
+    "javascript": "JavaScript",
+    "go": "Go",
+    "rust": "Rust",
+}
+
+
+def _format_project_commands(
+    project_commands: dict[str, dict[str, str]],
+    project_languages: list[str],
+) -> str:
+    """Format project commands for detected languages into a prompt section."""
+    _COMMAND_LABELS = {"test": "Test", "lint": "Lint", "typecheck": "Typecheck", "format": "Format"}
+    blocks: list[tuple[str, list[str]]] = []
+    for lang in project_languages:
+        cmds = project_commands.get(lang)
+        if not isinstance(cmds, dict):
+            continue
+        lines = []
+        for key in ("test", "lint", "typecheck", "format"):
+            val = cmds.get(key)
+            if isinstance(val, str) and val.strip():
+                lines.append(f"- {_COMMAND_LABELS[key]}: `{val.strip()}`")
+        if lines:
+            blocks.append((lang, lines))
+    if not blocks:
+        return ""
+    parts = ["## Project commands"]
+    if len(blocks) == 1:
+        parts.extend(blocks[0][1])
+    else:
+        for lang, lines in blocks:
+            display = _LANGUAGE_DISPLAY_NAMES.get(lang, lang.title())
+            parts.append(f"### {display}")
+            parts.extend(lines)
+    return "\n".join(parts)
+
 
 def _step_category(step: str) -> str:
     if step in _PLANNING_STEPS:
@@ -55,16 +177,50 @@ def _step_category(step: str) -> str:
 
 
 _CATEGORY_INSTRUCTIONS: dict[str, str] = {
-    "planning": "Create a plan for the following task.",
-    "implementation": "Implement the changes described in the following task.",
-    "verification": "Run tests and verification checks for the following task.",
-    "review": "Review the implementation and list any findings.",
-    "reporting": "Produce a summary report for the following task.",
-    "scanning": "Scan and gather information for the following task.",
-    "task_generation": "Generate subtasks for the following task.",
+    "planning": (
+        "Create a scoped, independently testable plan for the following task.\n"
+        "Describe a coherent technical approach. Do not assume infrastructure or\n"
+        "services that are not already present. Planning does not modify\n"
+        "repository code."
+    ),
+    "implementation": (
+        "Implement the changes described in the following task.\n"
+        "Complete the entire step fully — partial work leaves the repository in\n"
+        "an inconsistent state. Update README or docs when observable behavior\n"
+        "changes."
+    ),
+    "verification": (
+        "Run the project's test, lint, and type-check commands for the following\n"
+        "task. Do not bypass or skip tests. Report results accurately — do not\n"
+        "mask failures. If you can identify the root cause of a failure, note it\n"
+        "clearly so the next step can address it."
+    ),
+    "review": (
+        "Review the implementation and list findings.\n"
+        "Each finding must include a severity (critical / high / medium / low).\n"
+        "Evaluate every acceptance criterion explicitly. Provide concrete\n"
+        "evidence tied to files and diffs — do not speculate. Do not down-rank\n"
+        "findings."
+    ),
+    "reporting": (
+        "Produce a summary report for the following task.\n"
+        "Tie conclusions to concrete evidence. Be explicit about risks and\n"
+        "remaining uncertainty."
+    ),
+    "scanning": (
+        "Scan and gather information for the following task.\n"
+        "Report findings with severity and file locations. Provide concrete\n"
+        "evidence only."
+    ),
+    "task_generation": (
+        "Generate subtasks for the following task.\n"
+        "Each subtask must be independently implementable. Include title,\n"
+        "description, task_type, and priority. Cover the full scope without\n"
+        "overlap."
+    ),
     "merge_resolution": "Resolve the merge conflicts in the following files. Both tasks' objectives must be fulfilled in the resolution.",
     "dependency_analysis": (
-        "You are a software architect analyzing task dependencies for a codebase.\n\n"
+        "Analyze task dependencies for this codebase.\n\n"
         "First, examine the project structure to understand what already exists:\n"
         "- Look at the directory layout and key files\n"
         "- Check existing modules, APIs, and shared code\n"
@@ -80,7 +236,7 @@ _CATEGORY_INSTRUCTIONS: dict[str, str] = {
         "- The required code/API already exists in the codebase\n\n"
         "If tasks can safely run in parallel, leave them independent."
     ),
-    "general": "Execute the following task step.",
+    "general": "Follow the task description and report results clearly.",
 }
 
 _CATEGORY_JSON_SCHEMAS: dict[str, str] = {
@@ -97,14 +253,22 @@ _CATEGORY_JSON_SCHEMAS: dict[str, str] = {
 }
 
 
-def build_step_prompt(*, task: Task, step: str, attempt: int, is_codex: bool) -> str:
+def build_step_prompt(
+    *,
+    task: Task,
+    step: str,
+    attempt: int,
+    is_codex: bool,
+    project_languages: list[str] | None = None,
+    project_commands: dict[str, dict[str, str]] | None = None,
+) -> str:
     """Build a prompt from Task fields with step-specific instructions."""
     category = _step_category(step)
     instruction = _CATEGORY_INSTRUCTIONS[category]
 
     # Special prompt for dependency analysis
     if category == "dependency_analysis" and isinstance(task.metadata, dict):
-        parts = [instruction, ""]
+        parts = [_PREAMBLE, "", instruction, ""]
 
         candidate_tasks = task.metadata.get("candidate_tasks")
         if isinstance(candidate_tasks, list) and candidate_tasks:
@@ -142,6 +306,9 @@ def build_step_prompt(*, task: Task, step: str, attempt: int, is_codex: bool) ->
         parts.append("- If all tasks are independent, return an empty edges array.")
         parts.append("- Do not create circular dependencies.")
 
+        parts.append("")
+        parts.append(_GUARDRAILS)
+
         if not is_codex:
             schema = _CATEGORY_JSON_SCHEMAS["dependency_analysis"]
             parts.append("")
@@ -149,7 +316,7 @@ def build_step_prompt(*, task: Task, step: str, attempt: int, is_codex: bool) ->
 
         return "\n".join(parts)
 
-    parts = [instruction, ""]
+    parts = [_PREAMBLE, "", instruction, ""]
 
     parts.append(f"Task: {task.title}")
     if task.description:
@@ -194,6 +361,24 @@ def build_step_prompt(*, task: Task, step: str, attempt: int, is_codex: bool) ->
         parts.append("")
         parts.append("Edit the conflicted files to resolve all conflicts. "
                       "Ensure BOTH this task's and the other task(s)' objectives are preserved.")
+
+    # Inject language standards for implementation and review steps
+    if project_languages and category in ("implementation", "review"):
+        for lang in project_languages:
+            lang_block = _LANGUAGE_STANDARDS.get(lang)
+            if lang_block:
+                parts.append("")
+                parts.append(lang_block)
+
+    # Inject project commands for implementation and verification steps
+    if project_commands and project_languages and category in ("implementation", "verification"):
+        cmds_block = _format_project_commands(project_commands, project_languages)
+        if cmds_block:
+            parts.append("")
+            parts.append(cmds_block)
+
+    parts.append("")
+    parts.append(_GUARDRAILS)
 
     if not is_codex:
         # Add JSON schema instruction for ollama
@@ -292,13 +477,23 @@ class LiveWorkerAdapter:
             return StepResult(status="error", summary=f"Cannot resolve worker: {exc}")
 
         # 2. Build prompt
-        prompt = build_step_prompt(task=task, step=step, attempt=attempt, is_codex=(spec.type == "codex"))
+        worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
+        project_dir = Path(worktree_path) if worktree_path else self._container.project_dir
+        langs = detect_project_languages(project_dir)
+        raw_commands = (cfg.get("project") or {}).get("commands") or {}
+        project_commands = {
+            lang: cmds for lang, cmds in raw_commands.items()
+            if isinstance(cmds, dict)
+        } or None
+        prompt = build_step_prompt(
+            task=task, step=step, attempt=attempt,
+            is_codex=(spec.type == "codex"), project_languages=langs or None,
+            project_commands=project_commands,
+        )
 
         # 3. Execute
         run_dir = Path(tempfile.mkdtemp(dir=str(self._container.v3_root)))
         progress_path = run_dir / "progress.json"
-        worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
-        project_dir = Path(worktree_path) if worktree_path else self._container.project_dir
         timeout_seconds = self._timeout_for_step(task, step)
         try:
             result = run_worker(
@@ -314,7 +509,7 @@ class LiveWorkerAdapter:
         except Exception as exc:
             return StepResult(status="error", summary=f"Worker execution failed: {exc}")
 
-        # 5. Map result
+        # 4. Map result
         return self._map_result(result, spec, step)
 
     def _map_result(self, result: WorkerRunResult, spec: Any, step: str) -> StepResult:

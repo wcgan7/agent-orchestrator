@@ -71,6 +71,9 @@ function installFetchMock() {
       routing: {},
       providers: { codex: { type: 'codex', command: 'codex' } },
     },
+    project: {
+      commands: {},
+    },
   }
 
   const quickActions = [
@@ -260,6 +263,9 @@ describe('App action coverage', () => {
       expect(screen.getByRole('button', { name: /^Run$/i })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /Approve gate/i })).toBeInTheDocument()
       expect(screen.getByText('Need production API token')).toBeInTheDocument()
+    })
+    // Collaboration timeline loads via a separate async request; give it its own waitFor window
+    await waitFor(() => {
       expect(screen.getByText(/Required human input/i)).toBeInTheDocument()
     })
 
@@ -437,6 +443,10 @@ describe('App action coverage', () => {
       screen.getByLabelText(/Worker providers/i),
       { target: { value: '{"codex":{"type":"codex","command":"codex"}}' } }
     )
+    fireEvent.change(
+      screen.getByLabelText(/Project commands by language/i),
+      { target: { value: '{"python":{"test":"pytest -n auto","lint":"ruff check ."}}' } }
+    )
     fireEvent.change(screen.getByLabelText(/Quality gate critical/i), { target: { value: '1' } })
     fireEvent.change(screen.getByLabelText(/Quality gate high/i), { target: { value: '2' } })
     fireEvent.change(screen.getByLabelText(/Quality gate medium/i), { target: { value: '3' } })
@@ -455,6 +465,8 @@ describe('App action coverage', () => {
       expect(body.defaults.quality_gate).toEqual({ critical: 1, high: 2, medium: 3, low: 4 })
       expect(body.agent_routing.task_type_roles).toEqual({ bug: 'debugger' })
       expect(body.workers.routing).toEqual({ review: 'codex' })
+      expect(body.project.commands.python.test).toBe('pytest -n auto')
+      expect(body.project.commands.python.lint).toBe('ruff check .')
     })
 
     fireEvent.click(screen.getByRole('button', { name: /Unpin/i }))

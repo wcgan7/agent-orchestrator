@@ -328,6 +328,89 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert reloaded.json() == body
 
 
+def test_project_commands_settings_round_trip(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        # Baseline: empty commands
+        baseline = client.get("/api/v3/settings")
+        assert baseline.status_code == 200
+        assert baseline.json()["project"]["commands"] == {}
+
+        # Set python commands
+        resp = client.patch(
+            "/api/v3/settings",
+            json={"project": {"commands": {"python": {"test": "pytest -n auto", "lint": "ruff check ."}}}},
+        )
+        assert resp.status_code == 200
+        cmds = resp.json()["project"]["commands"]
+        assert cmds["python"]["test"] == "pytest -n auto"
+        assert cmds["python"]["lint"] == "ruff check ."
+
+        # Reload and verify persistence
+        reloaded = client.get("/api/v3/settings")
+        assert reloaded.json()["project"]["commands"] == cmds
+
+        # Merge: add typecheck, leave test and lint untouched
+        resp2 = client.patch(
+            "/api/v3/settings",
+            json={"project": {"commands": {"python": {"typecheck": "mypy ."}}}},
+        )
+        assert resp2.status_code == 200
+        cmds2 = resp2.json()["project"]["commands"]["python"]
+        assert cmds2["test"] == "pytest -n auto"
+        assert cmds2["lint"] == "ruff check ."
+        assert cmds2["typecheck"] == "mypy ."
+
+        # Remove a field by setting to empty string
+        resp3 = client.patch(
+            "/api/v3/settings",
+            json={"project": {"commands": {"python": {"lint": ""}}}},
+        )
+        assert resp3.status_code == 200
+        cmds3 = resp3.json()["project"]["commands"]["python"]
+        assert "lint" not in cmds3
+        assert cmds3["test"] == "pytest -n auto"
+        assert cmds3["typecheck"] == "mypy ."
+
+        # Remove all fields for a language → language entry removed
+        resp4 = client.patch(
+            "/api/v3/settings",
+            json={"project": {"commands": {"python": {"test": "", "typecheck": ""}}}},
+        )
+        assert resp4.status_code == 200
+        assert resp4.json()["project"]["commands"] == {}
+
+
+def test_project_commands_language_key_normalized(tmp_path: Path) -> None:
+    """Uppercase/mixed-case language keys are normalized to lowercase."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        resp = client.patch(
+            "/api/v3/settings",
+            json={"project": {"commands": {"PYTHON": {"test": "pytest"}, "TypeScript": {"lint": "eslint ."}}}},
+        )
+        assert resp.status_code == 200
+        cmds = resp.json()["project"]["commands"]
+        assert "python" in cmds
+        assert "typescript" in cmds
+        assert "PYTHON" not in cmds
+        assert "TypeScript" not in cmds
+
+
+def test_project_commands_empty_language_key_ignored(tmp_path: Path) -> None:
+    """Empty string language key is silently ignored."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        resp = client.patch(
+            "/api/v3/settings",
+            json={"project": {"commands": {"": {"test": "pytest"}, "python": {"lint": "ruff check ."}}}},
+        )
+        assert resp.status_code == 200
+        cmds = resp.json()["project"]["commands"]
+        assert "" not in cmds
+        assert cmds["python"]["lint"] == "ruff check ."
+
+
 def test_claim_lock_prevents_double_claim(tmp_path: Path) -> None:
     container = V3Container(tmp_path)
     task = Task(title="Concurrent claim", status="ready")

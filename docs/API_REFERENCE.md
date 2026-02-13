@@ -72,6 +72,37 @@ Top-level settings payload sections:
 - `agent_routing`
 - `defaults`
 - `workers`
+- `project`
+
+### Project Commands
+
+The `project` section lets you declare per-language commands that workers use during
+implementation and verification steps.
+
+PATCH example — set Python commands:
+```json
+{
+  "project": {
+    "commands": {
+      "python": {
+        "test": ".venv/bin/pytest -n auto --tb=short",
+        "lint": ".venv/bin/ruff check ."
+      }
+    }
+  }
+}
+```
+
+Fields per language: `test`, `lint`, `typecheck`, `format`. All optional.
+
+Merge semantics:
+- `null` / omitted field -> no change
+- `""` (empty string) -> removes that command
+- non-empty string -> sets the command
+
+Language keys are normalized to lowercase on write. Only languages detected in the
+project (via marker files like `pyproject.toml`, `tsconfig.json`, `go.mod`) are
+injected into worker prompts — extra entries are stored but ignored at runtime.
 
 ## Agents
 

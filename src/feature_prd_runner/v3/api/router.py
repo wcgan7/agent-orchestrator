@@ -117,11 +117,23 @@ class DefaultsSettingsRequest(BaseModel):
     quality_gate: QualityGateSettingsRequest = Field(default_factory=QualityGateSettingsRequest)
 
 
+class LanguageCommandsRequest(BaseModel):
+    test: Optional[str] = None
+    lint: Optional[str] = None
+    typecheck: Optional[str] = None
+    format: Optional[str] = None
+
+
+class ProjectSettingsRequest(BaseModel):
+    commands: Optional[dict[str, LanguageCommandsRequest]] = None
+
+
 class UpdateSettingsRequest(BaseModel):
     orchestrator: Optional[OrchestratorSettingsRequest] = None
     agent_routing: Optional[AgentRoutingSettingsRequest] = None
     defaults: Optional[DefaultsSettingsRequest] = None
     workers: Optional[WorkersSettingsRequest] = None
+    project: Optional[ProjectSettingsRequest] = None
 
 
 class SpawnAgentRequest(BaseModel):
@@ -354,6 +366,9 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             "default": workers_default,
             "routing": _normalize_str_map(workers_cfg.get("routing")),
             "providers": workers_providers,
+        },
+        "project": {
+            "commands": dict((cfg.get("project") or {}).get("commands") or {}),
         },
     }
 
@@ -1317,6 +1332,30 @@ def create_v3_router(
             normalized_workers = _settings_payload({"workers": workers_cfg})["workers"]
             cfg["workers"] = normalized_workers
             touched_sections.append("workers")
+
+        if body.project is not None and body.project.commands is not None:
+            project_cfg = dict(cfg.get("project") or {})
+            existing_commands = dict(project_cfg.get("commands") or {})
+            for raw_lang, lang_req in body.project.commands.items():
+                lang = raw_lang.strip().lower()
+                if not lang:
+                    continue
+                lang_entry = dict(existing_commands.get(lang) or {})
+                for field in ("test", "lint", "typecheck", "format"):
+                    value = getattr(lang_req, field)
+                    if value is None:
+                        continue
+                    if value == "":
+                        lang_entry.pop(field, None)
+                    else:
+                        lang_entry[field] = value
+                if lang_entry:
+                    existing_commands[lang] = lang_entry
+                else:
+                    existing_commands.pop(lang, None)
+            project_cfg["commands"] = existing_commands
+            cfg["project"] = project_cfg
+            touched_sections.append("project.commands")
 
         container.config.save(cfg)
         bus.emit(
