@@ -79,7 +79,7 @@ Top-level settings payload sections:
 - `project`
 
 `workers.providers.<name>` fields:
-- codex: `type`, `command`, optional `model`, optional `reasoning_effort` (`low|medium|high`)
+- codex: `type`, `command` (default `codex exec`), optional `model`, optional `reasoning_effort` (`low|medium|high`)
 - claude: `type`, `command` (default `claude -p`), optional `model`, optional `reasoning_effort` (`low|medium|high`, mapped to Claude CLI `--effort`)
 - ollama: `type`, `endpoint`, `model`, optional `temperature`, optional `num_ctx`
 

@@ -39,10 +39,10 @@ class WorkerRunResult:
 
 def _build_codex_command(spec: WorkerProviderSpec) -> str:
     """Build a codex command string with optional model/reasoning flags."""
-    base = str(spec.command or "codex").strip() or "codex"
+    base = str(spec.command or "codex exec").strip() or "codex exec"
     parts = shlex.split(base)
     if not parts:
-        parts = ["codex"]
+        parts = ["codex", "exec"]
 
     # Avoid duplicating flags if user already encoded them in command.
     has_model_flag = "--model" in parts

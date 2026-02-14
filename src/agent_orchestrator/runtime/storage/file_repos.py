@@ -256,6 +256,16 @@ class FileAgentRepository(AgentRepository):
                 self._repo._save(agents)
         return agent
 
+    def delete(self, agent_id: str) -> bool:
+        with self._repo._thread_lock:
+            with self._repo._lock:
+                agents = self._repo._load()
+                filtered = [agent for agent in agents if agent.id != agent_id]
+                if len(filtered) == len(agents):
+                    return False
+                self._repo._save(filtered)
+                return True
+
 
 class FileQuickActionRepository(QuickActionRepository):
     def __init__(self, path: Path, lock_path: Path) -> None:

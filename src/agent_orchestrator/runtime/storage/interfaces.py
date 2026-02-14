@@ -51,6 +51,10 @@ class AgentRepository(ABC):
     def upsert(self, agent: AgentRecord) -> AgentRecord:
         raise NotImplementedError
 
+    @abstractmethod
+    def delete(self, agent_id: str) -> bool:
+        raise NotImplementedError
+
 
 class QuickActionRepository(ABC):
     @abstractmethod

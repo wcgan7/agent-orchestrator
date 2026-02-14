@@ -315,7 +315,7 @@ def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
             continue
 
         if provider_type in {"codex", "claude"}:
-            default_command = "codex" if provider_type == "codex" else "claude -p"
+            default_command = "codex exec" if provider_type == "codex" else "claude -p"
             command = str(raw_item.get("command") or default_command).strip() or default_command
             provider: dict[str, Any] = {"type": provider_type, "command": command}
             model = str(raw_item.get("model") or "").strip()
@@ -343,11 +343,11 @@ def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
         providers[name] = provider
 
     codex = providers.get("codex")
-    codex_command = "codex"
+    codex_command = "codex exec"
     codex_model = None
     codex_reasoning = None
     if isinstance(codex, dict):
-        codex_command = str(codex.get("command") or "codex").strip() or "codex"
+        codex_command = str(codex.get("command") or "codex exec").strip() or "codex exec"
         codex_model = str(codex.get("model") or "").strip() or None
         raw_reasoning = str(codex.get("reasoning_effort") or "").strip().lower()
         codex_reasoning = raw_reasoning if raw_reasoning in {"low", "medium", "high"} else None
@@ -1492,6 +1492,24 @@ def create_router(
         container.agents.upsert(agent)
         bus.emit(channel="agents", event_type="agent.terminated", entity_id=agent.id, payload={})
         return {"agent": agent.to_dict()}
+
+    @router.delete("/agents/{agent_id}")
+    async def remove_agent(agent_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, bus, _ = _ctx(project_dir)
+        removed = container.agents.delete(agent_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        bus.emit(channel="agents", event_type="agent.removed", entity_id=agent_id, payload={})
+        return {"removed": True}
+
+    @router.post("/agents/{agent_id}/remove")
+    async def remove_agent_post(agent_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, bus, _ = _ctx(project_dir)
+        removed = container.agents.delete(agent_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        bus.emit(channel="agents", event_type="agent.removed", entity_id=agent_id, payload={})
+        return {"removed": True}
 
     return router
 

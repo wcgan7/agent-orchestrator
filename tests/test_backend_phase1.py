@@ -206,6 +206,29 @@ def test_health_endpoints_available(tmp_path: Path) -> None:
         assert ready.json()["status"] == "ready"
 
 
+def test_agent_remove_supports_delete_and_post(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        first = client.post("/api/agents/spawn", json={"role": "general", "capacity": 1})
+        assert first.status_code == 200
+        first_id = first.json()["agent"]["id"]
+
+        delete_resp = client.delete(f"/api/agents/{first_id}")
+        assert delete_resp.status_code == 200
+        assert delete_resp.json()["removed"] is True
+
+        second = client.post("/api/agents/spawn", json={"role": "general", "capacity": 1})
+        assert second.status_code == 200
+        second_id = second.json()["agent"]["id"]
+
+        post_resp = client.post(f"/api/agents/{second_id}/remove")
+        assert post_resp.status_code == 200
+        assert post_resp.json()["removed"] is True
+
+        missing = client.delete("/api/agents/does-not-exist")
+        assert missing.status_code == 404
+
+
 def test_legacy_compat_endpoints_available(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
@@ -295,7 +318,7 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
                     "providers": {
                         "codex": {
                             "type": "codex",
-                            "command": "codex",
+                            "command": "codex exec",
                             "model": "gpt-5-codex",
                             "reasoning_effort": "high",
                         },

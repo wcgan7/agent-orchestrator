@@ -260,6 +260,7 @@ type CollaborationCommentItem = {
 const STORAGE_PROJECT = 'agent-orchestrator-project'
 const STORAGE_ROUTE = 'agent-orchestrator-route'
 const ADD_REPO_VALUE = '__add_new_repo__'
+const MOBILE_BOARD_BREAKPOINT = 640
 const WS_RELOAD_CHANNELS = new Set(['tasks', 'queue', 'agents', 'review', 'quick_actions', 'notifications'])
 
 const ROUTES: Array<{ key: RouteKey; label: string }> = [
@@ -313,13 +314,51 @@ const DEFAULT_SETTINGS: SystemSettings = {
     default_model: '',
     routing: {},
     providers: {
-      codex: { type: 'codex', command: 'codex' },
+      codex: { type: 'codex', command: 'codex exec' },
     },
   },
   project: {
     commands: {},
   },
 }
+
+const TASK_TYPE_ROLE_MAP_EXAMPLE = `{
+  "bug": "debugger",
+  "docs": "researcher"
+}`
+
+const ROLE_PROVIDER_OVERRIDES_EXAMPLE = `{
+  "reviewer": "codex"
+}`
+
+const WORKER_ROUTING_EXAMPLE = `{
+  "plan": "codex",
+  "implement": "ollama",
+  "review": "codex"
+}`
+
+const WORKER_PROVIDERS_EXAMPLE = `{
+  "codex": {
+    "type": "codex",
+    "command": "codex exec"
+  },
+  "ollama": {
+    "type": "ollama",
+    "endpoint": "http://localhost:11434",
+    "model": "llama3.1:8b"
+  }
+}`
+
+const PROJECT_COMMANDS_EXAMPLE = `{
+  "python": {
+    "test": ".venv/bin/pytest -n auto",
+    "lint": ".venv/bin/ruff check ."
+  },
+  "typescript": {
+    "test": "npm test",
+    "lint": "npm run lint"
+  }
+}`
 
 function routeFromHash(hash: string): RouteKey {
   const cleaned = hash.replace(/^#\/?/, '').trim().toLowerCase()
@@ -329,6 +368,10 @@ function routeFromHash(hash: string): RouteKey {
 
 function toHash(route: RouteKey): string {
   return `#/${route}`
+}
+
+function isMobileBoardViewport(): boolean {
+  return window.innerWidth <= MOBILE_BOARD_BREAKPOINT
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -406,9 +449,24 @@ function parseProjectCommands(input: string): Record<string, LanguageCommandSett
   return out
 }
 
+function formatJsonObjectInput(input: string, label: string): string {
+  const trimmed = input.trim()
+  if (!trimmed) return ''
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(trimmed)
+  } catch {
+    throw new Error(`${label} must be valid JSON`)
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${label} must be a JSON object`)
+  }
+  return JSON.stringify(parsed, null, 2)
+}
+
 function parseWorkerProviders(input: string): Record<string, WorkerProviderSettings> {
   if (!input.trim()) {
-    return { codex: { type: 'codex', command: 'codex' } }
+    return { codex: { type: 'codex', command: 'codex exec' } }
   }
   let parsed: unknown
   try {
@@ -433,7 +491,7 @@ function parseWorkerProviders(input: string): Record<string, WorkerProviderSetti
       throw new Error(`Worker provider "${name}" has invalid type "${type}" (allowed: codex, ollama, claude)`)
     }
     if (type === 'codex' || type === 'claude') {
-      const defaultCommand = type === 'codex' ? 'codex' : 'claude -p'
+      const defaultCommand = type === 'codex' ? 'codex exec' : 'claude -p'
       const command = String(record.command || defaultCommand).trim() || defaultCommand
       const provider: WorkerProviderSettings = { type, command }
       const model = String(record.model || '').trim()
@@ -461,9 +519,9 @@ function parseWorkerProviders(input: string): Record<string, WorkerProviderSetti
     out[name] = provider
   }
   if (!out.codex || out.codex.type !== 'codex') {
-    out.codex = { type: 'codex', command: 'codex' }
+    out.codex = { type: 'codex', command: 'codex exec' }
   } else {
-    out.codex.command = String(out.codex.command || 'codex').trim() || 'codex'
+    out.codex.command = String(out.codex.command || 'codex exec').trim() || 'codex exec'
   }
   return out
 }
@@ -497,7 +555,7 @@ function normalizeWorkers(payload: Partial<SystemSettings['workers']> | null | u
     if (type === 'local') type = 'ollama'
     if (type !== 'codex' && type !== 'ollama' && type !== 'claude') continue
     if (type === 'codex' || type === 'claude') {
-      const defaultCommand = type === 'codex' ? 'codex' : 'claude -p'
+      const defaultCommand = type === 'codex' ? 'codex exec' : 'claude -p'
       const provider: WorkerProviderSettings = {
         type,
         command: String(value.command || defaultCommand).trim() || defaultCommand,
@@ -523,7 +581,7 @@ function normalizeWorkers(payload: Partial<SystemSettings['workers']> | null | u
     providers[name] = provider
   }
   if (!providers.codex || providers.codex.type !== 'codex') {
-    providers.codex = { type: 'codex', command: 'codex' }
+    providers.codex = { type: 'codex', command: 'codex exec' }
   }
   const effectiveDefault = providers[defaultWorker] ? defaultWorker : 'codex'
   return {
@@ -808,6 +866,13 @@ function inferProjectId(projectDir: string): string {
   return parts[parts.length - 1] || ''
 }
 
+function repoNameFromPath(projectPath: string): string {
+  const normalized = projectPath.trim().replace(/[\\/]+$/, '')
+  if (!normalized) return ''
+  const parts = normalized.split(/[\\/]/).filter(Boolean)
+  return parts[parts.length - 1] || normalized
+}
+
 export default function App() {
   const [route, setRoute] = useState<RouteKey>(() => routeFromHash(window.location.hash || localStorage.getItem(STORAGE_ROUTE) || '#/board'))
   const [projectDir, setProjectDir] = useState<string>(() => localStorage.getItem(STORAGE_PROJECT) || '')
@@ -833,6 +898,7 @@ export default function App() {
   const [selectedTaskId, setSelectedTaskId] = useState<string>('')
   const [selectedTaskDetail, setSelectedTaskDetail] = useState<TaskRecord | null>(null)
   const [selectedTaskDetailLoading, setSelectedTaskDetailLoading] = useState(false)
+  const [mobileTaskDetailOpen, setMobileTaskDetailOpen] = useState(false)
   const [editTaskTitle, setEditTaskTitle] = useState('')
   const [editTaskDescription, setEditTaskDescription] = useState('')
   const [editTaskType, setEditTaskType] = useState('feature')
@@ -914,6 +980,7 @@ export default function App() {
   const [browseLoading, setBrowseLoading] = useState(false)
   const [browseError, setBrowseError] = useState('')
   const [browseAllowNonGit, setBrowseAllowNonGit] = useState(false)
+  const [topbarProjectPickerFocused, setTopbarProjectPickerFocused] = useState(false)
 
   const [settingsLoading, setSettingsLoading] = useState(false)
   const [settingsSaving, setSettingsSaving] = useState(false)
@@ -923,17 +990,23 @@ export default function App() {
   const [settingsAutoDeps, setSettingsAutoDeps] = useState(DEFAULT_SETTINGS.orchestrator.auto_deps)
   const [settingsMaxReviewAttempts, setSettingsMaxReviewAttempts] = useState(String(DEFAULT_SETTINGS.orchestrator.max_review_attempts))
   const [settingsDefaultRole, setSettingsDefaultRole] = useState(DEFAULT_SETTINGS.agent_routing.default_role)
-  const [settingsTaskTypeRoles, setSettingsTaskTypeRoles] = useState('{}')
-  const [settingsRoleProviderOverrides, setSettingsRoleProviderOverrides] = useState('{}')
+  const [settingsTaskTypeRoles, setSettingsTaskTypeRoles] = useState('')
+  const [settingsRoleProviderOverrides, setSettingsRoleProviderOverrides] = useState('')
   const [settingsWorkerDefault, setSettingsWorkerDefault] = useState(DEFAULT_SETTINGS.workers.default)
-  const [settingsWorkerDefaultModel, setSettingsWorkerDefaultModel] = useState(DEFAULT_SETTINGS.workers.default_model)
-  const [settingsWorkerRouting, setSettingsWorkerRouting] = useState('{}')
+  const [settingsProviderView, setSettingsProviderView] = useState<'codex' | 'ollama' | 'claude'>('codex')
+  const [settingsWorkerRouting, setSettingsWorkerRouting] = useState('')
   const [settingsWorkerProviders, setSettingsWorkerProviders] = useState(JSON.stringify(DEFAULT_SETTINGS.workers.providers, null, 2))
-  const [settingsClaudeProviderName, setSettingsClaudeProviderName] = useState('claude')
+  const [settingsCodexCommand, setSettingsCodexCommand] = useState('codex exec')
+  const [settingsCodexModel, setSettingsCodexModel] = useState('')
+  const [settingsCodexEffort, setSettingsCodexEffort] = useState('')
   const [settingsClaudeCommand, setSettingsClaudeCommand] = useState('claude -p')
   const [settingsClaudeModel, setSettingsClaudeModel] = useState('')
   const [settingsClaudeEffort, setSettingsClaudeEffort] = useState('')
-  const [settingsProjectCommands, setSettingsProjectCommands] = useState(JSON.stringify(DEFAULT_SETTINGS.project.commands, null, 2))
+  const [settingsOllamaEndpoint, setSettingsOllamaEndpoint] = useState('http://localhost:11434')
+  const [settingsOllamaModel, setSettingsOllamaModel] = useState('')
+  const [settingsOllamaTemperature, setSettingsOllamaTemperature] = useState('')
+  const [settingsOllamaNumCtx, setSettingsOllamaNumCtx] = useState('')
+  const [settingsProjectCommands, setSettingsProjectCommands] = useState('')
   const [settingsGateCritical, setSettingsGateCritical] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.critical))
   const [settingsGateHigh, setSettingsGateHigh] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.high))
   const [settingsGateMedium, setSettingsGateMedium] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.medium))
@@ -1017,14 +1090,14 @@ export default function App() {
   }, [projectDir])
 
   useEffect(() => {
-    const hasModalOpen = workOpen || browseOpen
+    const hasModalOpen = workOpen || browseOpen || mobileTaskDetailOpen
     document.documentElement.classList.toggle('modal-open', hasModalOpen)
     document.body.classList.toggle('modal-open', hasModalOpen)
     return () => {
       document.documentElement.classList.remove('modal-open')
       document.body.classList.remove('modal-open')
     }
-  }, [workOpen, browseOpen])
+  }, [workOpen, browseOpen, mobileTaskDetailOpen])
 
   useEffect(() => {
     const columns = ['backlog', 'ready', 'in_progress', 'in_review', 'blocked', 'done'] as const
@@ -1043,28 +1116,67 @@ export default function App() {
     setSettingsAutoDeps(payload.orchestrator.auto_deps)
     setSettingsMaxReviewAttempts(String(payload.orchestrator.max_review_attempts))
     setSettingsDefaultRole(payload.agent_routing.default_role || 'general')
-    setSettingsTaskTypeRoles(JSON.stringify(payload.agent_routing.task_type_roles || {}, null, 2))
-    setSettingsRoleProviderOverrides(JSON.stringify(payload.agent_routing.role_provider_overrides || {}, null, 2))
-    setSettingsWorkerDefault(payload.workers.default || 'codex')
-    setSettingsWorkerDefaultModel(payload.workers.default_model || '')
-    setSettingsWorkerRouting(JSON.stringify(payload.workers.routing || {}, null, 2))
-    setSettingsWorkerProviders(JSON.stringify(payload.workers.providers || {}, null, 2))
-    const entries = Object.entries(payload.workers.providers || {})
+    const taskTypeRoles = payload.agent_routing.task_type_roles || {}
+    setSettingsTaskTypeRoles(Object.keys(taskTypeRoles).length > 0 ? JSON.stringify(taskTypeRoles, null, 2) : '')
+    const roleProviderOverrides = payload.agent_routing.role_provider_overrides || {}
+    setSettingsRoleProviderOverrides(
+      Object.keys(roleProviderOverrides).length > 0 ? JSON.stringify(roleProviderOverrides, null, 2) : ''
+    )
+    const workerDefault = payload.workers.default || 'codex'
+    setSettingsWorkerDefault(workerDefault === 'ollama' || workerDefault === 'claude' ? workerDefault : 'codex')
+    setSettingsProviderView(workerDefault === 'ollama' || workerDefault === 'claude' ? workerDefault : 'codex')
+    const workerRouting = payload.workers.routing || {}
+    setSettingsWorkerRouting(Object.keys(workerRouting).length > 0 ? JSON.stringify(workerRouting, null, 2) : '')
+    const providers = payload.workers.providers || {}
+    setSettingsWorkerProviders(JSON.stringify(providers, null, 2))
+    const entries = Object.entries(providers)
+
+    const codexEntry = entries.find(([name, provider]) => name === 'codex' && provider?.type === 'codex')
+      || entries.find(([, provider]) => provider?.type === 'codex')
+    if (codexEntry) {
+      const [, provider] = codexEntry
+      setSettingsCodexCommand(String(provider.command || 'codex exec'))
+      setSettingsCodexModel(String(provider.model || ''))
+      setSettingsCodexEffort(String(provider.reasoning_effort || ''))
+    } else {
+      setSettingsCodexCommand('codex exec')
+      setSettingsCodexModel('')
+      setSettingsCodexEffort('')
+    }
+
     const claudeEntry = entries.find(([name, provider]) => name === 'claude' && provider?.type === 'claude')
       || entries.find(([, provider]) => provider?.type === 'claude')
     if (claudeEntry) {
-      const [name, provider] = claudeEntry
-      setSettingsClaudeProviderName(name)
+      const [, provider] = claudeEntry
       setSettingsClaudeCommand(String(provider.command || 'claude -p'))
       setSettingsClaudeModel(String(provider.model || ''))
       setSettingsClaudeEffort(String(provider.reasoning_effort || ''))
     } else {
-      setSettingsClaudeProviderName('claude')
       setSettingsClaudeCommand('claude -p')
       setSettingsClaudeModel('')
       setSettingsClaudeEffort('')
     }
-    setSettingsProjectCommands(JSON.stringify(payload.project.commands || {}, null, 2))
+
+    const ollamaEntry = entries.find(([name, provider]) => name === 'ollama' && provider?.type === 'ollama')
+      || entries.find(([, provider]) => provider?.type === 'ollama')
+    if (ollamaEntry) {
+      const [, provider] = ollamaEntry
+      setSettingsOllamaEndpoint(String(provider.endpoint || 'http://localhost:11434'))
+      setSettingsOllamaModel(String(provider.model || ''))
+      setSettingsOllamaTemperature(
+        provider.temperature === undefined || provider.temperature === null ? '' : String(provider.temperature)
+      )
+      setSettingsOllamaNumCtx(provider.num_ctx === undefined || provider.num_ctx === null ? '' : String(provider.num_ctx))
+    } else {
+      setSettingsOllamaEndpoint('http://localhost:11434')
+      setSettingsOllamaModel('')
+      setSettingsOllamaTemperature('')
+      setSettingsOllamaNumCtx('')
+    }
+    const projectCommands = payload.project.commands || {}
+    setSettingsProjectCommands(
+      Object.keys(projectCommands).length > 0 ? JSON.stringify(projectCommands, null, 2) : ''
+    )
     setSettingsGateCritical(String(payload.defaults.quality_gate.critical))
     setSettingsGateHigh(String(payload.defaults.quality_gate.high))
     setSettingsGateMedium(String(payload.defaults.quality_gate.medium))
@@ -1115,14 +1227,33 @@ export default function App() {
     try {
       const providers = parseWorkerProviders(settingsWorkerProviders)
       const entries = Object.entries(providers)
+      const codexEntry = entries.find(([name, provider]) => name === 'codex' && provider.type === 'codex')
+        || entries.find(([, provider]) => provider.type === 'codex')
+      if (codexEntry) {
+        const [, provider] = codexEntry
+        setSettingsCodexCommand(String(provider.command || 'codex exec'))
+        setSettingsCodexModel(String(provider.model || ''))
+        setSettingsCodexEffort(String(provider.reasoning_effort || ''))
+      }
       const claudeEntry = entries.find(([name, provider]) => name === 'claude' && provider.type === 'claude')
         || entries.find(([, provider]) => provider.type === 'claude')
-      if (!claudeEntry) return
-      const [name, provider] = claudeEntry
-      setSettingsClaudeProviderName(name)
-      setSettingsClaudeCommand(String(provider.command || 'claude -p'))
-      setSettingsClaudeModel(String(provider.model || ''))
-      setSettingsClaudeEffort(String(provider.reasoning_effort || ''))
+      if (claudeEntry) {
+        const [, provider] = claudeEntry
+        setSettingsClaudeCommand(String(provider.command || 'claude -p'))
+        setSettingsClaudeModel(String(provider.model || ''))
+        setSettingsClaudeEffort(String(provider.reasoning_effort || ''))
+      }
+      const ollamaEntry = entries.find(([name, provider]) => name === 'ollama' && provider.type === 'ollama')
+        || entries.find(([, provider]) => provider.type === 'ollama')
+      if (ollamaEntry) {
+        const [, provider] = ollamaEntry
+        setSettingsOllamaEndpoint(String(provider.endpoint || 'http://localhost:11434'))
+        setSettingsOllamaModel(String(provider.model || ''))
+        setSettingsOllamaTemperature(
+          provider.temperature === undefined || provider.temperature === null ? '' : String(provider.temperature)
+        )
+        setSettingsOllamaNumCtx(provider.num_ctx === undefined || provider.num_ctx === null ? '' : String(provider.num_ctx))
+      }
     } catch {
       // Ignore JSON parse errors while user is editing.
     }
@@ -1166,6 +1297,18 @@ export default function App() {
     if (!selectedTaskId) return
     void loadTaskDetail(selectedTaskId)
   }, [selectedTaskId, projectDir])
+
+  useEffect(() => {
+    if (route !== 'board' && mobileTaskDetailOpen) {
+      setMobileTaskDetailOpen(false)
+    }
+  }, [route, mobileTaskDetailOpen])
+
+  useEffect(() => {
+    if (!selectedTaskId && mobileTaskDetailOpen) {
+      setMobileTaskDetailOpen(false)
+    }
+  }, [selectedTaskId, mobileTaskDetailOpen])
 
   async function loadCollaboration(taskId: string): Promise<void> {
     if (!taskId) {
@@ -1934,19 +2077,51 @@ export default function App() {
       const roleProviderOverrides = parseStringMap(settingsRoleProviderOverrides, 'Role provider overrides')
       const workerRouting = parseStringMap(settingsWorkerRouting, 'Worker routing map')
       const workerProviders = parseWorkerProviders(settingsWorkerProviders)
-      const claudeProviderName = settingsClaudeProviderName.trim()
-      if (claudeProviderName) {
-        const claudeProvider: WorkerProviderSettings = {
-          type: 'claude',
-          command: settingsClaudeCommand.trim() || 'claude -p',
+
+      const codexProvider: WorkerProviderSettings = {
+        type: 'codex',
+        command: settingsCodexCommand.trim() || 'codex exec',
+      }
+      const codexModel = settingsCodexModel.trim()
+      if (codexModel) codexProvider.model = codexModel
+      const codexEffort = settingsCodexEffort.trim().toLowerCase()
+      if (codexEffort === 'low' || codexEffort === 'medium' || codexEffort === 'high') {
+        codexProvider.reasoning_effort = codexEffort
+      }
+      workerProviders.codex = codexProvider
+
+      const claudeProvider: WorkerProviderSettings = {
+        type: 'claude',
+        command: settingsClaudeCommand.trim() || 'claude -p',
+      }
+      const claudeModel = settingsClaudeModel.trim()
+      if (claudeModel) claudeProvider.model = claudeModel
+      const claudeEffort = settingsClaudeEffort.trim().toLowerCase()
+      if (claudeEffort === 'low' || claudeEffort === 'medium' || claudeEffort === 'high') {
+        claudeProvider.reasoning_effort = claudeEffort
+      }
+      workerProviders.claude = claudeProvider
+
+      const ollamaEndpoint = settingsOllamaEndpoint.trim()
+      const ollamaModel = settingsOllamaModel.trim()
+      if (ollamaEndpoint || ollamaModel || settingsWorkerDefault === 'ollama') {
+        if (!ollamaEndpoint || !ollamaModel) {
+          throw new Error('Ollama provider requires endpoint and model')
         }
-        const claudeModel = settingsClaudeModel.trim()
-        if (claudeModel) claudeProvider.model = claudeModel
-        const claudeEffort = settingsClaudeEffort.trim().toLowerCase()
-        if (claudeEffort === 'low' || claudeEffort === 'medium' || claudeEffort === 'high') {
-          claudeProvider.reasoning_effort = claudeEffort
+        const ollamaProvider: WorkerProviderSettings = {
+          type: 'ollama',
+          endpoint: ollamaEndpoint,
+          model: ollamaModel,
         }
-        workerProviders[claudeProviderName] = claudeProvider
+        const temperature = Number(settingsOllamaTemperature)
+        if (settingsOllamaTemperature.trim() && Number.isFinite(temperature)) {
+          ollamaProvider.temperature = temperature
+        }
+        const numCtx = Number(settingsOllamaNumCtx)
+        if (settingsOllamaNumCtx.trim() && Number.isFinite(numCtx) && numCtx > 0) {
+          ollamaProvider.num_ctx = Math.floor(numCtx)
+        }
+        workerProviders.ollama = ollamaProvider
       }
       const projectCommands = parseProjectCommands(settingsProjectCommands)
       const payload: SystemSettings = {
@@ -1969,8 +2144,8 @@ export default function App() {
           },
         },
         workers: {
-          default: settingsWorkerDefault.trim() || 'codex',
-          default_model: settingsWorkerDefaultModel.trim(),
+          default: (settingsWorkerDefault === 'ollama' || settingsWorkerDefault === 'claude') ? settingsWorkerDefault : 'codex',
+          default_model: '',
           routing: workerRouting,
           providers: workerProviders,
         },
@@ -1991,6 +2166,20 @@ export default function App() {
       setSettingsError(`Failed to save settings (${detail})`)
     } finally {
       setSettingsSaving(false)
+    }
+  }
+
+  function handleFormatJsonField(
+    label: string,
+    value: string,
+    setter: (next: string) => void,
+  ): void {
+    try {
+      setter(formatJsonObjectInput(value, label))
+      setSettingsError('')
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : 'invalid JSON'
+      setSettingsError(detail)
     }
   }
 
@@ -2042,6 +2231,15 @@ export default function App() {
 
   async function agentAction(agentId: string, action: 'pause' | 'resume' | 'terminate'): Promise<void> {
     await requestJson<{ agent: AgentRecord }>(buildApiUrl(`/api/agents/${agentId}/${action}`, projectDir), { method: 'POST' })
+    await reloadAll()
+  }
+
+  async function agentRemove(agentId: string): Promise<void> {
+    try {
+      await requestJson<{ removed: boolean }>(buildApiUrl(`/api/agents/${agentId}`, projectDir), { method: 'DELETE' })
+    } catch {
+      await requestJson<{ removed: boolean }>(buildApiUrl(`/api/agents/${agentId}/remove`, projectDir), { method: 'POST' })
+    }
     await reloadAll()
   }
 
@@ -2102,6 +2300,21 @@ export default function App() {
     setBrowseOpen(false)
   }
 
+  function handleRouteChange(nextRoute: RouteKey): void {
+    window.location.hash = toHash(nextRoute)
+    setRoute(nextRoute)
+    if (nextRoute !== 'board') {
+      setMobileTaskDetailOpen(false)
+    }
+  }
+
+  function handleTaskSelect(taskId: string): void {
+    setSelectedTaskId(taskId)
+    if (isMobileBoardViewport()) {
+      setMobileTaskDetailOpen(true)
+    }
+  }
+
   function renderBoard(): JSX.Element {
     const columns = ['backlog', 'ready', 'in_progress', 'in_review', 'blocked', 'done']
     const allTasks = columns.flatMap((column) => board.columns[column] || [])
@@ -2121,6 +2334,318 @@ export default function App() {
     const explorerStart = (taskExplorerPage - 1) * taskExplorerPageSize
     const explorerEnd = explorerStart + taskExplorerPageSize
     const pagedExplorerItems = taskExplorerItems.slice(explorerStart, explorerEnd)
+    const taskDetailContent = selectedTaskView ? (
+      <div className="detail-card">
+        {selectedTaskDetailLoading ? <p className="field-label">Loading full task detail...</p> : null}
+        <p className="task-title">{selectedTaskView.title}</p>
+        <p className="task-meta">{selectedTaskView.id} · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.status)} · {humanizeLabel(selectedTaskView.task_type || 'feature')}</p>
+        {selectedTaskView.description ? <p className="task-desc">{selectedTaskView.description}</p> : <p className="task-desc">No description.</p>}
+        <p className="field-label">Blockers: {(selectedTaskView.blocked_by || []).join(', ') || 'None'}</p>
+        <div className="dependency-graph-panel">
+          <p className="field-label">Dependency graph</p>
+          <div className="dependency-graph-grid">
+            <div className="dependency-graph-column">
+              <p className="field-label">Blocked by</p>
+              {blockerIds.length > 0 ? (
+                blockerIds.map((depId) => {
+                  const dep = describeTask(depId, taskIndex)
+                  return (
+                    <div className="dependency-node dependency-node-blocker" key={`blocker-${depId}`}>
+                      <p className="dependency-node-title">{dep.label}</p>
+                      <p className="dependency-node-meta">{humanizeLabel(dep.status)} {'->'} depends on</p>
+                    </div>
+                  )
+                })
+              ) : (
+                <p className="empty">No blockers</p>
+              )}
+            </div>
+            <div className="dependency-graph-column dependency-graph-center">
+              <p className="field-label">Selected task</p>
+              <div className="dependency-node dependency-node-current">
+                <p className="dependency-node-title">{selectedTaskView.title} ({selectedTaskView.id})</p>
+                <p className="dependency-node-meta">{humanizeLabel(selectedTaskView.status)}</p>
+              </div>
+            </div>
+            <div className="dependency-graph-column">
+              <p className="field-label">Blocks</p>
+              {blockedIds.length > 0 ? (
+                blockedIds.map((depId) => {
+                  const dep = describeTask(depId, taskIndex)
+                  return (
+                    <div className="dependency-node dependency-node-dependent" key={`dependent-${depId}`}>
+                      <p className="dependency-node-title">{dep.label}</p>
+                      <p className="dependency-node-meta">blocked until done · {humanizeLabel(dep.status)}</p>
+                    </div>
+                  )
+                })
+              ) : (
+                <p className="empty">No dependents</p>
+              )}
+            </div>
+          </div>
+          {blockerIds.length > 0 || blockedIds.length > 0 ? (
+            <div className="dependency-edge-list">
+              {blockerIds.map((depId) => (
+                <p key={`edge-in-${depId}`} className="dependency-edge">
+                  {describeTask(depId, taskIndex).label} {'->'} {selectedTaskView.id}
+                </p>
+              ))}
+              {blockedIds.map((depId) => (
+                <p key={`edge-out-${depId}`} className="dependency-edge">
+                  {selectedTaskView.id} {'->'} {describeTask(depId, taskIndex).label}
+                </p>
+              ))}
+            </div>
+          ) : null}
+        </div>
+        {selectedTaskView.pending_gate ? (
+          <div className="preview-box">
+            <p className="field-label">
+              Pending gate: <strong>{humanizeLabel(selectedTaskView.pending_gate)}</strong>
+            </p>
+            <button className="button button-primary" onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}>
+              Approve gate
+            </button>
+          </div>
+        ) : null}
+        {Array.isArray(selectedTaskView.human_blocking_issues) && selectedTaskView.human_blocking_issues.length > 0 ? (
+          <div className="preview-box">
+            <p className="field-label">Human blocking issues</p>
+            {selectedTaskView.human_blocking_issues.map((issue, index) => (
+              <div className="row-card" key={`task-human-issue-${index}`}>
+                <p className="task-title">{issue.summary}</p>
+                {issue.details ? <p className="task-desc">{issue.details}</p> : null}
+                {(issue.action || issue.blocking_on || issue.category || issue.severity) ? (
+                  <p className="task-meta">
+                    {issue.action ? `action: ${issue.action}` : null}
+                    {issue.action && issue.blocking_on ? ' · ' : null}
+                    {issue.blocking_on ? `blocking on: ${issue.blocking_on}` : null}
+                    {(issue.action || issue.blocking_on) && issue.category ? ' · ' : null}
+                    {issue.category ? `category: ${issue.category}` : null}
+                    {(issue.action || issue.blocking_on || issue.category) && issue.severity ? ' · ' : null}
+                    {issue.severity ? `severity: ${issue.severity}` : null}
+                  </p>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+        <div className="form-stack">
+          <label className="field-label" htmlFor="edit-task-title">Edit title</label>
+          <input id="edit-task-title" value={editTaskTitle} onChange={(event) => setEditTaskTitle(event.target.value)} />
+          <label className="field-label" htmlFor="edit-task-description">Edit description</label>
+          <textarea id="edit-task-description" rows={3} value={editTaskDescription} onChange={(event) => setEditTaskDescription(event.target.value)} />
+          <div className="inline-actions">
+            <select value={editTaskType} onChange={(event) => setEditTaskType(event.target.value)}>
+              {TASK_TYPE_OPTIONS.map((taskType) => (
+                <option key={taskType} value={taskType}>{humanizeLabel(taskType)}</option>
+              ))}
+            </select>
+            <select value={editTaskPriority} onChange={(event) => setEditTaskPriority(event.target.value)}>
+              <option value="P0">P0</option>
+              <option value="P1">P1</option>
+              <option value="P2">P2</option>
+              <option value="P3">P3</option>
+            </select>
+            <select value={editTaskApprovalMode} onChange={(event) => setEditTaskApprovalMode(event.target.value as 'human_review' | 'auto_approve')}>
+              <option value="human_review">{humanizeLabel('human_review')}</option>
+              <option value="auto_approve">{humanizeLabel('auto_approve')}</option>
+            </select>
+          </div>
+          <label className="field-label" htmlFor="edit-task-labels">Labels (comma-separated)</label>
+          <input id="edit-task-labels" value={editTaskLabels} onChange={(event) => setEditTaskLabels(event.target.value)} />
+          <label className="field-label">HITL mode</label>
+          <HITLModeSelector
+            currentMode={editTaskHitlMode}
+            onModeChange={setEditTaskHitlMode}
+            projectDir={projectDir}
+          />
+          <button className="button" onClick={() => void saveTaskEdits(selectedTaskView.id)}>Save edits</button>
+        </div>
+        <div className="inline-actions">
+          <button className="button" onClick={() => void taskAction(selectedTaskView.id, 'run')}>Run</button>
+          <button className="button" onClick={() => void taskAction(selectedTaskView.id, 'retry')}>Retry</button>
+          <button className="button button-danger" onClick={() => void taskAction(selectedTaskView.id, 'cancel')}>Cancel</button>
+        </div>
+        <div className="inline-actions">
+          <select value={selectedTaskTransition} onChange={(event) => setSelectedTaskTransition(event.target.value)}>
+            {TASK_STATUS_OPTIONS.map((status) => (
+              <option key={status} value={status}>{humanizeLabel(status)}</option>
+            ))}
+          </select>
+          <button className="button" onClick={() => void transitionTask(selectedTaskView.id)}>Transition</button>
+        </div>
+        <div className="form-stack">
+          <label className="field-label" htmlFor="task-blocker-input">Add blocker task ID</label>
+          <div className="inline-actions">
+            <input
+              id="task-blocker-input"
+              value={newDependencyId}
+              onChange={(event) => setNewDependencyId(event.target.value)}
+              placeholder="task-xxxxxxxxxx"
+            />
+            <button className="button" onClick={() => void addDependency(selectedTaskView.id)}>Add dependency</button>
+          </div>
+          {(selectedTaskView.blocked_by || []).map((depId) => (
+            <div className="row-card" key={depId}>
+              <p className="task-meta">{depId}</p>
+              <button className="button button-danger" onClick={() => void removeDependency(selectedTaskView.id, depId)}>
+                Remove
+              </button>
+            </div>
+          ))}
+          <div className="inline-actions">
+            <button
+              className="button"
+              onClick={() => void analyzeDependencies()}
+              disabled={dependencyActionLoading}
+            >
+              Analyze dependencies
+            </button>
+            <button
+              className="button"
+              onClick={() => void resetDependencyAnalysis(selectedTaskView.id)}
+              disabled={dependencyActionLoading}
+            >
+              Reset inferred deps
+            </button>
+          </div>
+          {dependencyActionMessage ? <p className="field-label">{dependencyActionMessage}</p> : null}
+        </div>
+        <div className="list-stack">
+          <p className="field-label">Collaboration timeline</p>
+          {collaborationLoading ? <p className="field-label">Loading collaboration activity...</p> : null}
+          {collaborationTimeline.slice(0, 8).map((event) => (
+            <div className="row-card" key={event.id}>
+              <div>
+                <p className="task-title">{event.summary || humanizeLabel(event.type)}</p>
+                <p className="task-meta">{humanizeLabel(event.type)} · {event.actor} · {toLocaleTimestamp(event.timestamp) || '-'}</p>
+              </div>
+              {event.details ? <p className="task-desc">{event.details}</p> : null}
+              {event.human_blocking_issues && event.human_blocking_issues.length > 0 ? (
+                <div className="list-stack">
+                  <p className="field-label">Required human input</p>
+                  {event.human_blocking_issues.map((issue, idx) => (
+                    <p className="task-meta" key={`${event.id}-issue-${idx}`}>- {issue.summary}</p>
+                  ))}
+                </div>
+              ) : null}
+            </div>
+          ))}
+          {collaborationTimeline.length === 0 && !collaborationLoading ? <p className="empty">No collaboration events for this task yet.</p> : null}
+        </div>
+        <div className="list-stack">
+          <p className="field-label">Feedback</p>
+          <div className="form-stack">
+            <label className="field-label" htmlFor="feedback-summary">Summary</label>
+            <input
+              id="feedback-summary"
+              value={feedbackSummary}
+              onChange={(event) => setFeedbackSummary(event.target.value)}
+              placeholder="What should change?"
+            />
+            <div className="inline-actions">
+              <select value={feedbackType} onChange={(event) => setFeedbackType(event.target.value)} aria-label="Feedback type">
+                <option value="general">General</option>
+                <option value="bug">Bug</option>
+                <option value="nit">Nit</option>
+                <option value="question">Question</option>
+              </select>
+              <select value={feedbackPriority} onChange={(event) => setFeedbackPriority(event.target.value)} aria-label="Feedback priority">
+                <option value="must">Must</option>
+                <option value="should">Should</option>
+                <option value="could">Could</option>
+              </select>
+            </div>
+            <label className="field-label" htmlFor="feedback-details">Details</label>
+            <textarea
+              id="feedback-details"
+              rows={3}
+              value={feedbackDetails}
+              onChange={(event) => setFeedbackDetails(event.target.value)}
+            />
+            <label className="field-label" htmlFor="feedback-file">Target file (optional)</label>
+            <input
+              id="feedback-file"
+              value={feedbackTargetFile}
+              onChange={(event) => setFeedbackTargetFile(event.target.value)}
+              placeholder="src/path/file.ts"
+            />
+            <button className="button" onClick={() => void submitFeedback(selectedTaskView.id)}>
+              Add feedback
+            </button>
+          </div>
+          {collaborationFeedback.map((item) => (
+            <div className="row-card" key={item.id}>
+              <div>
+                <p className="task-title">{item.summary}</p>
+                <p className="task-meta">
+                  {humanizeLabel(item.feedback_type)} · {humanizeLabel(item.priority)} · {humanizeLabel(item.status)}
+                </p>
+                {item.details ? <p className="task-desc">{item.details}</p> : null}
+                {item.target_file ? <p className="task-meta">file: {item.target_file}</p> : null}
+              </div>
+              {item.status !== 'addressed' ? (
+                <button className="button" onClick={() => void dismissFeedback(selectedTaskView.id, item.id)}>
+                  Dismiss
+                </button>
+              ) : null}
+            </div>
+          ))}
+          {collaborationFeedback.length === 0 ? <p className="empty">No feedback yet.</p> : null}
+        </div>
+        <div className="list-stack">
+          <p className="field-label">Comments</p>
+          <div className="form-stack">
+            <label className="field-label" htmlFor="comment-file-path">File path</label>
+            <input
+              id="comment-file-path"
+              value={commentFilePath}
+              onChange={(event) => setCommentFilePath(event.target.value)}
+              placeholder="src/path/file.ts"
+            />
+            <label className="field-label" htmlFor="comment-line-number">Line number</label>
+            <input
+              id="comment-line-number"
+              value={commentLineNumber}
+              onChange={(event) => setCommentLineNumber(event.target.value)}
+              inputMode="numeric"
+            />
+            <label className="field-label" htmlFor="comment-body">Comment</label>
+            <textarea
+              id="comment-body"
+              rows={3}
+              value={commentBody}
+              onChange={(event) => setCommentBody(event.target.value)}
+            />
+            <button className="button" onClick={() => void submitComment(selectedTaskView.id)}>
+              Add comment
+            </button>
+          </div>
+          {collaborationComments.map((comment) => (
+            <div className="row-card" key={comment.id}>
+              <div>
+                <p className="task-title">{comment.file_path}:{comment.line_number}</p>
+                <p className="task-meta">{comment.author || 'human'} · {toLocaleTimestamp(comment.created_at) || '-'}</p>
+                <p className="task-desc">{comment.body}</p>
+                {comment.resolved ? <p className="task-meta">Resolved</p> : null}
+              </div>
+              {!comment.resolved ? (
+                <button className="button" onClick={() => void resolveComment(selectedTaskView.id, comment.id)}>
+                  Resolve
+                </button>
+              ) : null}
+            </div>
+          ))}
+          {collaborationComments.length === 0 ? <p className="empty">No comments yet.</p> : null}
+        </div>
+        {collaborationError ? <p className="error-banner">{collaborationError}</p> : null}
+        <p className="field-label">Activity: Review queue size is {reviewQueue.length}. Trigger actions from Review Queue.</p>
+      </div>
+    ) : (
+      <p className="empty">No tasks on board yet.</p>
+    )
     return (
       <section className="panel">
         <header className="panel-head">
@@ -2129,13 +2654,14 @@ export default function App() {
         <div className="workbench-grid">
           <article className="workbench-pane">
             <h3>Kanban</h3>
+            <p className="field-label board-mobile-hint">Tap any task card to open full detail.</p>
             <div className="board-grid">
               {columns.map((column) => (
                 <article className="board-col" key={column}>
                   <h3>{humanizeLabel(column)}</h3>
                   <div className="card-list">
                     {(board.columns[column] || []).map((task) => (
-                      <button className="task-card task-card-button" key={task.id} onClick={() => setSelectedTaskId(task.id)}>
+                      <button className="task-card task-card-button" key={task.id} onClick={() => handleTaskSelect(task.id)}>
                         <p className="task-title">{task.title}</p>
                         <p className="task-meta">{task.priority} · {task.id}</p>
                         {task.description ? <p className="task-desc">{task.description}</p> : null}
@@ -2148,318 +2674,7 @@ export default function App() {
           </article>
           <article className="workbench-pane">
             <h3>Task Detail</h3>
-            {selectedTaskView ? (
-              <div className="detail-card">
-                {selectedTaskDetailLoading ? <p className="field-label">Loading full task detail...</p> : null}
-                <p className="task-title">{selectedTaskView.title}</p>
-                <p className="task-meta">{selectedTaskView.id} · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.status)} · {humanizeLabel(selectedTaskView.task_type || 'feature')}</p>
-                {selectedTaskView.description ? <p className="task-desc">{selectedTaskView.description}</p> : <p className="task-desc">No description.</p>}
-                <p className="field-label">Blockers: {(selectedTaskView.blocked_by || []).join(', ') || 'None'}</p>
-                <div className="dependency-graph-panel">
-                  <p className="field-label">Dependency graph</p>
-                  <div className="dependency-graph-grid">
-                    <div className="dependency-graph-column">
-                      <p className="field-label">Blocked by</p>
-                      {blockerIds.length > 0 ? (
-                        blockerIds.map((depId) => {
-                          const dep = describeTask(depId, taskIndex)
-                          return (
-                            <div className="dependency-node dependency-node-blocker" key={`blocker-${depId}`}>
-                              <p className="dependency-node-title">{dep.label}</p>
-                              <p className="dependency-node-meta">{humanizeLabel(dep.status)} {'->'} depends on</p>
-                            </div>
-                          )
-                        })
-                      ) : (
-                        <p className="empty">No blockers</p>
-                      )}
-                    </div>
-                    <div className="dependency-graph-column dependency-graph-center">
-                      <p className="field-label">Selected task</p>
-                      <div className="dependency-node dependency-node-current">
-                        <p className="dependency-node-title">{selectedTaskView.title} ({selectedTaskView.id})</p>
-                        <p className="dependency-node-meta">{humanizeLabel(selectedTaskView.status)}</p>
-                      </div>
-                    </div>
-                    <div className="dependency-graph-column">
-                      <p className="field-label">Blocks</p>
-                      {blockedIds.length > 0 ? (
-                        blockedIds.map((depId) => {
-                          const dep = describeTask(depId, taskIndex)
-                          return (
-                            <div className="dependency-node dependency-node-dependent" key={`dependent-${depId}`}>
-                              <p className="dependency-node-title">{dep.label}</p>
-                              <p className="dependency-node-meta">blocked until done · {humanizeLabel(dep.status)}</p>
-                            </div>
-                          )
-                        })
-                      ) : (
-                        <p className="empty">No dependents</p>
-                      )}
-                    </div>
-                  </div>
-                  {blockerIds.length > 0 || blockedIds.length > 0 ? (
-                    <div className="dependency-edge-list">
-                      {blockerIds.map((depId) => (
-                        <p key={`edge-in-${depId}`} className="dependency-edge">
-                          {describeTask(depId, taskIndex).label} {'->'} {selectedTaskView.id}
-                        </p>
-                      ))}
-                      {blockedIds.map((depId) => (
-                        <p key={`edge-out-${depId}`} className="dependency-edge">
-                          {selectedTaskView.id} {'->'} {describeTask(depId, taskIndex).label}
-                        </p>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-                {selectedTaskView.pending_gate ? (
-                  <div className="preview-box">
-                    <p className="field-label">
-                      Pending gate: <strong>{humanizeLabel(selectedTaskView.pending_gate)}</strong>
-                    </p>
-                    <button className="button button-primary" onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}>
-                      Approve gate
-                    </button>
-                  </div>
-                ) : null}
-                {Array.isArray(selectedTaskView.human_blocking_issues) && selectedTaskView.human_blocking_issues.length > 0 ? (
-                  <div className="preview-box">
-                    <p className="field-label">Human blocking issues</p>
-                    {selectedTaskView.human_blocking_issues.map((issue, index) => (
-                      <div className="row-card" key={`task-human-issue-${index}`}>
-                        <p className="task-title">{issue.summary}</p>
-                        {issue.details ? <p className="task-desc">{issue.details}</p> : null}
-                        {(issue.action || issue.blocking_on || issue.category || issue.severity) ? (
-                          <p className="task-meta">
-                            {issue.action ? `action: ${issue.action}` : null}
-                            {issue.action && issue.blocking_on ? ' · ' : null}
-                            {issue.blocking_on ? `blocking on: ${issue.blocking_on}` : null}
-                            {(issue.action || issue.blocking_on) && issue.category ? ' · ' : null}
-                            {issue.category ? `category: ${issue.category}` : null}
-                            {(issue.action || issue.blocking_on || issue.category) && issue.severity ? ' · ' : null}
-                            {issue.severity ? `severity: ${issue.severity}` : null}
-                          </p>
-                        ) : null}
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-                <div className="form-stack">
-                  <label className="field-label" htmlFor="edit-task-title">Edit title</label>
-                  <input id="edit-task-title" value={editTaskTitle} onChange={(event) => setEditTaskTitle(event.target.value)} />
-                  <label className="field-label" htmlFor="edit-task-description">Edit description</label>
-                  <textarea id="edit-task-description" rows={3} value={editTaskDescription} onChange={(event) => setEditTaskDescription(event.target.value)} />
-                  <div className="inline-actions">
-                    <select value={editTaskType} onChange={(event) => setEditTaskType(event.target.value)}>
-                      {TASK_TYPE_OPTIONS.map((taskType) => (
-                        <option key={taskType} value={taskType}>{humanizeLabel(taskType)}</option>
-                      ))}
-                    </select>
-                    <select value={editTaskPriority} onChange={(event) => setEditTaskPriority(event.target.value)}>
-                      <option value="P0">P0</option>
-                      <option value="P1">P1</option>
-                      <option value="P2">P2</option>
-                      <option value="P3">P3</option>
-                    </select>
-                    <select value={editTaskApprovalMode} onChange={(event) => setEditTaskApprovalMode(event.target.value as 'human_review' | 'auto_approve')}>
-                      <option value="human_review">{humanizeLabel('human_review')}</option>
-                      <option value="auto_approve">{humanizeLabel('auto_approve')}</option>
-                    </select>
-                  </div>
-                  <label className="field-label" htmlFor="edit-task-labels">Labels (comma-separated)</label>
-                  <input id="edit-task-labels" value={editTaskLabels} onChange={(event) => setEditTaskLabels(event.target.value)} />
-                  <label className="field-label">HITL mode</label>
-                  <HITLModeSelector
-                    currentMode={editTaskHitlMode}
-                    onModeChange={setEditTaskHitlMode}
-                    projectDir={projectDir}
-                  />
-                  <button className="button" onClick={() => void saveTaskEdits(selectedTaskView.id)}>Save edits</button>
-                </div>
-                <div className="inline-actions">
-                  <button className="button" onClick={() => void taskAction(selectedTaskView.id, 'run')}>Run</button>
-                  <button className="button" onClick={() => void taskAction(selectedTaskView.id, 'retry')}>Retry</button>
-                  <button className="button button-danger" onClick={() => void taskAction(selectedTaskView.id, 'cancel')}>Cancel</button>
-                </div>
-                <div className="inline-actions">
-                  <select value={selectedTaskTransition} onChange={(event) => setSelectedTaskTransition(event.target.value)}>
-                    {TASK_STATUS_OPTIONS.map((status) => (
-                      <option key={status} value={status}>{humanizeLabel(status)}</option>
-                    ))}
-                  </select>
-                  <button className="button" onClick={() => void transitionTask(selectedTaskView.id)}>Transition</button>
-                </div>
-                <div className="form-stack">
-                  <label className="field-label" htmlFor="task-blocker-input">Add blocker task ID</label>
-                  <div className="inline-actions">
-                    <input
-                      id="task-blocker-input"
-                      value={newDependencyId}
-                      onChange={(event) => setNewDependencyId(event.target.value)}
-                      placeholder="task-xxxxxxxxxx"
-                    />
-                    <button className="button" onClick={() => void addDependency(selectedTaskView.id)}>Add dependency</button>
-                  </div>
-                  {(selectedTaskView.blocked_by || []).map((depId) => (
-                    <div className="row-card" key={depId}>
-                      <p className="task-meta">{depId}</p>
-                      <button className="button button-danger" onClick={() => void removeDependency(selectedTaskView.id, depId)}>
-                        Remove
-                      </button>
-                    </div>
-                  ))}
-                  <div className="inline-actions">
-                    <button
-                      className="button"
-                      onClick={() => void analyzeDependencies()}
-                      disabled={dependencyActionLoading}
-                    >
-                      Analyze dependencies
-                    </button>
-                    <button
-                      className="button"
-                      onClick={() => void resetDependencyAnalysis(selectedTaskView.id)}
-                      disabled={dependencyActionLoading}
-                    >
-                      Reset inferred deps
-                    </button>
-                  </div>
-                  {dependencyActionMessage ? <p className="field-label">{dependencyActionMessage}</p> : null}
-                </div>
-                <div className="list-stack">
-                  <p className="field-label">Collaboration timeline</p>
-                  {collaborationLoading ? <p className="field-label">Loading collaboration activity...</p> : null}
-                  {collaborationTimeline.slice(0, 8).map((event) => (
-                    <div className="row-card" key={event.id}>
-                      <div>
-                        <p className="task-title">{event.summary || humanizeLabel(event.type)}</p>
-                        <p className="task-meta">{humanizeLabel(event.type)} · {event.actor} · {toLocaleTimestamp(event.timestamp) || '-'}</p>
-                      </div>
-                      {event.details ? <p className="task-desc">{event.details}</p> : null}
-                      {event.human_blocking_issues && event.human_blocking_issues.length > 0 ? (
-                        <div className="list-stack">
-                          <p className="field-label">Required human input</p>
-                          {event.human_blocking_issues.map((issue, idx) => (
-                            <p className="task-meta" key={`${event.id}-issue-${idx}`}>- {issue.summary}</p>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  ))}
-                  {collaborationTimeline.length === 0 && !collaborationLoading ? <p className="empty">No collaboration events for this task yet.</p> : null}
-                </div>
-                <div className="list-stack">
-                  <p className="field-label">Feedback</p>
-                  <div className="form-stack">
-                    <label className="field-label" htmlFor="feedback-summary">Summary</label>
-                    <input
-                      id="feedback-summary"
-                      value={feedbackSummary}
-                      onChange={(event) => setFeedbackSummary(event.target.value)}
-                      placeholder="What should change?"
-                    />
-                    <div className="inline-actions">
-                      <select value={feedbackType} onChange={(event) => setFeedbackType(event.target.value)} aria-label="Feedback type">
-                        <option value="general">General</option>
-                        <option value="bug">Bug</option>
-                        <option value="nit">Nit</option>
-                        <option value="question">Question</option>
-                      </select>
-                      <select value={feedbackPriority} onChange={(event) => setFeedbackPriority(event.target.value)} aria-label="Feedback priority">
-                        <option value="must">Must</option>
-                        <option value="should">Should</option>
-                        <option value="could">Could</option>
-                      </select>
-                    </div>
-                    <label className="field-label" htmlFor="feedback-details">Details</label>
-                    <textarea
-                      id="feedback-details"
-                      rows={3}
-                      value={feedbackDetails}
-                      onChange={(event) => setFeedbackDetails(event.target.value)}
-                    />
-                    <label className="field-label" htmlFor="feedback-file">Target file (optional)</label>
-                    <input
-                      id="feedback-file"
-                      value={feedbackTargetFile}
-                      onChange={(event) => setFeedbackTargetFile(event.target.value)}
-                      placeholder="src/path/file.ts"
-                    />
-                    <button className="button" onClick={() => void submitFeedback(selectedTaskView.id)}>
-                      Add feedback
-                    </button>
-                  </div>
-                  {collaborationFeedback.map((item) => (
-                    <div className="row-card" key={item.id}>
-                      <div>
-                        <p className="task-title">{item.summary}</p>
-                        <p className="task-meta">
-                          {humanizeLabel(item.feedback_type)} · {humanizeLabel(item.priority)} · {humanizeLabel(item.status)}
-                        </p>
-                        {item.details ? <p className="task-desc">{item.details}</p> : null}
-                        {item.target_file ? <p className="task-meta">file: {item.target_file}</p> : null}
-                      </div>
-                      {item.status !== 'addressed' ? (
-                        <button className="button" onClick={() => void dismissFeedback(selectedTaskView.id, item.id)}>
-                          Dismiss
-                        </button>
-                      ) : null}
-                    </div>
-                  ))}
-                  {collaborationFeedback.length === 0 ? <p className="empty">No feedback yet.</p> : null}
-                </div>
-                <div className="list-stack">
-                  <p className="field-label">Comments</p>
-                  <div className="form-stack">
-                    <label className="field-label" htmlFor="comment-file-path">File path</label>
-                    <input
-                      id="comment-file-path"
-                      value={commentFilePath}
-                      onChange={(event) => setCommentFilePath(event.target.value)}
-                      placeholder="src/path/file.ts"
-                    />
-                    <label className="field-label" htmlFor="comment-line-number">Line number</label>
-                    <input
-                      id="comment-line-number"
-                      value={commentLineNumber}
-                      onChange={(event) => setCommentLineNumber(event.target.value)}
-                      inputMode="numeric"
-                    />
-                    <label className="field-label" htmlFor="comment-body">Comment</label>
-                    <textarea
-                      id="comment-body"
-                      rows={3}
-                      value={commentBody}
-                      onChange={(event) => setCommentBody(event.target.value)}
-                    />
-                    <button className="button" onClick={() => void submitComment(selectedTaskView.id)}>
-                      Add comment
-                    </button>
-                  </div>
-                  {collaborationComments.map((comment) => (
-                    <div className="row-card" key={comment.id}>
-                      <div>
-                        <p className="task-title">{comment.file_path}:{comment.line_number}</p>
-                        <p className="task-meta">{comment.author || 'human'} · {toLocaleTimestamp(comment.created_at) || '-'}</p>
-                        <p className="task-desc">{comment.body}</p>
-                        {comment.resolved ? <p className="task-meta">Resolved</p> : null}
-                      </div>
-                      {!comment.resolved ? (
-                        <button className="button" onClick={() => void resolveComment(selectedTaskView.id, comment.id)}>
-                          Resolve
-                        </button>
-                      ) : null}
-                    </div>
-                  ))}
-                  {collaborationComments.length === 0 ? <p className="empty">No comments yet.</p> : null}
-                </div>
-                {collaborationError ? <p className="error-banner">{collaborationError}</p> : null}
-                <p className="field-label">Activity: Review queue size is {reviewQueue.length}. Trigger actions from Review Queue.</p>
-              </div>
-            ) : (
-              <p className="empty">No tasks on board yet.</p>
-            )}
+            {mobileTaskDetailOpen ? <p className="field-label">Task detail is open in full-screen mode.</p> : taskDetailContent}
           </article>
           <article className="workbench-pane">
             <h3>Queue & Agents</h3>
@@ -2501,12 +2716,25 @@ export default function App() {
                 onOnlyBlockedChange={setTaskExplorerOnlyBlocked}
                 onPageChange={setTaskExplorerPage}
                 onPageSizeChange={setTaskExplorerPageSize}
-                onSelectTask={setSelectedTaskId}
+                onSelectTask={handleTaskSelect}
                 onRetry={() => void loadTaskExplorer()}
               />
             </div>
           </article>
         </div>
+        {mobileTaskDetailOpen ? (
+          <div className="modal-scrim mobile-detail-scrim" role="dialog" aria-modal="true" aria-label="Task detail">
+            <div className="modal-card mobile-task-detail-modal">
+              <header className="panel-head mobile-task-detail-head">
+                <h2>Task Detail</h2>
+                <button className="button" onClick={() => setMobileTaskDetailOpen(false)}>Close</button>
+              </header>
+              <div className="mobile-task-detail-body">
+                {taskDetailContent}
+              </div>
+            </div>
+          </div>
+        ) : null}
       </section>
     )
   }
@@ -2619,7 +2847,7 @@ export default function App() {
                 <p className="task-title">{task.title}</p>
                 <p className="task-meta">{task.id}</p>
               </div>
-              <div className="inline-actions">
+              <div className="inline-actions json-editor-actions">
                 <button className="button" onClick={() => void reviewAction(task.id, 'request-changes')}>Request changes</button>
                 <button className="button button-primary" onClick={() => void reviewAction(task.id, 'approve')}>Approve</button>
               </div>
@@ -2632,85 +2860,119 @@ export default function App() {
   }
 
   function renderAgents(): JSX.Element {
+    const runningAgents = agents.filter((agent) => String(agent.status || '').toLowerCase() === 'running')
+    const pausedAgents = agents.filter((agent) => String(agent.status || '').toLowerCase() === 'paused')
+
     return (
       <section className="panel">
         <header className="panel-head">
           <h2>Agents</h2>
-          <div className="inline-actions">
-            <select value={spawnRole} onChange={(event) => setSpawnRole(event.target.value)}>
-              {AGENT_ROLE_OPTIONS.map((role) => (
-                <option key={role} value={role}>{humanizeLabel(role)}</option>
-              ))}
-            </select>
-            <input
-              value={spawnCapacity}
-              onChange={(event) => setSpawnCapacity(event.target.value)}
-              placeholder="capacity"
-              aria-label="Spawn capacity"
-            />
-            <input
-              value={spawnProviderOverride}
-              onChange={(event) => setSpawnProviderOverride(event.target.value)}
-              placeholder="provider override (optional)"
-              aria-label="Provider override"
-            />
-            <button className="button button-primary" onClick={() => void spawnAgent()}>Spawn agent</button>
-          </div>
         </header>
-        <div className="list-stack">
-          <p className="field-label">Collaboration presence</p>
-          {presenceUsers.length > 0 ? (
-            <div className="presence-grid">
-              {presenceUsers.map((user) => (
-                <div className="presence-card" key={user.id}>
-                  <div className="presence-head">
-                    <span className={`presence-dot ${presenceStatusClass(user.status)}`} />
-                    <p className="task-title">{user.name}</p>
+        <div className="agents-layout">
+          <article className="settings-card agents-spawn-card">
+            <h3>Spawn Agent</h3>
+            <p className="field-label">Create an additional worker with role-specific behavior.</p>
+            <div className="form-stack">
+              <label className="field-label" htmlFor="spawn-role-input">Role</label>
+              <select id="spawn-role-input" value={spawnRole} onChange={(event) => setSpawnRole(event.target.value)}>
+                {AGENT_ROLE_OPTIONS.map((role) => (
+                  <option key={role} value={role}>{humanizeLabel(role)}</option>
+                ))}
+              </select>
+              <label className="field-label" htmlFor="spawn-capacity-input">Capacity</label>
+              <input
+                id="spawn-capacity-input"
+                value={spawnCapacity}
+                onChange={(event) => setSpawnCapacity(event.target.value)}
+                placeholder="1"
+                aria-label="Spawn capacity"
+              />
+              <label className="field-label" htmlFor="spawn-provider-override-input">Provider override (optional)</label>
+              <input
+                id="spawn-provider-override-input"
+                value={spawnProviderOverride}
+                onChange={(event) => setSpawnProviderOverride(event.target.value)}
+                placeholder="codex / ollama / claude"
+                aria-label="Provider override"
+              />
+              <button className="button button-primary" onClick={() => void spawnAgent()}>Spawn agent</button>
+            </div>
+          </article>
+
+          <article className="settings-card agents-active-card">
+            <h3>Active Agents</h3>
+            <p className="field-label">
+              Running: {runningAgents.length} · Paused: {pausedAgents.length}
+            </p>
+            <div className="list-stack">
+              {agents.map((agent) => (
+                <div className="row-card" key={agent.id}>
+                  <div>
+                    <p className="task-title">{humanizeLabel(agent.role)}</p>
+                    <p className="task-meta">{agent.id} · {humanizeLabel(agent.status)} · capacity {agent.capacity}</p>
+                    {agent.override_provider ? <p className="task-meta">provider: {agent.override_provider}</p> : null}
                   </div>
-                  <p className="task-meta">
-                    {user.role ? `${humanizeLabel(user.role)} · ` : ''}{humanizeLabel(user.status)}
-                  </p>
-                  {user.activity ? <p className="task-desc">{user.activity}</p> : null}
+                  <div className="inline-actions">
+                    {String(agent.status || '').toLowerCase() === 'terminated' ? (
+                      <button className="button button-danger" onClick={() => void agentRemove(agent.id)}>Remove</button>
+                    ) : (
+                      <>
+                        <button className="button" onClick={() => void agentAction(agent.id, 'pause')}>Pause</button>
+                        <button className="button" onClick={() => void agentAction(agent.id, 'resume')}>Resume</button>
+                        <button className="button button-danger" onClick={() => void agentAction(agent.id, 'terminate')}>Terminate</button>
+                      </>
+                    )}
+                  </div>
                 </div>
               ))}
+              {agents.length === 0 ? <p className="empty">No agents active.</p> : null}
             </div>
-          ) : (
-            <p className="empty">No active collaborators.</p>
-          )}
-          <p className="field-label">Agent type catalog</p>
-          {agentTypes.length > 0 ? (
-            <div className="presence-grid">
-              {agentTypes.map((agentType) => (
-                <div className="presence-card" key={agentType.role}>
-                  <p className="task-title">{agentType.display_name}</p>
-                  <p className="task-meta">{agentType.role}</p>
-                  {agentType.description ? <p className="task-desc">{agentType.description}</p> : null}
-                  <p className="task-meta">
-                    affinity: {agentType.task_type_affinity.length > 0 ? agentType.task_type_affinity.join(', ') : 'none'}
-                  </p>
-                  <p className="task-meta">
-                    steps: {agentType.allowed_steps.length > 0 ? agentType.allowed_steps.join(', ') : 'n/a'}
-                  </p>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="empty">No agent types returned.</p>
-          )}
-          {agents.map((agent) => (
-            <div className="row-card" key={agent.id}>
-              <div>
-                <p className="task-title">{humanizeLabel(agent.role)}</p>
-                <p className="task-meta">{agent.id} · {humanizeLabel(agent.status)}</p>
+          </article>
+
+          <article className="settings-card agents-presence-card">
+            <h3>Collaboration Presence</h3>
+            {presenceUsers.length > 0 ? (
+              <div className="presence-grid">
+                {presenceUsers.map((user) => (
+                  <div className="presence-card" key={user.id}>
+                    <div className="presence-head">
+                      <span className={`presence-dot ${presenceStatusClass(user.status)}`} />
+                      <p className="task-title">{user.name}</p>
+                    </div>
+                    <p className="task-meta">
+                      {user.role ? `${humanizeLabel(user.role)} · ` : ''}{humanizeLabel(user.status)}
+                    </p>
+                    {user.activity ? <p className="task-desc">{user.activity}</p> : null}
+                  </div>
+                ))}
               </div>
-              <div className="inline-actions">
-                <button className="button" onClick={() => void agentAction(agent.id, 'pause')}>Pause</button>
-                <button className="button" onClick={() => void agentAction(agent.id, 'resume')}>Resume</button>
-                <button className="button button-danger" onClick={() => void agentAction(agent.id, 'terminate')}>Terminate</button>
+            ) : (
+              <p className="empty">No active collaborators.</p>
+            )}
+          </article>
+
+          <article className="settings-card agents-catalog-card">
+            <h3>Agent Catalog</h3>
+            {agentTypes.length > 0 ? (
+              <div className="presence-grid">
+                {agentTypes.map((agentType) => (
+                  <div className="presence-card" key={agentType.role}>
+                    <p className="task-title">{agentType.display_name}</p>
+                    <p className="task-meta">{agentType.role}</p>
+                    {agentType.description ? <p className="task-desc">{agentType.description}</p> : null}
+                    <p className="task-meta">
+                      affinity: {agentType.task_type_affinity.length > 0 ? agentType.task_type_affinity.join(', ') : 'none'}
+                    </p>
+                    <p className="task-meta">
+                      steps: {agentType.allowed_steps.length > 0 ? agentType.allowed_steps.join(', ') : 'n/a'}
+                    </p>
+                  </div>
+                ))}
               </div>
-            </div>
-          ))}
-          {agents.length === 0 ? <p className="empty">No agents active.</p> : null}
+            ) : (
+              <p className="empty">No agent types returned.</p>
+            )}
+          </article>
         </div>
       </section>
     )
@@ -2725,7 +2987,7 @@ export default function App() {
         </header>
 
         <div className="settings-grid">
-          <article className="settings-card">
+          <article className="settings-card settings-card-projects">
             <h3>Projects</h3>
             <label className="field-label" htmlFor="project-selector">Active project</label>
             <input
@@ -2781,14 +3043,14 @@ export default function App() {
             </div>
           </article>
 
-          <article className="settings-card">
+          <article className="settings-card settings-card-diagnostics">
             <h3>Diagnostics</h3>
             <p>Schema version: 3</p>
             <p>Selected route: {humanizeLabel(route)}</p>
             <p>Project dir: {projectDir || 'current workspace'}</p>
           </article>
 
-          <article className="settings-card">
+          <article className="settings-card settings-card-routing">
             <h3>Execution & Routing</h3>
             <form className="form-stack" onSubmit={(event) => void saveSettings(event)}>
               <label className="field-label" htmlFor="settings-concurrency">Orchestrator concurrency</label>
@@ -2813,6 +3075,7 @@ export default function App() {
                 onChange={(event) => setSettingsMaxReviewAttempts(event.target.value)}
                 inputMode="numeric"
               />
+              <p className="settings-subheading">Role Routing</p>
               <label className="field-label" htmlFor="settings-default-role">Default role</label>
               <input
                 id="settings-default-role"
@@ -2821,129 +3084,326 @@ export default function App() {
                 placeholder="general"
               />
               <label className="field-label" htmlFor="settings-task-type-roles">Task type role map (JSON object)</label>
-              <textarea
-                id="settings-task-type-roles"
-                rows={4}
-                value={settingsTaskTypeRoles}
-                onChange={(event) => setSettingsTaskTypeRoles(event.target.value)}
-                placeholder='{"bug":"debugger","docs":"researcher"}'
-              />
+              <p className="field-label">Maps <code>task_type</code> {'->'} <code>role</code>. Unmapped task types use Default role.</p>
+              <div className="json-editor-group">
+                <textarea
+                  id="settings-task-type-roles"
+                  className="json-editor-textarea"
+                  rows={4}
+                  value={settingsTaskTypeRoles}
+                  onChange={(event) => setSettingsTaskTypeRoles(event.target.value)}
+                  placeholder={TASK_TYPE_ROLE_MAP_EXAMPLE}
+                />
+                <div className="inline-actions json-editor-actions">
+                  <button
+                    className="button"
+                    type="button"
+                    onClick={() => handleFormatJsonField('Task type role map', settingsTaskTypeRoles, setSettingsTaskTypeRoles)}
+                  >
+                    Format
+                  </button>
+                  <button className="button" type="button" onClick={() => setSettingsTaskTypeRoles('')}>
+                    Clear
+                  </button>
+                </div>
+              </div>
               <label className="field-label" htmlFor="settings-role-overrides">Role provider overrides (JSON object)</label>
-              <textarea
-                id="settings-role-overrides"
-                rows={4}
-                value={settingsRoleProviderOverrides}
-                onChange={(event) => setSettingsRoleProviderOverrides(event.target.value)}
-                placeholder='{"reviewer":"openai"}'
-              />
-              <p className="field-label">Worker provider catalog</p>
+              <p className="field-label">Maps <code>role</code> {'->'} <code>provider</code> when that role executes.</p>
+              <div className="json-editor-group">
+                <textarea
+                  id="settings-role-overrides"
+                  className="json-editor-textarea"
+                  rows={4}
+                  value={settingsRoleProviderOverrides}
+                  onChange={(event) => setSettingsRoleProviderOverrides(event.target.value)}
+                  placeholder={ROLE_PROVIDER_OVERRIDES_EXAMPLE}
+                />
+                <div className="inline-actions json-editor-actions">
+                  <button
+                    className="button"
+                    type="button"
+                    onClick={() => handleFormatJsonField('Role provider overrides', settingsRoleProviderOverrides, setSettingsRoleProviderOverrides)}
+                  >
+                    Format
+                  </button>
+                  <button className="button" type="button" onClick={() => setSettingsRoleProviderOverrides('')}>
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <p className="settings-subheading">Worker Routing</p>
               <label className="field-label" htmlFor="settings-worker-default">Default worker provider</label>
-              <input
+              <select
                 id="settings-worker-default"
                 value={settingsWorkerDefault}
                 onChange={(event) => setSettingsWorkerDefault(event.target.value)}
-                placeholder="codex"
-              />
-              <label className="field-label" htmlFor="settings-worker-default-model">Default worker model (optional)</label>
-              <input
-                id="settings-worker-default-model"
-                value={settingsWorkerDefaultModel}
-                onChange={(event) => setSettingsWorkerDefaultModel(event.target.value)}
-                placeholder="gpt-5-codex"
-              />
-              <p className="field-label">Claude provider quick edit</p>
-              <label className="field-label" htmlFor="settings-claude-provider-name">Claude provider name</label>
-              <input
-                id="settings-claude-provider-name"
-                value={settingsClaudeProviderName}
-                onChange={(event) => setSettingsClaudeProviderName(event.target.value)}
-                placeholder="claude"
-              />
-              <label className="field-label" htmlFor="settings-claude-command">Claude command</label>
-              <input
-                id="settings-claude-command"
-                value={settingsClaudeCommand}
-                onChange={(event) => setSettingsClaudeCommand(event.target.value)}
-                placeholder="claude -p"
-              />
-              <label className="field-label" htmlFor="settings-claude-model">Claude model (optional)</label>
-              <input
-                id="settings-claude-model"
-                value={settingsClaudeModel}
-                onChange={(event) => setSettingsClaudeModel(event.target.value)}
-                placeholder="sonnet"
-              />
-              <label className="field-label" htmlFor="settings-claude-effort">Claude effort (optional)</label>
-              <select
-                id="settings-claude-effort"
-                value={settingsClaudeEffort}
-                onChange={(event) => setSettingsClaudeEffort(event.target.value)}
               >
-                <option value="">(none)</option>
-                <option value="low">low</option>
-                <option value="medium">medium</option>
-                <option value="high">high</option>
+                <option value="codex">codex</option>
+                <option value="ollama">ollama</option>
+                <option value="claude">claude</option>
               </select>
+              <label className="field-label" htmlFor="settings-provider-view">Configure provider</label>
+              <select
+                id="settings-provider-view"
+                value={settingsProviderView}
+                onChange={(event) => setSettingsProviderView(event.target.value as 'codex' | 'ollama' | 'claude')}
+              >
+                <option value="codex">codex</option>
+                <option value="ollama">ollama</option>
+                <option value="claude">claude</option>
+              </select>
+              <div className="provider-grid">
+                {settingsProviderView === 'codex' ? (
+                  <div className="provider-card">
+                  <p className="field-label">Codex provider</p>
+                  <label className="field-label" htmlFor="settings-codex-command">Codex command</label>
+                  <input
+                    id="settings-codex-command"
+                    value={settingsCodexCommand}
+                    onChange={(event) => setSettingsCodexCommand(event.target.value)}
+                    placeholder="codex exec"
+                  />
+                  <label className="field-label" htmlFor="settings-codex-model">Codex model (optional)</label>
+                  <input
+                    id="settings-codex-model"
+                    value={settingsCodexModel}
+                    onChange={(event) => setSettingsCodexModel(event.target.value)}
+                    placeholder="gpt-5.3-codex"
+                  />
+                  <label className="field-label" htmlFor="settings-codex-effort">Codex effort (optional)</label>
+                  <select
+                    id="settings-codex-effort"
+                    value={settingsCodexEffort}
+                    onChange={(event) => setSettingsCodexEffort(event.target.value)}
+                  >
+                    <option value="">(none)</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                  </select>
+                  </div>
+                ) : null}
+                {settingsProviderView === 'ollama' ? (
+                  <div className="provider-card">
+                  <p className="field-label">Ollama provider</p>
+                  <label className="field-label" htmlFor="settings-ollama-endpoint">Ollama endpoint</label>
+                  <input
+                    id="settings-ollama-endpoint"
+                    value={settingsOllamaEndpoint}
+                    onChange={(event) => setSettingsOllamaEndpoint(event.target.value)}
+                    placeholder="http://localhost:11434"
+                  />
+                  <label className="field-label" htmlFor="settings-ollama-model">Ollama model</label>
+                  <input
+                    id="settings-ollama-model"
+                    value={settingsOllamaModel}
+                    onChange={(event) => setSettingsOllamaModel(event.target.value)}
+                    placeholder="llama3.1:8b"
+                  />
+                  <div className="inline-actions">
+                    <input
+                      aria-label="Ollama temperature"
+                      value={settingsOllamaTemperature}
+                      onChange={(event) => setSettingsOllamaTemperature(event.target.value)}
+                      placeholder="temperature"
+                    />
+                    <input
+                      aria-label="Ollama num ctx"
+                      value={settingsOllamaNumCtx}
+                      onChange={(event) => setSettingsOllamaNumCtx(event.target.value)}
+                      placeholder="num_ctx"
+                    />
+                  </div>
+                  </div>
+                ) : null}
+                {settingsProviderView === 'claude' ? (
+                  <div className="provider-card">
+                  <p className="field-label">Claude provider</p>
+                  <label className="field-label" htmlFor="settings-claude-command">Claude command</label>
+                  <input
+                    id="settings-claude-command"
+                    value={settingsClaudeCommand}
+                    onChange={(event) => setSettingsClaudeCommand(event.target.value)}
+                    placeholder="claude -p"
+                  />
+                  <label className="field-label" htmlFor="settings-claude-model">Claude model (optional)</label>
+                  <input
+                    id="settings-claude-model"
+                    value={settingsClaudeModel}
+                    onChange={(event) => setSettingsClaudeModel(event.target.value)}
+                    placeholder="sonnet"
+                  />
+                  <label className="field-label" htmlFor="settings-claude-effort">Claude effort (optional)</label>
+                  <select
+                    id="settings-claude-effort"
+                    value={settingsClaudeEffort}
+                    onChange={(event) => setSettingsClaudeEffort(event.target.value)}
+                  >
+                    <option value="">(none)</option>
+                    <option value="low">low</option>
+                    <option value="medium">medium</option>
+                    <option value="high">high</option>
+                  </select>
+                  </div>
+                ) : null}
+              </div>
+              <p className="settings-subheading">Advanced Worker Maps</p>
               <label className="field-label" htmlFor="settings-worker-routing">Worker routing map (JSON object: step {'->'} provider)</label>
-              <textarea
-                id="settings-worker-routing"
-                rows={4}
-                value={settingsWorkerRouting}
-                onChange={(event) => setSettingsWorkerRouting(event.target.value)}
-                placeholder='{"plan":"codex","implement":"ollama-dev","review":"codex"}'
-              />
+              <div className="json-editor-group">
+                <textarea
+                  id="settings-worker-routing"
+                  className="json-editor-textarea"
+                  rows={4}
+                  value={settingsWorkerRouting}
+                  onChange={(event) => setSettingsWorkerRouting(event.target.value)}
+                  placeholder={WORKER_ROUTING_EXAMPLE}
+                />
+                <div className="inline-actions json-editor-actions">
+                  <button
+                    className="button"
+                    type="button"
+                    onClick={() => handleFormatJsonField('Worker routing map', settingsWorkerRouting, setSettingsWorkerRouting)}
+                  >
+                    Format
+                  </button>
+                  <button className="button" type="button" onClick={() => setSettingsWorkerRouting('')}>
+                    Clear
+                  </button>
+                </div>
+              </div>
               <label
                 className="field-label"
                 htmlFor="settings-worker-providers"
                 title="Configure reasoning effort in your CLI setup first (Codex/Claude profile or config). Agent Orchestrator only passes flags supported by your installed CLI version."
               >
-                Worker providers (JSON object)
+                Worker providers (JSON object, optional advanced overrides)
               </label>
-              <textarea
-                id="settings-worker-providers"
-                rows={8}
-                value={settingsWorkerProviders}
-                onChange={(event) => setSettingsWorkerProviders(event.target.value)}
-                placeholder='{"codex":{"type":"codex","command":"codex"},"ollama-dev":{"type":"ollama","endpoint":"http://localhost:11434","model":"llama3.1:8b"}}'
-              />
+              <div className="json-editor-group">
+                <textarea
+                  id="settings-worker-providers"
+                  className="json-editor-textarea"
+                  rows={8}
+                  value={settingsWorkerProviders}
+                  onChange={(event) => setSettingsWorkerProviders(event.target.value)}
+                  placeholder={WORKER_PROVIDERS_EXAMPLE}
+                />
+                <div className="inline-actions json-editor-actions">
+                  <button
+                    className="button"
+                    type="button"
+                    onClick={() => handleFormatJsonField('Worker providers', settingsWorkerProviders, setSettingsWorkerProviders)}
+                  >
+                    Format
+                  </button>
+                  <button className="button" type="button" onClick={() => setSettingsWorkerProviders('')}>
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <p className="settings-subheading">Project Commands</p>
               <label className="field-label" htmlFor="settings-project-commands">Project commands by language (JSON object)</label>
-              <textarea
-                id="settings-project-commands"
-                rows={8}
-                value={settingsProjectCommands}
-                onChange={(event) => setSettingsProjectCommands(event.target.value)}
-                placeholder='{"python":{"test":".venv/bin/pytest -n auto","lint":".venv/bin/ruff check .","typecheck":".venv/bin/mypy . --strict","format":".venv/bin/ruff format ."}}'
-              />
-              <p className="field-label">Default quality gate thresholds</p>
-              <div className="inline-actions">
-                <input
-                  aria-label="Quality gate critical"
-                  value={settingsGateCritical}
-                  onChange={(event) => setSettingsGateCritical(event.target.value)}
-                  inputMode="numeric"
-                  placeholder="critical"
+              <p className="field-label">
+                Used by workers during implement/review steps. Keys are language names (`python`, `typescript`, `go`) and each language supports `test`, `lint`, `typecheck`, `format`.
+              </p>
+              <div className="json-editor-group">
+                <textarea
+                  id="settings-project-commands"
+                  className="json-editor-textarea"
+                  rows={8}
+                  value={settingsProjectCommands}
+                  onChange={(event) => setSettingsProjectCommands(event.target.value)}
+                  placeholder={PROJECT_COMMANDS_EXAMPLE}
                 />
-                <input
-                  aria-label="Quality gate high"
-                  value={settingsGateHigh}
-                  onChange={(event) => setSettingsGateHigh(event.target.value)}
-                  inputMode="numeric"
-                  placeholder="high"
-                />
-                <input
-                  aria-label="Quality gate medium"
-                  value={settingsGateMedium}
-                  onChange={(event) => setSettingsGateMedium(event.target.value)}
-                  inputMode="numeric"
-                  placeholder="medium"
-                />
-                <input
-                  aria-label="Quality gate low"
-                  value={settingsGateLow}
-                  onChange={(event) => setSettingsGateLow(event.target.value)}
-                  inputMode="numeric"
-                  placeholder="low"
-                />
+                <div className="inline-actions json-editor-actions">
+                  <button
+                    className="button"
+                    type="button"
+                    onClick={() => handleFormatJsonField('Project commands', settingsProjectCommands, setSettingsProjectCommands)}
+                  >
+                    Format
+                  </button>
+                  <button className="button" type="button" onClick={() => setSettingsProjectCommands('')}>
+                    Clear
+                  </button>
+                </div>
+              </div>
+              <p className="settings-subheading">Quality Gate</p>
+              <p className="field-label">
+                Define how many unresolved findings can remain before a task can pass the quality gate. Use `0` to require all findings at that severity to be fixed.
+              </p>
+              <div className="quality-gate-grid">
+                <div className="quality-gate-row">
+                  <div>
+                    <p className="quality-gate-label">
+                      <span className="quality-severity-badge severity-critical">Critical</span>
+                    </p>
+                    <p className="field-label">Release-blocking or security-critical issues.</p>
+                  </div>
+                  <div className="quality-gate-input-wrap">
+                    <label className="field-label" htmlFor="quality-gate-critical-input">Allowed unresolved</label>
+                    <input
+                      id="quality-gate-critical-input"
+                      aria-label="Quality gate critical"
+                      value={settingsGateCritical}
+                      onChange={(event) => setSettingsGateCritical(event.target.value)}
+                      inputMode="numeric"
+                    />
+                  </div>
+                </div>
+                <div className="quality-gate-row">
+                  <div>
+                    <p className="quality-gate-label">
+                      <span className="quality-severity-badge severity-high">High</span>
+                    </p>
+                    <p className="field-label">Major correctness or reliability problems.</p>
+                  </div>
+                  <div className="quality-gate-input-wrap">
+                    <label className="field-label" htmlFor="quality-gate-high-input">Allowed unresolved</label>
+                    <input
+                      id="quality-gate-high-input"
+                      aria-label="Quality gate high"
+                      value={settingsGateHigh}
+                      onChange={(event) => setSettingsGateHigh(event.target.value)}
+                      inputMode="numeric"
+                    />
+                  </div>
+                </div>
+                <div className="quality-gate-row">
+                  <div>
+                    <p className="quality-gate-label">
+                      <span className="quality-severity-badge severity-medium">Medium</span>
+                    </p>
+                    <p className="field-label">Important issues that should be addressed soon.</p>
+                  </div>
+                  <div className="quality-gate-input-wrap">
+                    <label className="field-label" htmlFor="quality-gate-medium-input">Allowed unresolved</label>
+                    <input
+                      id="quality-gate-medium-input"
+                      aria-label="Quality gate medium"
+                      value={settingsGateMedium}
+                      onChange={(event) => setSettingsGateMedium(event.target.value)}
+                      inputMode="numeric"
+                    />
+                  </div>
+                </div>
+                <div className="quality-gate-row">
+                  <div>
+                    <p className="quality-gate-label">
+                      <span className="quality-severity-badge severity-low">Low</span>
+                    </p>
+                    <p className="field-label">Minor issues, cleanup, and polish improvements.</p>
+                  </div>
+                  <div className="quality-gate-input-wrap">
+                    <label className="field-label" htmlFor="quality-gate-low-input">Allowed unresolved</label>
+                    <input
+                      id="quality-gate-low-input"
+                      aria-label="Quality gate low"
+                      value={settingsGateLow}
+                      onChange={(event) => setSettingsGateLow(event.target.value)}
+                      inputMode="numeric"
+                    />
+                  </div>
+                </div>
               </div>
               <div className="inline-actions">
                 <button className="button button-primary" type="submit" disabled={settingsSaving}>
@@ -2975,14 +3435,17 @@ export default function App() {
       <div className="bg-layer" aria-hidden="true" />
       <header className="topbar">
         <div>
-          <p className="kicker">orchestrator-first</p>
+          <p className="kicker">agent-led execution</p>
           <h1>Agent Orchestrator</h1>
         </div>
         <div className="topbar-actions">
           <select
             className="topbar-project-select"
             value={projectDir}
+            onFocus={() => setTopbarProjectPickerFocused(true)}
+            onBlur={() => setTopbarProjectPickerFocused(false)}
             onChange={(event) => {
+              setTopbarProjectPickerFocused(false)
               void handleTopbarProjectChange(event.target.value)
             }}
             aria-label="Active repo"
@@ -2990,7 +3453,7 @@ export default function App() {
             <option value="">Current workspace</option>
             {projects.map((project) => (
               <option key={`${project.id}-${project.path}`} value={project.path}>
-                {project.path}
+                {(!topbarProjectPickerFocused && project.path === projectDir) ? repoNameFromPath(project.path) : project.path}
               </option>
             ))}
             <option value={ADD_REPO_VALUE}>Add repo...</option>
@@ -3000,22 +3463,34 @@ export default function App() {
         </div>
       </header>
 
+      <div className="nav-mobile-select-wrap">
+        <label className="field-label" htmlFor="mobile-route-select">View</label>
+        <select
+          id="mobile-route-select"
+          className="nav-mobile-select"
+          value={route}
+          onChange={(event) => handleRouteChange(event.target.value as RouteKey)}
+          aria-label="Main navigation"
+        >
+          {ROUTES.map((item) => (
+            <option key={`mobile-route-${item.key}`} value={item.key}>{item.label}</option>
+          ))}
+        </select>
+      </div>
+
       <nav className="nav-strip" aria-label="Main navigation">
         {ROUTES.map((item) => (
           <button
             key={item.key}
             className={`nav-pill ${route === item.key ? 'is-active' : ''}`}
-            onClick={() => {
-              window.location.hash = toHash(item.key)
-              setRoute(item.key)
-            }}
+            onClick={() => handleRouteChange(item.key)}
           >
             {item.label}
           </button>
         ))}
       </nav>
 
-      <main>{renderRoute()}</main>
+      <main className="main-content">{renderRoute()}</main>
 
       {error ? <p className="error-banner">{error}</p> : null}
 

@@ -113,7 +113,7 @@ class QuickActionExecutor:
         run.kind = "agent"
         try:
             cfg = self._container.config.load()
-            runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex")
+            runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
             spec = resolve_worker_for_step(runtime, "implement")
 
             available, reason = test_worker(spec)

@@ -483,7 +483,7 @@ class LiveWorkerAdapter:
         # 1. Resolve worker
         try:
             cfg = self._container.config.load()
-            runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex")
+            runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
             spec = resolve_worker_for_step(runtime, step)
             if spec.type in {"codex", "claude"}:
                 task_model = str(getattr(task, "worker_model", "") or "").strip()
