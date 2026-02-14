@@ -126,7 +126,7 @@ type CollaborationMode = {
 }
 
 type WorkerProviderSettings = {
-  type: 'codex' | 'ollama'
+  type: 'codex' | 'ollama' | 'claude'
   command?: string
   reasoning_effort?: 'low' | 'medium' | 'high'
   endpoint?: string
@@ -427,14 +427,15 @@ function parseWorkerProviders(input: string): Record<string, WorkerProviderSetti
       throw new Error(`Worker provider "${name}" must be a JSON object`)
     }
     const record = rawValue as Record<string, unknown>
-    let type = String(record.type || (name === 'codex' ? 'codex' : 'codex')).trim().toLowerCase()
+    let type = String(record.type || (name === 'codex' ? 'codex' : name === 'claude' ? 'claude' : 'codex')).trim().toLowerCase()
     if (type === 'local') type = 'ollama'
-    if (type !== 'codex' && type !== 'ollama') {
-      throw new Error(`Worker provider "${name}" has invalid type "${type}" (allowed: codex, ollama)`)
+    if (type !== 'codex' && type !== 'ollama' && type !== 'claude') {
+      throw new Error(`Worker provider "${name}" has invalid type "${type}" (allowed: codex, ollama, claude)`)
     }
-    if (type === 'codex') {
-      const command = String(record.command || 'codex').trim() || 'codex'
-      const provider: WorkerProviderSettings = { type: 'codex', command }
+    if (type === 'codex' || type === 'claude') {
+      const defaultCommand = type === 'codex' ? 'codex' : 'claude -p'
+      const command = String(record.command || defaultCommand).trim() || defaultCommand
+      const provider: WorkerProviderSettings = { type, command }
       const model = String(record.model || '').trim()
       if (model) provider.model = model
       const reasoningEffort = String(record.reasoning_effort || '').trim().toLowerCase()
@@ -492,13 +493,14 @@ function normalizeWorkers(payload: Partial<SystemSettings['workers']> | null | u
     const name = String(rawName || '').trim()
     if (!name || !rawValue || typeof rawValue !== 'object') continue
     const value = rawValue as Record<string, unknown>
-    let type = String(value.type || (name === 'codex' ? 'codex' : '')).trim().toLowerCase()
+    let type = String(value.type || (name === 'codex' ? 'codex' : name === 'claude' ? 'claude' : '')).trim().toLowerCase()
     if (type === 'local') type = 'ollama'
-    if (type !== 'codex' && type !== 'ollama') continue
-    if (type === 'codex') {
+    if (type !== 'codex' && type !== 'ollama' && type !== 'claude') continue
+    if (type === 'codex' || type === 'claude') {
+      const defaultCommand = type === 'codex' ? 'codex' : 'claude -p'
       const provider: WorkerProviderSettings = {
-        type: 'codex',
-        command: String(value.command || 'codex').trim() || 'codex',
+        type,
+        command: String(value.command || defaultCommand).trim() || defaultCommand,
       }
       const model = String(value.model || '').trim()
       if (model) provider.model = model
@@ -927,6 +929,10 @@ export default function App() {
   const [settingsWorkerDefaultModel, setSettingsWorkerDefaultModel] = useState(DEFAULT_SETTINGS.workers.default_model)
   const [settingsWorkerRouting, setSettingsWorkerRouting] = useState('{}')
   const [settingsWorkerProviders, setSettingsWorkerProviders] = useState(JSON.stringify(DEFAULT_SETTINGS.workers.providers, null, 2))
+  const [settingsClaudeProviderName, setSettingsClaudeProviderName] = useState('claude')
+  const [settingsClaudeCommand, setSettingsClaudeCommand] = useState('claude -p')
+  const [settingsClaudeModel, setSettingsClaudeModel] = useState('')
+  const [settingsClaudeEffort, setSettingsClaudeEffort] = useState('')
   const [settingsProjectCommands, setSettingsProjectCommands] = useState(JSON.stringify(DEFAULT_SETTINGS.project.commands, null, 2))
   const [settingsGateCritical, setSettingsGateCritical] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.critical))
   const [settingsGateHigh, setSettingsGateHigh] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.high))
@@ -1043,6 +1049,21 @@ export default function App() {
     setSettingsWorkerDefaultModel(payload.workers.default_model || '')
     setSettingsWorkerRouting(JSON.stringify(payload.workers.routing || {}, null, 2))
     setSettingsWorkerProviders(JSON.stringify(payload.workers.providers || {}, null, 2))
+    const entries = Object.entries(payload.workers.providers || {})
+    const claudeEntry = entries.find(([name, provider]) => name === 'claude' && provider?.type === 'claude')
+      || entries.find(([, provider]) => provider?.type === 'claude')
+    if (claudeEntry) {
+      const [name, provider] = claudeEntry
+      setSettingsClaudeProviderName(name)
+      setSettingsClaudeCommand(String(provider.command || 'claude -p'))
+      setSettingsClaudeModel(String(provider.model || ''))
+      setSettingsClaudeEffort(String(provider.reasoning_effort || ''))
+    } else {
+      setSettingsClaudeProviderName('claude')
+      setSettingsClaudeCommand('claude -p')
+      setSettingsClaudeModel('')
+      setSettingsClaudeEffort('')
+    }
     setSettingsProjectCommands(JSON.stringify(payload.project.commands || {}, null, 2))
     setSettingsGateCritical(String(payload.defaults.quality_gate.critical))
     setSettingsGateHigh(String(payload.defaults.quality_gate.high))
@@ -1089,6 +1110,23 @@ export default function App() {
     }
     void fetchModes()
   }, [projectDir])
+
+  useEffect(() => {
+    try {
+      const providers = parseWorkerProviders(settingsWorkerProviders)
+      const entries = Object.entries(providers)
+      const claudeEntry = entries.find(([name, provider]) => name === 'claude' && provider.type === 'claude')
+        || entries.find(([, provider]) => provider.type === 'claude')
+      if (!claudeEntry) return
+      const [name, provider] = claudeEntry
+      setSettingsClaudeProviderName(name)
+      setSettingsClaudeCommand(String(provider.command || 'claude -p'))
+      setSettingsClaudeModel(String(provider.model || ''))
+      setSettingsClaudeEffort(String(provider.reasoning_effort || ''))
+    } catch {
+      // Ignore JSON parse errors while user is editing.
+    }
+  }, [settingsWorkerProviders])
 
   async function loadTaskDetail(taskId: string): Promise<void> {
     if (!taskId) {
@@ -1896,6 +1934,20 @@ export default function App() {
       const roleProviderOverrides = parseStringMap(settingsRoleProviderOverrides, 'Role provider overrides')
       const workerRouting = parseStringMap(settingsWorkerRouting, 'Worker routing map')
       const workerProviders = parseWorkerProviders(settingsWorkerProviders)
+      const claudeProviderName = settingsClaudeProviderName.trim()
+      if (claudeProviderName) {
+        const claudeProvider: WorkerProviderSettings = {
+          type: 'claude',
+          command: settingsClaudeCommand.trim() || 'claude -p',
+        }
+        const claudeModel = settingsClaudeModel.trim()
+        if (claudeModel) claudeProvider.model = claudeModel
+        const claudeEffort = settingsClaudeEffort.trim().toLowerCase()
+        if (claudeEffort === 'low' || claudeEffort === 'medium' || claudeEffort === 'high') {
+          claudeProvider.reasoning_effort = claudeEffort
+        }
+        workerProviders[claudeProviderName] = claudeProvider
+      }
       const projectCommands = parseProjectCommands(settingsProjectCommands)
       const payload: SystemSettings = {
         orchestrator: {
@@ -2799,6 +2851,39 @@ export default function App() {
                 onChange={(event) => setSettingsWorkerDefaultModel(event.target.value)}
                 placeholder="gpt-5-codex"
               />
+              <p className="field-label">Claude provider quick edit</p>
+              <label className="field-label" htmlFor="settings-claude-provider-name">Claude provider name</label>
+              <input
+                id="settings-claude-provider-name"
+                value={settingsClaudeProviderName}
+                onChange={(event) => setSettingsClaudeProviderName(event.target.value)}
+                placeholder="claude"
+              />
+              <label className="field-label" htmlFor="settings-claude-command">Claude command</label>
+              <input
+                id="settings-claude-command"
+                value={settingsClaudeCommand}
+                onChange={(event) => setSettingsClaudeCommand(event.target.value)}
+                placeholder="claude -p"
+              />
+              <label className="field-label" htmlFor="settings-claude-model">Claude model (optional)</label>
+              <input
+                id="settings-claude-model"
+                value={settingsClaudeModel}
+                onChange={(event) => setSettingsClaudeModel(event.target.value)}
+                placeholder="sonnet"
+              />
+              <label className="field-label" htmlFor="settings-claude-effort">Claude effort (optional)</label>
+              <select
+                id="settings-claude-effort"
+                value={settingsClaudeEffort}
+                onChange={(event) => setSettingsClaudeEffort(event.target.value)}
+              >
+                <option value="">(none)</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
               <label className="field-label" htmlFor="settings-worker-routing">Worker routing map (JSON object: step {'->'} provider)</label>
               <textarea
                 id="settings-worker-routing"
@@ -2810,7 +2895,7 @@ export default function App() {
               <label
                 className="field-label"
                 htmlFor="settings-worker-providers"
-                title="Configure Codex reasoning effort in your Codex CLI setup first (for example via profile/config). Agent Orchestrator only passes flags supported by your installed codex version."
+                title="Configure reasoning effort in your CLI setup first (Codex/Claude profile or config). Agent Orchestrator only passes flags supported by your installed CLI version."
               >
                 Worker providers (JSON object)
               </label>

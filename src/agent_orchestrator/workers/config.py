@@ -5,14 +5,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
-WorkerProviderType = Literal["codex", "ollama"]
+WorkerProviderType = Literal["codex", "ollama", "claude"]
 
 
 @dataclass(frozen=True)
 class WorkerProviderSpec:
     name: str
     type: WorkerProviderType
-    # codex
+    # codex / claude
     command: Optional[str] = None
     model: Optional[str] = None
     reasoning_effort: Optional[str] = None
@@ -78,17 +78,18 @@ def get_workers_runtime_config(
         typ = str(item.get("type") or "").strip().lower()
         if typ == "local":
             typ = "ollama"
-        if typ not in {"codex", "ollama"}:
+        if typ not in {"codex", "ollama", "claude"}:
             continue
-        if typ == "codex":
-            cmd = str(item.get("command") or codex_command_fallback).strip()
+        if typ in {"codex", "claude"}:
+            command_fallback = codex_command_fallback if typ == "codex" else "claude -p"
+            cmd = str(item.get("command") or command_fallback).strip()
             model = str(item.get("model") or "").strip() or None
             reasoning_effort = str(item.get("reasoning_effort") or "").strip().lower() or None
             if reasoning_effort not in {None, "low", "medium", "high"}:
                 reasoning_effort = None
             providers[name] = WorkerProviderSpec(
                 name=name,
-                type="codex",
+                type=typ,
                 command=cmd,
                 model=model,
                 reasoning_effort=reasoning_effort,
@@ -142,7 +143,7 @@ def resolve_worker_for_step(runtime: WorkersRuntimeConfig, step: str) -> WorkerP
         raise ValueError(f"Unknown worker '{name}' (available: {available})")
     spec = runtime.providers[name]
 
-    if spec.type == "codex":
+    if spec.type in {"codex", "claude"}:
         if not spec.command:
             raise ValueError(f"Worker '{spec.name}' missing required 'command'")
         return spec

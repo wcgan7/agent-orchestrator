@@ -50,12 +50,33 @@ def _build_codex_command(spec: WorkerProviderSpec) -> str:
 
     if spec.model and not has_model_flag:
         parts.extend(["--model", str(spec.model)])
-    if (
-        spec.reasoning_effort
-        and not has_reasoning_flag
-        and _codex_supports_reasoning_effort(parts[0])
-    ):
+    supports_reasoning = _codex_supports_reasoning_effort(parts[0])
+    if not supports_reasoning and parts[0] != "codex":
+        supports_reasoning = _codex_supports_reasoning_effort("codex")
+    if spec.reasoning_effort and not has_reasoning_flag and supports_reasoning:
         parts.extend(["--reasoning-effort", str(spec.reasoning_effort)])
+    return shlex.join(parts)
+
+
+def _build_claude_command(spec: WorkerProviderSpec) -> str:
+    """Build a claude command string with optional model/effort flags."""
+    base = str(spec.command or "claude -p").strip() or "claude -p"
+    parts = shlex.split(base)
+    if not parts:
+        parts = ["claude", "-p"]
+    if "-p" not in parts and "--print" not in parts:
+        parts.append("-p")
+
+    has_model_flag = "--model" in parts
+    has_effort_flag = "--effort" in parts
+
+    if spec.model and not has_model_flag:
+        parts.extend(["--model", str(spec.model)])
+    supports_effort = _claude_supports_effort(parts[0])
+    if not supports_effort and parts[0] != "claude":
+        supports_effort = _claude_supports_effort("claude")
+    if spec.reasoning_effort and not has_effort_flag and supports_effort:
+        parts.extend(["--effort", str(spec.reasoning_effort)])
     return shlex.join(parts)
 
 
@@ -74,6 +95,23 @@ def _codex_supports_reasoning_effort(executable: str) -> bool:
         return False
     help_text = f"{completed.stdout}\n{completed.stderr}".lower()
     return "--reasoning-effort" in help_text
+
+
+@lru_cache(maxsize=16)
+def _claude_supports_effort(executable: str) -> bool:
+    """Best-effort check whether the claude CLI exposes --effort."""
+    try:
+        completed = subprocess.run(
+            [executable, "--help"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    help_text = f"{completed.stdout}\n{completed.stderr}".lower()
+    return "--effort" in help_text
 
 
 def _extract_human_blocking_issues(progress_path: Path) -> list[dict[str, str]]:
@@ -256,11 +294,12 @@ def run_worker(
     on_spawn: Optional[Callable[[int], None]] = None,
 ) -> WorkerRunResult:
     """Run the selected provider and return a normalized run result."""
-    if spec.type == "codex":
-        logger.info("Starting Codex worker provider='{}' (timeout={}s)", spec.name, timeout_seconds)
-        codex_command = _build_codex_command(spec)
+    if spec.type in {"codex", "claude"}:
+        provider_label = "Codex" if spec.type == "codex" else "Claude"
+        logger.info("Starting {} worker provider='{}' (timeout={}s)", provider_label, spec.name, timeout_seconds)
+        command = _build_codex_command(spec) if spec.type == "codex" else _build_claude_command(spec)
         run_result = _run_codex_worker(
-            command=codex_command,
+            command=command,
             prompt=prompt,
             project_dir=project_dir,
             run_dir=run_dir,

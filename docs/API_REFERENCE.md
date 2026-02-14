@@ -80,6 +80,7 @@ Top-level settings payload sections:
 
 `workers.providers.<name>` fields:
 - codex: `type`, `command`, optional `model`, optional `reasoning_effort` (`low|medium|high`)
+- claude: `type`, `command` (default `claude -p`), optional `model`, optional `reasoning_effort` (`low|medium|high`, mapped to Claude CLI `--effort`)
 - ollama: `type`, `endpoint`, `model`, optional `temperature`, optional `num_ctx`
 
 `workers` also supports:

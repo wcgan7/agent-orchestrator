@@ -70,7 +70,10 @@ function installFetchMock() {
       default: 'codex',
       default_model: '',
       routing: {},
-      providers: { codex: { type: 'codex', command: 'codex' } },
+      providers: {
+        codex: { type: 'codex', command: 'codex' },
+        claude: { type: 'claude', command: 'claude -p', model: 'sonnet', reasoning_effort: 'medium' },
+      },
     },
     project: {
       commands: {},
@@ -441,6 +444,10 @@ describe('App action coverage', () => {
     fireEvent.change(screen.getByLabelText(/Task type role map/i), { target: { value: '{"bug":"debugger"}' } })
     fireEvent.change(screen.getByLabelText(/Role provider overrides/i), { target: { value: '{"reviewer":"codex"}' } })
     fireEvent.change(screen.getByLabelText(/Default worker model/i), { target: { value: 'gpt-5-codex' } })
+    fireEvent.change(screen.getByLabelText(/Claude provider name/i), { target: { value: 'claude-dev' } })
+    fireEvent.change(screen.getByLabelText(/Claude command/i), { target: { value: 'claude -p' } })
+    fireEvent.change(screen.getByLabelText(/Claude model/i), { target: { value: 'sonnet' } })
+    fireEvent.change(screen.getByLabelText(/Claude effort/i), { target: { value: 'high' } })
     fireEvent.change(screen.getByLabelText(/Worker routing map/i), { target: { value: '{"review":"codex"}' } })
     fireEvent.change(
       screen.getByLabelText(/Worker providers/i),
@@ -469,6 +476,12 @@ describe('App action coverage', () => {
       expect(body.agent_routing.task_type_roles).toEqual({ bug: 'debugger' })
       expect(body.workers.default_model).toBe('gpt-5-codex')
       expect(body.workers.routing).toEqual({ review: 'codex' })
+      expect(body.workers.providers['claude-dev']).toEqual({
+        type: 'claude',
+        command: 'claude -p',
+        model: 'sonnet',
+        reasoning_effort: 'high',
+      })
       expect(body.project.commands.python.test).toBe('pytest -n auto')
       expect(body.project.commands.python.lint).toBe('ruff check .')
     })

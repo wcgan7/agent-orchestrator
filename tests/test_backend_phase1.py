@@ -306,6 +306,12 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
                             "temperature": 0.2,
                             "num_ctx": 8192,
                         },
+                        "claude": {
+                            "type": "claude",
+                            "command": "claude -p",
+                            "model": "sonnet",
+                            "reasoning_effort": "medium",
+                        },
                     },
                 },
             },
@@ -331,6 +337,10 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert body["workers"]["providers"]["codex"]["reasoning_effort"] == "high"
         assert body["workers"]["providers"]["ollama-dev"]["type"] == "ollama"
         assert body["workers"]["providers"]["ollama-dev"]["model"] == "llama3.1:8b"
+        assert body["workers"]["providers"]["claude"]["type"] == "claude"
+        assert body["workers"]["providers"]["claude"]["command"] == "claude -p"
+        assert body["workers"]["providers"]["claude"]["model"] == "sonnet"
+        assert body["workers"]["providers"]["claude"]["reasoning_effort"] == "medium"
 
         reloaded = client.get("/api/settings")
         assert reloaded.status_code == 200
@@ -567,3 +577,105 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
         approved = client.post(f"/api/review/{task['id']}/approve", json={})
         assert approved.status_code == 200
         assert approved.json()["task"]["status"] == "done"
+
+
+def test_get_task_plan(tmp_path: Path) -> None:
+    """GET /api/tasks/{id}/plan returns stored plan history."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        # Create a task with plans in metadata
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Plan query test",
+                "metadata": {
+                    "plans": [
+                        {"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Plan A"},
+                        {"step": "plan_impl", "ts": "2025-01-01T00:01:00Z", "content": "Plan B"},
+                    ]
+                },
+            },
+        ).json()["task"]
+
+        resp = client.get(f"/api/tasks/{task['id']}/plan")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["plans"]) == 2
+        assert body["latest"]["content"] == "Plan B"
+        assert body["latest"]["step"] == "plan_impl"
+
+        # Non-existent task → 404
+        resp_404 = client.get("/api/tasks/nonexistent/plan")
+        assert resp_404.status_code == 404
+
+        # Task with no plans → empty list
+        task_no_plan = client.post("/api/tasks", json={"title": "No plan"}).json()["task"]
+        resp_empty = client.get(f"/api/tasks/{task_no_plan['id']}/plan")
+        assert resp_empty.status_code == 200
+        assert resp_empty.json()["plans"] == []
+        assert resp_empty.json()["latest"] is None
+
+
+def test_generate_tasks_endpoint(tmp_path: Path) -> None:
+    """POST /api/tasks/{id}/generate-tasks creates child tasks from stored plan."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        # Create a task with a plan and scripted generation output
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Generate from plan",
+                "metadata": {
+                    "plans": [
+                        {"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Build auth"},
+                    ],
+                    "scripted_generated_tasks": [
+                        {"title": "Login endpoint", "task_type": "feature", "priority": "P1"},
+                        {"title": "Session store", "task_type": "feature", "priority": "P2"},
+                    ],
+                },
+            },
+        ).json()["task"]
+
+        resp = client.post(f"/api/tasks/{task['id']}/generate-tasks", json={})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["created_task_ids"]) == 2
+        assert len(body["children"]) == 2
+        assert body["children"][0]["title"] == "Login endpoint"
+        assert body["children"][1]["title"] == "Session store"
+        assert body["task"]["children_ids"] == body["created_task_ids"]
+
+
+def test_generate_tasks_with_override(tmp_path: Path) -> None:
+    """POST with plan_override doesn't require stored plan."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Override plan test",
+                "metadata": {
+                    "scripted_generated_tasks": [
+                        {"title": "From override", "task_type": "feature"},
+                    ],
+                },
+            },
+        ).json()["task"]
+
+        # No stored plan, no override → 400
+        resp_fail = client.post(
+            f"/api/tasks/{task['id']}/generate-tasks",
+            json={},
+        )
+        assert resp_fail.status_code == 400
+        assert "No plan available" in resp_fail.json()["detail"]
+
+        # With override → success
+        resp = client.post(
+            f"/api/tasks/{task['id']}/generate-tasks",
+            json={"plan_override": "Custom plan text"},
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["created_task_ids"]) == 1
+        assert resp.json()["children"][0]["title"] == "From override"

@@ -62,6 +62,7 @@ def _make_run_result(
 
 
 _CODEX_SPEC = WorkerProviderSpec(name="codex", type="codex", command="codex")
+_CLAUDE_SPEC = WorkerProviderSpec(name="claude", type="claude", command="claude -p")
 _OLLAMA_SPEC = WorkerProviderSpec(
     name="local", type="ollama", endpoint="http://localhost:11434", model="llama3"
 )
@@ -198,7 +199,42 @@ def test_codex_model_falls_back_to_runtime_default(adapter: LiveWorkerAdapter) -
 
 
 # ---------------------------------------------------------------------------
-# 5. Step timeout can be overridden per task metadata
+# 5. Claude prompt mode matches codex mode (no schema injection)
+# ---------------------------------------------------------------------------
+
+
+def test_claude_uses_codex_prompt_mode(adapter: LiveWorkerAdapter) -> None:
+    run_result = _make_run_result(exit_code=0)
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CLAUDE_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.build_step_prompt",
+            return_value="prompt",
+        ) as build_prompt_mock,
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ),
+    ):
+        result = adapter.run_step(task=_make_task(), step="implement", attempt=1)
+
+    assert result.status == "ok"
+    assert build_prompt_mock.call_args.kwargs["is_codex"] is True
+
+
+# ---------------------------------------------------------------------------
+# 6. Step timeout can be overridden per task metadata
 # ---------------------------------------------------------------------------
 
 
@@ -230,7 +266,7 @@ def test_timeout_override_from_task_metadata(adapter: LiveWorkerAdapter) -> None
 
 
 # ---------------------------------------------------------------------------
-# 6. Template timeout is used when no metadata override exists
+# 7. Template timeout is used when no metadata override exists
 # ---------------------------------------------------------------------------
 
 
@@ -262,7 +298,7 @@ def test_timeout_defaults_from_pipeline_template(adapter: LiveWorkerAdapter) -> 
 
 
 # ---------------------------------------------------------------------------
-# 7. Codex failure maps to error
+# 8. Codex failure maps to error
 # ---------------------------------------------------------------------------
 
 
@@ -293,7 +329,7 @@ def test_codex_failure_maps_to_error(adapter: LiveWorkerAdapter) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 8. Codex timeout maps to error
+# 9. Codex timeout maps to error
 # ---------------------------------------------------------------------------
 
 
@@ -324,7 +360,7 @@ def test_codex_timeout_maps_to_error(adapter: LiveWorkerAdapter) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9. Codex no-heartbeat maps to explicit stall error
+# 10. Codex no-heartbeat maps to explicit stall error
 # ---------------------------------------------------------------------------
 
 

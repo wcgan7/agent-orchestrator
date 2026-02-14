@@ -73,6 +73,11 @@ class PromoteQuickActionRequest(BaseModel):
     priority: str = "P2"
 
 
+class GenerateTasksRequest(BaseModel):
+    plan_override: Optional[str] = None
+    infer_deps: bool = True
+
+
 class ApproveGateRequest(BaseModel):
     gate: Optional[str] = None
 
@@ -306,12 +311,13 @@ def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
         provider_type = str(raw_item.get("type") or ("codex" if name == "codex" else "")).strip().lower()
         if provider_type == "local":
             provider_type = "ollama"
-        if provider_type not in {"codex", "ollama"}:
+        if provider_type not in {"codex", "ollama", "claude"}:
             continue
 
-        if provider_type == "codex":
-            command = str(raw_item.get("command") or "codex").strip() or "codex"
-            provider: dict[str, Any] = {"type": "codex", "command": command}
+        if provider_type in {"codex", "claude"}:
+            default_command = "codex" if provider_type == "codex" else "claude -p"
+            command = str(raw_item.get("command") or default_command).strip() or default_command
+            provider: dict[str, Any] = {"type": provider_type, "command": command}
             model = str(raw_item.get("model") or "").strip()
             if model:
                 provider["model"] = model
@@ -861,6 +867,52 @@ def create_router(
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.dep_analysis_reset", entity_id=task.id, payload={})
         return {"task": _task_payload(task)}
+
+    @router.get("/tasks/{task_id}/plan")
+    async def get_task_plan(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        plans = metadata.get("plans")
+        if not isinstance(plans, list):
+            plans = []
+        return {"plans": plans, "latest": plans[-1] if plans else None}
+
+    @router.post("/tasks/{task_id}/generate-tasks")
+    async def generate_tasks_from_plan(
+        task_id: str, body: GenerateTasksRequest, project_dir: Optional[str] = Query(None)
+    ) -> dict[str, Any]:
+        container, _, orchestrator = _ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+
+        # Determine plan text: explicit override or latest stored plan
+        plan_text = body.plan_override
+        if not plan_text:
+            plans = metadata.get("plans")
+            if not isinstance(plans, list) or not plans:
+                raise HTTPException(status_code=400, detail="No plan available. Run a plan step first or provide plan_override.")
+            plan_text = str(plans[-1].get("content") or "")
+            if not plan_text.strip():
+                raise HTTPException(status_code=400, detail="Latest plan has no content. Provide plan_override.")
+
+        try:
+            created_ids = orchestrator.generate_tasks_from_plan(task_id, plan_text, infer_deps=body.infer_deps)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        # Re-fetch parent to get updated children_ids
+        updated_task = container.tasks.get(task_id)
+        children = [_task_payload(container.tasks.get(cid)) for cid in created_ids if container.tasks.get(cid)]
+        return {
+            "task": _task_payload(updated_task) if updated_task else None,
+            "created_task_ids": created_ids,
+            "children": children,
+        }
 
     @router.post("/import/prd/preview")
     async def preview_import(body: PrdPreviewRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
