@@ -2,7 +2,7 @@
 
 ## What This Tool Does
 
-Feature PRD Runner is an orchestration-first AI engineering control center.
+Agent Orchestrator is an orchestration-first AI engineering control center.
 The primary unit is a `Task`. You can create tasks directly, import them from a PRD,
 or run one-off quick actions.
 
@@ -19,7 +19,7 @@ Install backend dependencies and run server:
 
 ```bash
 python -m pip install -e ".[server]"
-feature-prd-runner server --project-dir /absolute/path/to/your/repo
+agent-orchestrator server --project-dir /absolute/path/to/your/repo
 ```
 
 Run the web dashboard:
@@ -118,7 +118,7 @@ Workers receive generic verification instructions by default ("run the project's
 To give them exact commands, add a `project.commands` section keyed by language:
 
 ```yaml
-# .prd_runner/v3/config.yaml
+# .agent_orchestrator/config.yaml
 project:
   commands:
     python:
@@ -142,7 +142,7 @@ Rules:
 You can also set commands via the API:
 
 ```bash
-curl -X PATCH http://localhost:8080/api/v3/settings \
+curl -X PATCH http://localhost:8080/api/settings \
   -H 'Content-Type: application/json' \
   -d '{
     "project": {
@@ -159,7 +159,7 @@ curl -X PATCH http://localhost:8080/api/v3/settings \
 To remove a single command, set it to an empty string:
 
 ```bash
-curl -X PATCH http://localhost:8080/api/v3/settings \
+curl -X PATCH http://localhost:8080/api/settings \
   -H 'Content-Type: application/json' \
   -d '{"project": {"commands": {"python": {"lint": ""}}}}'
 ```
@@ -182,7 +182,7 @@ The UI subscribes and auto-refreshes mounted surfaces when relevant events arriv
 ## Data Storage and Backups
 
 State root:
-- `.prd_runner/v3/`
+- `.agent_orchestrator/`
 
 Key files:
 - `tasks.yaml`
@@ -194,7 +194,7 @@ Key files:
 - `config.yaml`
 
 If legacy state exists, it is archived automatically to:
-- `.prd_runner_legacy_<timestamp>/`
+- `.agent_orchestrator_legacy_<timestamp>/`
 
 ## Troubleshooting
 

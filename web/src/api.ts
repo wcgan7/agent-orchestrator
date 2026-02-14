@@ -1,4 +1,4 @@
-export const STORAGE_KEY_TOKEN = 'feature-prd-runner-auth-token'
+export const STORAGE_KEY_TOKEN = 'agent-orchestrator-auth-token'
 
 type QueryValue = string | number | boolean | null | undefined
 
@@ -61,7 +61,7 @@ export function buildWsUrl(pathname: string, projectDir?: string): string {
 }
 
 export async function fetchExecutionOrder(projectDir?: string) {
-  const res = await fetch(buildApiUrl('/api/v3/tasks/execution-order', projectDir), {
+  const res = await fetch(buildApiUrl('/api/tasks/execution-order', projectDir), {
     headers: buildAuthHeaders(),
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)

@@ -1,4 +1,4 @@
-"""Web server for Feature PRD Runner dashboard."""
+"""Web server for Agent Orchestrator dashboard."""
 
 from .api import app, create_app
 

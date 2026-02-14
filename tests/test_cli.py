@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from feature_prd_runner.cli_v3 import main
+from agent_orchestrator.cli import main
 
 
 def test_task_create_list_and_run(tmp_path: Path) -> None:

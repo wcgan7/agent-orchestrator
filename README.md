@@ -1,9 +1,12 @@
-# Feature PRD Runner
+# Agent Orchestrator
 
-Feature PRD Runner is a local orchestration control center for AI-assisted software delivery.
+Agent Orchestrator is a local orchestration control center for AI-assisted software delivery.
 It gives you a task board, execution controls, review gates, and agent operations in one place.
 
-![Feature PRD Runner Dashboard](web/public/homepage-screenshot.png)
+Orchestrator autonomously plans and executes work across repositories — parallelizing independent changes, sequencing dependencies, and resolving conflicts as delivery progress.
+Execution runs under enforced coding standards and a continuous review-and-fix cycle, producing resilient, merge-ready results instead of fragile one-pass output.
+
+![Agent Orchestrator Dashboard](web/public/homepage-screenshot.png)
 
 ## What You Can Do
 
@@ -21,7 +24,7 @@ It gives you a task board, execution controls, review gates, and agent operation
 
 ```bash
 python -m pip install -e ".[server]"
-feature-prd-runner server --project-dir /absolute/path/to/your/repo
+agent-orchestrator server --project-dir /absolute/path/to/your/repo
 ```
 
 Backend URL:
@@ -68,7 +71,7 @@ Frontend URL:
 - End-to-end usage guide: `docs/USER_GUIDE.md`
 
 API base path:
-- `/api/v3`
+- `/api`
 
 WebSocket endpoint:
 - `/ws`
@@ -76,13 +79,13 @@ WebSocket endpoint:
 ## Configuration and Runtime Data
 
 Runtime state is stored in the selected project directory:
-- `.prd_runner/v3/tasks.yaml`
-- `.prd_runner/v3/runs.yaml`
-- `.prd_runner/v3/review_cycles.yaml`
-- `.prd_runner/v3/agents.yaml`
-- `.prd_runner/v3/quick_actions.yaml`
-- `.prd_runner/v3/events.jsonl`
-- `.prd_runner/v3/config.yaml`
+- `.agent_orchestrator/tasks.yaml`
+- `.agent_orchestrator/runs.yaml`
+- `.agent_orchestrator/review_cycles.yaml`
+- `.agent_orchestrator/agents.yaml`
+- `.agent_orchestrator/quick_actions.yaml`
+- `.agent_orchestrator/events.jsonl`
+- `.agent_orchestrator/config.yaml`
 
 Primary configurable areas:
 - `orchestrator` (concurrency, auto deps, review attempts)

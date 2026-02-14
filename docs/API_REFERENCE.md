@@ -1,6 +1,6 @@
-# API Reference (v3)
+# API Reference
 
-Base path: `/api/v3`
+Base path: `/api`
 
 Project scoping:
 - Most endpoints accept `project_dir` query parameter.

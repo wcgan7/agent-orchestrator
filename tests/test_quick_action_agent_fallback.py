@@ -6,16 +6,16 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from feature_prd_runner.v3.domain.models import QuickActionRun
-from feature_prd_runner.v3.events.bus import EventBus
-from feature_prd_runner.v3.quick_actions.executor import QuickActionExecutor
-from feature_prd_runner.v3.storage.container import V3Container
-from feature_prd_runner.workers.config import WorkerProviderSpec
-from feature_prd_runner.workers.run import WorkerRunResult
+from agent_orchestrator.runtime.domain.models import QuickActionRun
+from agent_orchestrator.runtime.events.bus import EventBus
+from agent_orchestrator.runtime.quick_actions.executor import QuickActionExecutor
+from agent_orchestrator.runtime.storage.container import Container
+from agent_orchestrator.workers.config import WorkerProviderSpec
+from agent_orchestrator.workers.run import WorkerRunResult
 
 
-def _make(tmp_path: Path) -> tuple[QuickActionExecutor, V3Container, MagicMock]:
-    container = V3Container(tmp_path)
+def _make(tmp_path: Path) -> tuple[QuickActionExecutor, Container, MagicMock]:
+    container = Container(tmp_path)
     mock_bus = MagicMock(spec=EventBus)
     executor = QuickActionExecutor(container, mock_bus)
     return executor, container, mock_bus
@@ -39,7 +39,7 @@ def _dummy_result(**overrides) -> WorkerRunResult:
     return WorkerRunResult(**defaults)
 
 
-_PATCH_BASE = "feature_prd_runner.v3.quick_actions.executor"
+_PATCH_BASE = "agent_orchestrator.runtime.quick_actions.executor"
 
 
 def test_no_workers_configured(tmp_path: Path) -> None:

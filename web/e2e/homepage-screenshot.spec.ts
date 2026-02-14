@@ -9,7 +9,7 @@ async function createTask(
   description: string,
   priority: 'P0' | 'P1' | 'P2' | 'P3' = 'P2',
 ): Promise<string> {
-  const response = await request.post('/api/v3/tasks', {
+  const response = await request.post('/api/tasks', {
     data: {
       title,
       description,
@@ -31,7 +31,7 @@ async function transitionTask(
   taskId: string,
   status: BoardStage,
 ): Promise<void> {
-  const response = await request.post(`/api/v3/tasks/${taskId}/transition`, {
+  const response = await request.post(`/api/tasks/${taskId}/transition`, {
     data: { status },
   })
   expect(response.ok()).toBeTruthy()
@@ -114,7 +114,7 @@ test('captures seeded homepage screenshot with varied board stages', async ({ pa
   await moveTaskTo(request, doneTaskId, 'done')
 
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: 'Feature PRD Runner' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Agent Orchestrator' })).toBeVisible()
   await expect(page.getByRole('heading', { name: 'Board' })).toBeVisible()
 
   const backlogColumn = page.locator('.board-col').filter({ has: page.getByRole('heading', { name: 'Backlog' }) })

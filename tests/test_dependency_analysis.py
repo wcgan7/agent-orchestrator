@@ -3,15 +3,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from feature_prd_runner.v3.domain.models import Task
-from feature_prd_runner.v3.events import EventBus
-from feature_prd_runner.v3.orchestrator import OrchestratorService
-from feature_prd_runner.v3.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
-from feature_prd_runner.v3.storage.container import V3Container
+from agent_orchestrator.runtime.domain.models import Task
+from agent_orchestrator.runtime.events import EventBus
+from agent_orchestrator.runtime.orchestrator import OrchestratorService
+from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+from agent_orchestrator.runtime.storage.container import Container
 
 
-def _service(tmp_path: Path, *, auto_deps: bool = True, adapter=None) -> tuple[V3Container, OrchestratorService, EventBus]:
-    container = V3Container(tmp_path)
+def _service(tmp_path: Path, *, auto_deps: bool = True, adapter=None) -> tuple[Container, OrchestratorService, EventBus]:
+    container = Container(tmp_path)
     cfg = container.config.load()
     cfg["orchestrator"] = {"auto_deps": auto_deps, "concurrency": 2}
     container.config.save(cfg)

@@ -5,8 +5,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from feature_prd_runner.server.api import create_app
-from feature_prd_runner.v3.orchestrator import DefaultWorkerAdapter
+from agent_orchestrator.server.api import create_app
+from agent_orchestrator.runtime.orchestrator import DefaultWorkerAdapter
 
 
 def test_pin_create_run_review_approve_done(tmp_path: Path) -> None:
@@ -16,15 +16,15 @@ def test_pin_create_run_review_approve_done(tmp_path: Path) -> None:
     (repo / '.git').mkdir()
 
     with TestClient(app) as client:
-        pin = client.post('/api/v3/projects/pinned', json={'path': str(repo)})
+        pin = client.post('/api/projects/pinned', json={'path': str(repo)})
         assert pin.status_code == 200
 
-        created = client.post('/api/v3/tasks', json={'title': 'Feature task', 'metadata': {'scripted_findings': [[]]}}).json()['task']
-        run = client.post(f"/api/v3/tasks/{created['id']}/run")
+        created = client.post('/api/tasks', json={'title': 'Feature task', 'metadata': {'scripted_findings': [[]]}}).json()['task']
+        run = client.post(f"/api/tasks/{created['id']}/run")
         assert run.status_code == 200
         assert run.json()['task']['status'] == 'in_review'
 
-        approved = client.post(f"/api/v3/review/{created['id']}/approve", json={})
+        approved = client.post(f"/api/review/{created['id']}/approve", json={})
         assert approved.status_code == 200
         assert approved.json()['task']['status'] == 'done'
 
@@ -32,33 +32,33 @@ def test_pin_create_run_review_approve_done(tmp_path: Path) -> None:
 def test_import_dependency_execution_order(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        preview = client.post('/api/v3/import/prd/preview', json={'content': '- Step A\n- Step B'}).json()
-        commit = client.post('/api/v3/import/prd/commit', json={'job_id': preview['job_id']}).json()
+        preview = client.post('/api/import/prd/preview', json={'content': '- Step A\n- Step B'}).json()
+        commit = client.post('/api/import/prd/commit', json={'job_id': preview['job_id']}).json()
         first_id, second_id = commit['created_task_ids']
 
-        first_run = client.post(f'/api/v3/tasks/{first_id}/run')
+        first_run = client.post(f'/api/tasks/{first_id}/run')
         assert first_run.status_code == 200
 
-        blocked_second = client.post(f'/api/v3/tasks/{second_id}/run')
+        blocked_second = client.post(f'/api/tasks/{second_id}/run')
         assert blocked_second.status_code == 400
 
-        client.post(f'/api/v3/review/{first_id}/approve', json={})
-        second_run = client.post(f'/api/v3/tasks/{second_id}/run')
+        client.post(f'/api/review/{first_id}/approve', json={})
+        second_run = client.post(f'/api/tasks/{second_id}/run')
         assert second_run.status_code == 200
 
 
 def test_quick_action_stays_off_board_until_promoted(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        quick = client.post('/api/v3/quick-actions', json={'prompt': 'One-off command'}).json()['quick_action']
-        tasks_before = client.get('/api/v3/tasks').json()['tasks']
+        quick = client.post('/api/quick-actions', json={'prompt': 'One-off command'}).json()['quick_action']
+        tasks_before = client.get('/api/tasks').json()['tasks']
         assert tasks_before == []
 
-        promote = client.post(f"/api/v3/quick-actions/{quick['id']}/promote", json={})
+        promote = client.post(f"/api/quick-actions/{quick['id']}/promote", json={})
         assert promote.status_code == 200
         task_id = promote.json()['task']['id']
 
-        tasks_after = client.get('/api/v3/tasks').json()['tasks']
+        tasks_after = client.get('/api/tasks').json()['tasks']
         ids = [task['id'] for task in tasks_after]
         assert task_id in ids
 
@@ -67,7 +67,7 @@ def test_findings_loop_until_zero_open_then_done(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         task = client.post(
-            '/api/v3/tasks',
+            '/api/tasks',
             json={
                 'title': 'Loop task',
                 'approval_mode': 'auto_approve',
@@ -79,7 +79,7 @@ def test_findings_loop_until_zero_open_then_done(tmp_path: Path) -> None:
                 },
             },
         ).json()['task']
-        run = client.post(f"/api/v3/tasks/{task['id']}/run")
+        run = client.post(f"/api/tasks/{task['id']}/run")
         assert run.status_code == 200
         assert run.json()['task']['status'] == 'done'
         assert run.json()['task']['retry_count'] >= 1
@@ -88,11 +88,11 @@ def test_findings_loop_until_zero_open_then_done(tmp_path: Path) -> None:
 def test_request_changes_reopens_task_with_feedback(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        task = client.post('/api/v3/tasks', json={'title': 'Needs feedback', 'metadata': {'scripted_findings': [[]]}}).json()['task']
-        client.post(f"/api/v3/tasks/{task['id']}/run")
+        task = client.post('/api/tasks', json={'title': 'Needs feedback', 'metadata': {'scripted_findings': [[]]}}).json()['task']
+        client.post(f"/api/tasks/{task['id']}/run")
 
         changed = client.post(
-            f"/api/v3/review/{task['id']}/request-changes",
+            f"/api/review/{task['id']}/request-changes",
             json={'guidance': 'Please add integration tests'},
         )
         assert changed.status_code == 200
@@ -111,11 +111,11 @@ def test_single_run_branch_commits_in_task_order(tmp_path: Path) -> None:
 
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        first = client.post('/api/v3/tasks', json={'title': 'First', 'approval_mode': 'auto_approve'}).json()['task']
-        second = client.post('/api/v3/tasks', json={'title': 'Second', 'approval_mode': 'auto_approve'}).json()['task']
+        first = client.post('/api/tasks', json={'title': 'First', 'approval_mode': 'auto_approve'}).json()['task']
+        second = client.post('/api/tasks', json={'title': 'Second', 'approval_mode': 'auto_approve'}).json()['task']
 
-        client.post(f"/api/v3/tasks/{first['id']}/run")
-        client.post(f"/api/v3/tasks/{second['id']}/run")
+        client.post(f"/api/tasks/{first['id']}/run")
+        client.post(f"/api/tasks/{second['id']}/run")
 
     branch = subprocess.run(['git', 'branch', '--show-current'], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
     assert branch.startswith('orchestrator-run-')

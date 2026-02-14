@@ -1,4 +1,4 @@
-# Feature PRD Runner Example
+# Agent Orchestrator Example
 
 This example is intentionally small and deterministic so you can validate the
 v3 task + PRD workflows locally. It includes a tiny Python module, a PRD sample,
@@ -12,7 +12,7 @@ and a small unittest suite.
 ## Run With Web UI
 
 ```bash
-feature-prd-runner server --project-dir ./example/project
+agent-orchestrator server --project-dir ./example/project
 npm --prefix web run dev
 ```
 
@@ -23,8 +23,8 @@ In the dashboard, use:
 ## Run With CLI
 
 ```bash
-feature-prd-runner --project-dir ./example/project task create "Smoke test example project"
-feature-prd-runner --project-dir ./example/project task list
+agent-orchestrator --project-dir ./example/project task create "Smoke test example project"
+agent-orchestrator --project-dir ./example/project task list
 ```
 
-After running flows, inspect `.prd_runner/v3/` inside `example/project/` for state and events.
+After running flows, inspect `.agent_orchestrator/` inside `example/project/` for state and events.

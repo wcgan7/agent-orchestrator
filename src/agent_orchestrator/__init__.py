@@ -1,4 +1,4 @@
-"""Feature PRD Runner package."""
+"""Agent Orchestrator package."""
 
 from __future__ import annotations
 

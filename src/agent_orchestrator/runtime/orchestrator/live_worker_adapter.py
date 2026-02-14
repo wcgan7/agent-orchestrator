@@ -13,7 +13,7 @@ from ...workers.config import get_workers_runtime_config, resolve_worker_for_ste
 from ...workers.diagnostics import test_worker
 from ...workers.run import WorkerRunResult, run_worker
 from ..domain.models import Task
-from ..storage.container import V3Container
+from ..storage.container import Container
 from .worker_adapter import StepResult
 
 logger = logging.getLogger(__name__)
@@ -51,7 +51,7 @@ _PREAMBLE = (
 _GUARDRAILS = (
     "## Guardrails\n"
     "- Do NOT commit, push, or rebase — the coordinator handles all commits.\n"
-    "- Do NOT modify files under `.prd_runner/` — those are coordinator state.\n"
+    "- Do NOT modify files under `.agent_orchestrator/` — those are coordinator state.\n"
     "- Do NOT suppress or down-rank review findings.\n"
     "- Prefer fixing issues over escalating; escalate only when truly stuck.\n"
     "- Be explicit about risks, uncertainty, and assumptions."
@@ -423,7 +423,7 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 class LiveWorkerAdapter:
     """Worker adapter that dispatches to real Codex/Ollama providers."""
 
-    def __init__(self, container: V3Container) -> None:
+    def __init__(self, container: Container) -> None:
         self._container = container
 
     @staticmethod
@@ -492,7 +492,7 @@ class LiveWorkerAdapter:
         )
 
         # 3. Execute
-        run_dir = Path(tempfile.mkdtemp(dir=str(self._container.v3_root)))
+        run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
         progress_path = run_dir / "progress.json"
         timeout_seconds = self._timeout_for_step(task, step)
         try:

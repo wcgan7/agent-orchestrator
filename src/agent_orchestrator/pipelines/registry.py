@@ -303,7 +303,7 @@ class PipelineRegistry:
     """Registry of pipeline templates.
 
     Starts with built-in templates and allows registration of custom templates
-    (e.g. loaded from user .prd_runner/pipelines/ YAML files).
+    (e.g. loaded from user .agent_orchestrator/pipelines/ YAML files).
     """
 
     def __init__(self) -> None:

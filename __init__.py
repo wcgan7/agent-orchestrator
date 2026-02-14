@@ -1,3 +1,3 @@
-"""Feature PRD Runner package."""
+"""Agent Orchestrator package."""
 
 __all__: list[str] = []

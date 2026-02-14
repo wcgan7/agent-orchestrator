@@ -15,7 +15,7 @@ from ...workers.diagnostics import test_worker
 from ...workers.run import run_worker
 from ..domain.models import QuickActionRun, now_iso
 from ..events.bus import EventBus
-from ..storage.container import V3Container
+from ..storage.container import Container
 from .shortcuts import load_shortcuts, match_prompt
 
 _MAX_OUTPUT = 4000
@@ -27,7 +27,7 @@ def _contains_unsafe_shell_tokens(command: str) -> bool:
 
 
 class QuickActionExecutor:
-    def __init__(self, container: V3Container, bus: EventBus) -> None:
+    def __init__(self, container: Container, bus: EventBus) -> None:
         self._container = container
         self._bus = bus
 
@@ -130,7 +130,7 @@ class QuickActionExecutor:
                 )
                 return run
 
-            run_dir = Path(tempfile.mkdtemp(dir=str(self._container.v3_root)))
+            run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
             progress_path = run_dir / "progress.json"
 
             result = run_worker(

@@ -7,7 +7,7 @@ Add two small utility functions with tests, split into two phases.
 
 Context
 -------
-This is a minimal example to validate the Feature PRD Runner flow.
+This is a minimal example to validate the Agent Orchestrator flow.
 
 Implementation Plan
 -------------------

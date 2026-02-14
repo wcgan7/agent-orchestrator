@@ -6,15 +6,15 @@ import time
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from feature_prd_runner.v3.domain.models import Task
-from feature_prd_runner.v3.events import EventBus
-from feature_prd_runner.v3.orchestrator import OrchestratorService
-from feature_prd_runner.v3.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
-from feature_prd_runner.v3.storage.container import V3Container
+from agent_orchestrator.runtime.domain.models import Task
+from agent_orchestrator.runtime.events import EventBus
+from agent_orchestrator.runtime.orchestrator import OrchestratorService
+from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+from agent_orchestrator.runtime.storage.container import Container
 
 
-def _service(tmp_path: Path, concurrency: int = 2) -> tuple[V3Container, OrchestratorService, EventBus]:
-    container = V3Container(tmp_path)
+def _service(tmp_path: Path, concurrency: int = 2) -> tuple[Container, OrchestratorService, EventBus]:
+    container = Container(tmp_path)
     if concurrency != 2:
         cfg = container.config.load()
         cfg["orchestrator"] = {"concurrency": concurrency}
@@ -45,7 +45,7 @@ def test_tick_dispatches_to_thread_pool(tmp_path: Path) -> None:
             barrier.wait()
             return StepResult(status="ok")
 
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
     cfg = container.config.load()
     cfg["orchestrator"] = {"concurrency": 2, "auto_deps": False}
     container.config.save(cfg)
@@ -75,7 +75,7 @@ def test_tick_dispatches_to_thread_pool(tmp_path: Path) -> None:
 
     # Both tasks should have run in pool threads (not the main thread)
     assert len(call_threads) >= 2
-    assert all("v3-task" in name for name in call_threads)
+    assert all("orchestrator-task" in name for name in call_threads)
 
     # Both tasks should be done
     for task_id in [t1.id, t2.id]:
@@ -99,7 +99,7 @@ def test_concurrency_cap_respected(tmp_path: Path) -> None:
             gate.wait(timeout=10)
             return StepResult(status="ok")
 
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
     cfg = container.config.load()
     cfg["orchestrator"] = {"concurrency": 2, "auto_deps": False}
     container.config.save(cfg)
@@ -165,7 +165,7 @@ def test_same_repo_tasks_run_in_parallel(tmp_path: Path) -> None:
             barrier.wait()
             return StepResult(status="ok")
 
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
     cfg = container.config.load()
     cfg["orchestrator"] = {"concurrency": 4, "auto_deps": False}
     container.config.save(cfg)
@@ -214,7 +214,7 @@ def test_different_repos_run_in_parallel(tmp_path: Path) -> None:
             barrier.wait()
             return StepResult(status="ok")
 
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
     cfg = container.config.load()
     cfg["orchestrator"] = {"concurrency": 2, "auto_deps": False}
     container.config.save(cfg)
@@ -265,7 +265,7 @@ def test_drain_waits_for_inflight(tmp_path: Path) -> None:
             gate.wait(timeout=10)
             return StepResult(status="ok")
 
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus, worker_adapter=BlockingAdapter())
 
@@ -332,7 +332,7 @@ def test_future_exception_sets_task_blocked(tmp_path: Path) -> None:
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
             raise RuntimeError("kaboom")
 
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus, worker_adapter=CrashingAdapter())
 
@@ -372,7 +372,7 @@ def test_status_reports_active_workers(tmp_path: Path) -> None:
             gate.wait(timeout=10)
             return StepResult(status="ok")
 
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus, worker_adapter=BlockingAdapter())
 

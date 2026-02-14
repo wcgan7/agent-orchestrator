@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from feature_prd_runner.workers.config import WorkerProviderSpec
-from feature_prd_runner.workers.run import WorkerRunResult, run_worker
+from agent_orchestrator.workers.config import WorkerProviderSpec
+from agent_orchestrator.workers.run import WorkerRunResult, run_worker
 
 
 def test_run_worker_extracts_human_blocking_issues_from_progress(
@@ -42,7 +42,7 @@ def test_run_worker_extracts_human_blocking_issues_from_progress(
         }
 
     monkeypatch.setattr(
-        "feature_prd_runner.workers.run._run_codex_worker",
+        "agent_orchestrator.workers.run._run_codex_worker",
         _fake_codex_worker,
     )
 
@@ -96,7 +96,7 @@ def test_run_worker_extracts_human_blocking_issues_for_ollama(
         )
 
     monkeypatch.setattr(
-        "feature_prd_runner.workers.run._run_ollama_generate",
+        "agent_orchestrator.workers.run._run_ollama_generate",
         _fake_ollama_generate,
     )
 

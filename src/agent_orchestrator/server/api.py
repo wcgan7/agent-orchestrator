@@ -1,4 +1,4 @@
-"""FastAPI app wiring for orchestrator-first v3 runtime."""
+"""FastAPI app wiring for orchestrator-first runtime."""
 
 from __future__ import annotations
 
@@ -10,11 +10,11 @@ from typing import Optional
 from fastapi import FastAPI, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
-from ..v3.api import create_v3_router
-from ..v3.events import EventBus
-from ..v3.events import hub
-from ..v3.orchestrator import WorkerAdapter, create_orchestrator
-from ..v3.storage import V3Container
+from ..runtime.api import create_router
+from ..runtime.events import EventBus
+from ..runtime.events import hub
+from ..runtime.orchestrator import WorkerAdapter, create_orchestrator
+from ..runtime.storage import Container
 
 
 def create_app(
@@ -28,18 +28,18 @@ def create_app(
         try:
             yield
         finally:
-            orchestrators = list(getattr(app.state, "v3_orchestrators", {}).values())
+            orchestrators = list(getattr(app.state, "orchestrators", {}).values())
             for orchestrator in orchestrators:
                 try:
                     orchestrator.shutdown(timeout=10.0)
                 except Exception:
                     pass
-            app.state.v3_orchestrators = {}
-            app.state.v3_containers = {}
+            app.state.orchestrators = {}
+            app.state.containers = {}
             app.state.import_jobs = {}
 
     app = FastAPI(
-        title="Feature PRD Runner",
+        title="Agent Orchestrator",
         description="Orchestrator-first AI engineering control center",
         version="3.0.0",
         lifespan=_lifespan,
@@ -55,8 +55,8 @@ def create_app(
         )
 
     app.state.default_project_dir = project_dir
-    app.state.v3_containers = {}
-    app.state.v3_orchestrators = {}
+    app.state.containers = {}
+    app.state.orchestrators = {}
     app.state.import_jobs = {}
 
     def _resolve_project_dir(project_dir_param: Optional[str] = None) -> Path:
@@ -66,32 +66,32 @@ def create_app(
             return Path(app.state.default_project_dir).resolve()
         return Path.cwd().resolve()
 
-    def _resolve_container(project_dir_param: Optional[str] = None) -> V3Container:
+    def _resolve_container(project_dir_param: Optional[str] = None) -> Container:
         resolved = _resolve_project_dir(project_dir_param)
         key = str(resolved)
-        cache = app.state.v3_containers
+        cache = app.state.containers
         if key not in cache:
-            cache[key] = V3Container(resolved)
+            cache[key] = Container(resolved)
         return cache[key]
 
     def _resolve_orchestrator(project_dir_param: Optional[str] = None):
         resolved = _resolve_project_dir(project_dir_param)
         key = str(resolved)
-        cache = app.state.v3_orchestrators
+        cache = app.state.orchestrators
         if key not in cache:
             container = _resolve_container(project_dir_param)
-            cache[key] = create_orchestrator(container, bus=app.state.v3_bus_factory(container), worker_adapter=worker_adapter)
+            cache[key] = create_orchestrator(container, bus=app.state.bus_factory(container), worker_adapter=worker_adapter)
         return cache[key]
 
-    app.state.v3_bus_factory = lambda container: EventBus(container.events, container.project_id)
+    app.state.bus_factory = lambda container: EventBus(container.events, container.project_id)
 
-    app.include_router(create_v3_router(_resolve_container, _resolve_orchestrator, app.state.import_jobs))
+    app.include_router(create_router(_resolve_container, _resolve_orchestrator, app.state.import_jobs))
 
     @app.get("/")
     async def root(project_dir: Optional[str] = Query(None)) -> dict[str, object]:
         container = _resolve_container(project_dir)
         return {
-            "name": "Feature PRD Runner",
+            "name": "Agent Orchestrator",
             "version": "3.0.0",
             "project": str(container.project_dir),
             "project_id": container.project_id,
@@ -109,7 +109,7 @@ def create_app(
             "status": "ready",
             "project": str(container.project_dir),
             "project_id": container.project_id,
-            "orchestrators": len(app.state.v3_orchestrators),
+            "orchestrators": len(app.state.orchestrators),
         }
 
     @app.websocket("/ws")

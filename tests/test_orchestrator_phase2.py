@@ -3,14 +3,14 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from feature_prd_runner.v3.domain.models import AgentRecord, Task
-from feature_prd_runner.v3.events import EventBus
-from feature_prd_runner.v3.orchestrator import OrchestratorService
-from feature_prd_runner.v3.storage.container import V3Container
+from agent_orchestrator.runtime.domain.models import AgentRecord, Task
+from agent_orchestrator.runtime.events import EventBus
+from agent_orchestrator.runtime.orchestrator import OrchestratorService
+from agent_orchestrator.runtime.storage.container import Container
 
 
-def _service(tmp_path: Path) -> tuple[V3Container, OrchestratorService]:
-    container = V3Container(tmp_path)
+def _service(tmp_path: Path) -> tuple[Container, OrchestratorService]:
+    container = Container(tmp_path)
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus)
     return container, service

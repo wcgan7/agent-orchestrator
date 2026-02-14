@@ -7,14 +7,14 @@ from unittest.mock import patch
 
 import pytest
 
-from feature_prd_runner.v3.domain.models import Task
-from feature_prd_runner.v3.events import EventBus
-from feature_prd_runner.v3.orchestrator import OrchestratorService
-from feature_prd_runner.v3.storage.container import V3Container
+from agent_orchestrator.runtime.domain.models import Task
+from agent_orchestrator.runtime.events import EventBus
+from agent_orchestrator.runtime.orchestrator import OrchestratorService
+from agent_orchestrator.runtime.storage.container import Container
 
 
-def _service(tmp_path: Path) -> tuple[V3Container, OrchestratorService, EventBus]:
-    container = V3Container(tmp_path)
+def _service(tmp_path: Path) -> tuple[Container, OrchestratorService, EventBus]:
+    container = Container(tmp_path)
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus)
     return container, service, bus
@@ -179,11 +179,11 @@ def test_gate_approve_api(tmp_path: Path) -> None:
     """POST approve-gate clears pending_gate."""
     from fastapi.testclient import TestClient
 
-    from feature_prd_runner.v3.api.router import create_v3_router
+    from agent_orchestrator.runtime.api.router import create_router
 
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
 
-    def resolve_container(_: Any = None) -> V3Container:
+    def resolve_container(_: Any = None) -> Container:
         return container
 
     bus = EventBus(container.events, container.project_id)
@@ -192,7 +192,7 @@ def test_gate_approve_api(tmp_path: Path) -> None:
     def resolve_orchestrator(_: Any = None) -> OrchestratorService:
         return service
 
-    router = create_v3_router(resolve_container, resolve_orchestrator, {})
+    router = create_router(resolve_container, resolve_orchestrator, {})
 
     from fastapi import FastAPI
 
@@ -203,7 +203,7 @@ def test_gate_approve_api(tmp_path: Path) -> None:
     task = Task(title="Gate test", status="in_progress", pending_gate="before_plan")
     container.tasks.upsert(task)
 
-    resp = client.post(f"/api/v3/tasks/{task.id}/approve-gate", json={"gate": "before_plan"})
+    resp = client.post(f"/api/tasks/{task.id}/approve-gate", json={"gate": "before_plan"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["cleared_gate"] == "before_plan"
@@ -214,11 +214,11 @@ def test_gate_approve_api_no_pending(tmp_path: Path) -> None:
     """400 when no pending gate on the task."""
     from fastapi.testclient import TestClient
 
-    from feature_prd_runner.v3.api.router import create_v3_router
+    from agent_orchestrator.runtime.api.router import create_router
 
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
 
-    def resolve_container(_: Any = None) -> V3Container:
+    def resolve_container(_: Any = None) -> Container:
         return container
 
     bus = EventBus(container.events, container.project_id)
@@ -227,7 +227,7 @@ def test_gate_approve_api_no_pending(tmp_path: Path) -> None:
     def resolve_orchestrator(_: Any = None) -> OrchestratorService:
         return service
 
-    router = create_v3_router(resolve_container, resolve_orchestrator, {})
+    router = create_router(resolve_container, resolve_orchestrator, {})
 
     from fastapi import FastAPI
 
@@ -238,7 +238,7 @@ def test_gate_approve_api_no_pending(tmp_path: Path) -> None:
     task = Task(title="No gate task", status="in_progress", pending_gate=None)
     container.tasks.upsert(task)
 
-    resp = client.post(f"/api/v3/tasks/{task.id}/approve-gate", json={})
+    resp = client.post(f"/api/tasks/{task.id}/approve-gate", json={})
     assert resp.status_code == 400
 
 
@@ -246,11 +246,11 @@ def test_gate_approve_api_mismatch(tmp_path: Path) -> None:
     """400 when gate name doesn't match the pending gate."""
     from fastapi.testclient import TestClient
 
-    from feature_prd_runner.v3.api.router import create_v3_router
+    from agent_orchestrator.runtime.api.router import create_router
 
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
 
-    def resolve_container(_: Any = None) -> V3Container:
+    def resolve_container(_: Any = None) -> Container:
         return container
 
     bus = EventBus(container.events, container.project_id)
@@ -259,7 +259,7 @@ def test_gate_approve_api_mismatch(tmp_path: Path) -> None:
     def resolve_orchestrator(_: Any = None) -> OrchestratorService:
         return service
 
-    router = create_v3_router(resolve_container, resolve_orchestrator, {})
+    router = create_router(resolve_container, resolve_orchestrator, {})
 
     from fastapi import FastAPI
 
@@ -270,7 +270,7 @@ def test_gate_approve_api_mismatch(tmp_path: Path) -> None:
     task = Task(title="Mismatch task", status="in_progress", pending_gate="before_plan")
     container.tasks.upsert(task)
 
-    resp = client.post(f"/api/v3/tasks/{task.id}/approve-gate", json={"gate": "before_commit"})
+    resp = client.post(f"/api/tasks/{task.id}/approve-gate", json={"gate": "before_commit"})
     assert resp.status_code == 400
     assert "mismatch" in resp.json()["detail"].lower()
 
@@ -305,12 +305,12 @@ def test_modes_endpoint_uses_modes_py(tmp_path: Path) -> None:
     """GET /collaboration/modes returns data from MODE_CONFIGS."""
     from fastapi.testclient import TestClient
 
-    from feature_prd_runner.collaboration.modes import MODE_CONFIGS
-    from feature_prd_runner.v3.api.router import create_v3_router
+    from agent_orchestrator.collaboration.modes import MODE_CONFIGS
+    from agent_orchestrator.runtime.api.router import create_router
 
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
 
-    def resolve_container(_: Any = None) -> V3Container:
+    def resolve_container(_: Any = None) -> Container:
         return container
 
     bus = EventBus(container.events, container.project_id)
@@ -319,7 +319,7 @@ def test_modes_endpoint_uses_modes_py(tmp_path: Path) -> None:
     def resolve_orchestrator(_: Any = None) -> OrchestratorService:
         return service
 
-    router = create_v3_router(resolve_container, resolve_orchestrator, {})
+    router = create_router(resolve_container, resolve_orchestrator, {})
 
     from fastapi import FastAPI
 
@@ -327,7 +327,7 @@ def test_modes_endpoint_uses_modes_py(tmp_path: Path) -> None:
     app.include_router(router)
     client = TestClient(app)
 
-    resp = client.get("/api/v3/collaboration/modes")
+    resp = client.get("/api/collaboration/modes")
     assert resp.status_code == 200
     data = resp.json()
     modes = data["modes"]

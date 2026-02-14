@@ -94,47 +94,47 @@ function installFetchMock() {
     const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
 
     if (u === '/' || u.startsWith('/?')) return jsonResponse({ project_id: 'repo-alpha' })
-    if (u.includes('/api/v3/collaboration/modes')) return jsonResponse({ modes: [] })
+    if (u.includes('/api/collaboration/modes')) return jsonResponse({ modes: [] })
 
-    if (u.includes('/api/v3/tasks/task-1/run') && method === 'POST') return jsonResponse({ task })
-    if (u.includes('/api/v3/tasks/task-1/retry') && method === 'POST') return jsonResponse({ task })
-    if (u.includes('/api/v3/tasks/task-1/cancel') && method === 'POST') return jsonResponse({ task })
-    if (u.includes('/api/v3/tasks/task-1/transition') && method === 'POST') return jsonResponse({ task })
-    if (u.includes('/api/v3/tasks/task-1/dependencies/task-0') && method === 'DELETE') return jsonResponse({ task })
-    if (u.includes('/api/v3/tasks/task-1/dependencies') && method === 'POST') return jsonResponse({ task })
-    if (u.includes('/api/v3/tasks/analyze-dependencies') && method === 'POST') {
+    if (u.includes('/api/tasks/task-1/run') && method === 'POST') return jsonResponse({ task })
+    if (u.includes('/api/tasks/task-1/retry') && method === 'POST') return jsonResponse({ task })
+    if (u.includes('/api/tasks/task-1/cancel') && method === 'POST') return jsonResponse({ task })
+    if (u.includes('/api/tasks/task-1/transition') && method === 'POST') return jsonResponse({ task })
+    if (u.includes('/api/tasks/task-1/dependencies/task-0') && method === 'DELETE') return jsonResponse({ task })
+    if (u.includes('/api/tasks/task-1/dependencies') && method === 'POST') return jsonResponse({ task })
+    if (u.includes('/api/tasks/analyze-dependencies') && method === 'POST') {
       return jsonResponse({ edges: [{ from: 'task-0', to: 'task-1' }] })
     }
-    if (u.includes('/api/v3/tasks/task-1/reset-dep-analysis') && method === 'POST') return jsonResponse({ task })
-    if (u.includes('/api/v3/tasks/task-1/approve-gate') && method === 'POST') return jsonResponse({ task })
-    if (u.includes('/api/v3/tasks/task-1') && method === 'PATCH') return jsonResponse({ task })
+    if (u.includes('/api/tasks/task-1/reset-dep-analysis') && method === 'POST') return jsonResponse({ task })
+    if (u.includes('/api/tasks/task-1/approve-gate') && method === 'POST') return jsonResponse({ task })
+    if (u.includes('/api/tasks/task-1') && method === 'PATCH') return jsonResponse({ task })
 
-    if (u.includes('/api/v3/orchestrator/control') && method === 'POST') {
+    if (u.includes('/api/orchestrator/control') && method === 'POST') {
       return jsonResponse({ status: 'running', queue_depth: 1, in_progress: 0, draining: false, run_branch: null })
     }
-    if (u.includes('/api/v3/review/task-r1/approve') && method === 'POST') return jsonResponse({ task })
-    if (u.includes('/api/v3/review/task-r1/request-changes') && method === 'POST') return jsonResponse({ task })
-    if (u.includes('/api/v3/agents/spawn') && method === 'POST') {
+    if (u.includes('/api/review/task-r1/approve') && method === 'POST') return jsonResponse({ task })
+    if (u.includes('/api/review/task-r1/request-changes') && method === 'POST') return jsonResponse({ task })
+    if (u.includes('/api/agents/spawn') && method === 'POST') {
       return jsonResponse({ agent: { id: 'agent-2', role: 'general', status: 'running' } })
     }
-    if (u.includes('/api/v3/agents/agent-1/terminate') && method === 'POST') {
+    if (u.includes('/api/agents/agent-1/terminate') && method === 'POST') {
       return jsonResponse({ agent: { id: 'agent-1', role: 'general', status: 'terminated' } })
     }
 
-    if (u.includes('/api/v3/settings') && method === 'GET') return jsonResponse(settingsPayload)
-    if (u.includes('/api/v3/settings') && method === 'PATCH') return jsonResponse(settingsPayload)
-    if (u.includes('/api/v3/projects/pinned/pinned-1') && method === 'DELETE') return jsonResponse({ removed: true })
-    if (u.includes('/api/v3/projects/pinned') && method === 'GET') {
+    if (u.includes('/api/settings') && method === 'GET') return jsonResponse(settingsPayload)
+    if (u.includes('/api/settings') && method === 'PATCH') return jsonResponse(settingsPayload)
+    if (u.includes('/api/projects/pinned/pinned-1') && method === 'DELETE') return jsonResponse({ removed: true })
+    if (u.includes('/api/projects/pinned') && method === 'GET') {
       return jsonResponse({ items: [{ id: 'pinned-1', path: '/tmp/repo-alpha', source: 'pinned', is_git: true }] })
     }
-    if (u.includes('/api/v3/projects/pinned') && method === 'POST') {
+    if (u.includes('/api/projects/pinned') && method === 'POST') {
       return jsonResponse({ project: { id: 'pinned-2', path: '/tmp/repo-beta', source: 'pinned', is_git: true } })
     }
 
-    if (u.includes('/api/v3/quick-actions/qa-1/promote') && method === 'POST') return jsonResponse({ task, already_promoted: false })
-    if (u.includes('/api/v3/quick-actions/qa-2/promote') && method === 'POST') return jsonResponse({ task, already_promoted: false })
-    if (u.includes('/api/v3/quick-actions/') && method === 'GET') {
-      const quickActionId = u.split('/api/v3/quick-actions/')[1]?.split('?')[0] || 'qa-1'
+    if (u.includes('/api/quick-actions/qa-1/promote') && method === 'POST') return jsonResponse({ task, already_promoted: false })
+    if (u.includes('/api/quick-actions/qa-2/promote') && method === 'POST') return jsonResponse({ task, already_promoted: false })
+    if (u.includes('/api/quick-actions/') && method === 'GET') {
+      const quickActionId = u.split('/api/quick-actions/')[1]?.split('?')[0] || 'qa-1'
       return jsonResponse({
         quick_action: {
           id: quickActionId,
@@ -146,7 +146,7 @@ function installFetchMock() {
         },
       })
     }
-    if (u.includes('/api/v3/quick-actions') && method === 'POST') {
+    if (u.includes('/api/quick-actions') && method === 'POST') {
       return jsonResponse({
         quick_action: {
           id: 'qa-2',
@@ -157,9 +157,9 @@ function installFetchMock() {
         },
       })
     }
-    if (u.includes('/api/v3/quick-actions') && method === 'GET') return jsonResponse({ quick_actions: quickActions })
+    if (u.includes('/api/quick-actions') && method === 'GET') return jsonResponse({ quick_actions: quickActions })
 
-    if (u.includes('/api/v3/import/prd/preview') && method === 'POST') {
+    if (u.includes('/api/import/prd/preview') && method === 'POST') {
       return jsonResponse({
         job_id: 'job-1',
         preview: {
@@ -168,10 +168,10 @@ function installFetchMock() {
         },
       })
     }
-    if (u.includes('/api/v3/import/prd/commit') && method === 'POST') {
+    if (u.includes('/api/import/prd/commit') && method === 'POST') {
       return jsonResponse({ created_task_ids: ['task-a'] })
     }
-    if (u.includes('/api/v3/import/job-1') && method === 'GET') {
+    if (u.includes('/api/import/job-1') && method === 'GET') {
       return jsonResponse({
         job: {
           id: 'job-1',
@@ -183,7 +183,7 @@ function installFetchMock() {
       })
     }
 
-    if (u.includes('/api/v3/tasks/board')) {
+    if (u.includes('/api/tasks/board')) {
       return jsonResponse({
         columns: {
           backlog: [task],
@@ -195,32 +195,32 @@ function installFetchMock() {
         },
       })
     }
-    if (u.includes('/api/v3/tasks/execution-order')) return jsonResponse({ batches: [['task-1']] })
-    if (u.includes('/api/v3/tasks/task-1') && method === 'GET') return jsonResponse({ task })
-    if (u.includes('/api/v3/tasks') && !u.includes('/api/v3/tasks/')) return jsonResponse({ tasks: [task] })
-    if (u.includes('/api/v3/orchestrator/status')) {
+    if (u.includes('/api/tasks/execution-order')) return jsonResponse({ batches: [['task-1']] })
+    if (u.includes('/api/tasks/task-1') && method === 'GET') return jsonResponse({ task })
+    if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) return jsonResponse({ tasks: [task] })
+    if (u.includes('/api/orchestrator/status')) {
       return jsonResponse({ status: 'running', queue_depth: 1, in_progress: 0, draining: false, run_branch: null })
     }
-    if (u.includes('/api/v3/review-queue')) {
+    if (u.includes('/api/review-queue')) {
       return jsonResponse({
         tasks: [{ id: 'task-r1', title: 'Review me', priority: 'P2', status: 'in_review', task_type: 'feature' }],
       })
     }
-    if (u.includes('/api/v3/agents/types')) {
+    if (u.includes('/api/agents/types')) {
       return jsonResponse({ types: [{ role: 'general', display_name: 'General', task_type_affinity: [], allowed_steps: [] }] })
     }
-    if (u.includes('/api/v3/agents') && method === 'GET') {
+    if (u.includes('/api/agents') && method === 'GET') {
       return jsonResponse({ agents: [{ id: 'agent-1', role: 'general', status: 'running' }] })
     }
-    if (u.includes('/api/v3/projects') && method === 'GET') {
+    if (u.includes('/api/projects') && method === 'GET') {
       return jsonResponse({ projects: [{ id: 'repo-alpha', path: '/tmp/repo-alpha', source: 'workspace', is_git: true }] })
     }
-    if (u.includes('/api/v3/phases')) return jsonResponse([])
-    if (u.includes('/api/v3/collaboration/presence')) return jsonResponse({ users: [] })
-    if (u.includes('/api/v3/metrics')) {
+    if (u.includes('/api/phases')) return jsonResponse([])
+    if (u.includes('/api/collaboration/presence')) return jsonResponse({ users: [] })
+    if (u.includes('/api/metrics')) {
       return jsonResponse({ api_calls: 1, wall_time_seconds: 1, phases_completed: 0, phases_total: 0, tokens_used: 10, estimated_cost_usd: 0.01 })
     }
-    if (u.includes('/api/v3/collaboration/timeline/task-1')) {
+    if (u.includes('/api/collaboration/timeline/task-1')) {
       return jsonResponse({
         events: [
           {
@@ -236,8 +236,8 @@ function installFetchMock() {
         ],
       })
     }
-    if (u.includes('/api/v3/collaboration/feedback/task-1')) return jsonResponse({ feedback: [] })
-    if (u.includes('/api/v3/collaboration/comments/task-1')) return jsonResponse({ comments: [] })
+    if (u.includes('/api/collaboration/feedback/task-1')) return jsonResponse({ feedback: [] })
+    if (u.includes('/api/collaboration/comments/task-1')) return jsonResponse({ comments: [] })
 
     return jsonResponse({})
   })
@@ -273,7 +273,7 @@ describe('App action coverage', () => {
     await waitFor(() => {
       expect(
         mockedFetch.mock.calls.some(([url, init]) =>
-          String(url).includes('/api/v3/tasks/task-1/run') && (init as RequestInit | undefined)?.method === 'POST'
+          String(url).includes('/api/tasks/task-1/run') && (init as RequestInit | undefined)?.method === 'POST'
         )
       ).toBe(true)
     })
@@ -285,7 +285,7 @@ describe('App action coverage', () => {
     fireEvent.click(screen.getByRole('button', { name: /Transition/i }))
     await waitFor(() => {
       const transitionCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/v3/tasks/task-1/transition') && (init as RequestInit | undefined)?.method === 'POST'
+        String(url).includes('/api/tasks/task-1/transition') && (init as RequestInit | undefined)?.method === 'POST'
       )
       expect(transitionCall).toBeTruthy()
       const body = JSON.parse(String((transitionCall?.[1] as RequestInit).body))
@@ -296,7 +296,7 @@ describe('App action coverage', () => {
     fireEvent.click(screen.getByRole('button', { name: /Add dependency/i }))
     await waitFor(() => {
       const addDepCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/v3/tasks/task-1/dependencies') && (init as RequestInit | undefined)?.method === 'POST'
+        String(url).includes('/api/tasks/task-1/dependencies') && (init as RequestInit | undefined)?.method === 'POST'
       )
       expect(addDepCall).toBeTruthy()
       const body = JSON.parse(String((addDepCall?.[1] as RequestInit).body))
@@ -307,7 +307,7 @@ describe('App action coverage', () => {
     await waitFor(() => {
       expect(
         mockedFetch.mock.calls.some(([url, init]) =>
-          String(url).includes('/api/v3/tasks/task-1/dependencies/task-0') && (init as RequestInit | undefined)?.method === 'DELETE'
+          String(url).includes('/api/tasks/task-1/dependencies/task-0') && (init as RequestInit | undefined)?.method === 'DELETE'
         )
       ).toBe(true)
     })
@@ -316,7 +316,7 @@ describe('App action coverage', () => {
     await waitFor(() => {
       expect(
         mockedFetch.mock.calls.some(([url, init]) =>
-          String(url).includes('/api/v3/tasks/analyze-dependencies') && (init as RequestInit | undefined)?.method === 'POST'
+          String(url).includes('/api/tasks/analyze-dependencies') && (init as RequestInit | undefined)?.method === 'POST'
         )
       ).toBe(true)
     })
@@ -325,7 +325,7 @@ describe('App action coverage', () => {
     await waitFor(() => {
       expect(
         mockedFetch.mock.calls.some(([url, init]) =>
-          String(url).includes('/api/v3/tasks/task-1/reset-dep-analysis') && (init as RequestInit | undefined)?.method === 'POST'
+          String(url).includes('/api/tasks/task-1/reset-dep-analysis') && (init as RequestInit | undefined)?.method === 'POST'
         )
       ).toBe(true)
     })
@@ -333,7 +333,7 @@ describe('App action coverage', () => {
     fireEvent.click(screen.getByRole('button', { name: /Approve gate/i }))
     await waitFor(() => {
       const gateCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/v3/tasks/task-1/approve-gate') && (init as RequestInit | undefined)?.method === 'POST'
+        String(url).includes('/api/tasks/task-1/approve-gate') && (init as RequestInit | undefined)?.method === 'POST'
       )
       expect(gateCall).toBeTruthy()
       const body = JSON.parse(String((gateCall?.[1] as RequestInit).body))
@@ -344,7 +344,7 @@ describe('App action coverage', () => {
     fireEvent.click(screen.getByRole('button', { name: /Save edits/i }))
     await waitFor(() => {
       const editCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/v3/tasks/task-1') && (init as RequestInit | undefined)?.method === 'PATCH'
+        String(url).includes('/api/tasks/task-1') && (init as RequestInit | undefined)?.method === 'PATCH'
       )
       expect(editCall).toBeTruthy()
       const body = JSON.parse(String((editCall?.[1] as RequestInit).body))
@@ -369,7 +369,7 @@ describe('App action coverage', () => {
     await waitFor(() => {
       expect(
         mockedFetch.mock.calls.some(([url, init]) => {
-          if (!String(url).includes('/api/v3/orchestrator/control')) return false
+          if (!String(url).includes('/api/orchestrator/control')) return false
           if ((init as RequestInit | undefined)?.method !== 'POST') return false
           const body = JSON.parse(String((init as RequestInit).body))
           return body.action === 'pause'
@@ -386,7 +386,7 @@ describe('App action coverage', () => {
 
     await waitFor(() => {
       const reviewCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/v3/review/task-r1/approve') && (init as RequestInit | undefined)?.method === 'POST'
+        String(url).includes('/api/review/task-r1/approve') && (init as RequestInit | undefined)?.method === 'POST'
       )
       expect(reviewCall).toBeTruthy()
       const body = JSON.parse(String((reviewCall?.[1] as RequestInit).body))
@@ -404,7 +404,7 @@ describe('App action coverage', () => {
 
     await waitFor(() => {
       const spawnCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/v3/agents/spawn') && (init as RequestInit | undefined)?.method === 'POST'
+        String(url).includes('/api/agents/spawn') && (init as RequestInit | undefined)?.method === 'POST'
       )
       expect(spawnCall).toBeTruthy()
       const body = JSON.parse(String((spawnCall?.[1] as RequestInit).body))
@@ -416,7 +416,7 @@ describe('App action coverage', () => {
     await waitFor(() => {
       expect(
         mockedFetch.mock.calls.some(([url, init]) =>
-          String(url).includes('/api/v3/agents/agent-1/terminate') && (init as RequestInit | undefined)?.method === 'POST'
+          String(url).includes('/api/agents/agent-1/terminate') && (init as RequestInit | undefined)?.method === 'POST'
         )
       ).toBe(true)
     })
@@ -455,7 +455,7 @@ describe('App action coverage', () => {
 
     await waitFor(() => {
       const settingsCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/v3/settings') && (init as RequestInit | undefined)?.method === 'PATCH'
+        String(url).includes('/api/settings') && (init as RequestInit | undefined)?.method === 'PATCH'
       )
       expect(settingsCall).toBeTruthy()
       const body = JSON.parse(String((settingsCall?.[1] as RequestInit).body))
@@ -473,7 +473,7 @@ describe('App action coverage', () => {
     await waitFor(() => {
       expect(
         mockedFetch.mock.calls.some(([url, init]) =>
-          String(url).includes('/api/v3/projects/pinned/pinned-1') && (init as RequestInit | undefined)?.method === 'DELETE'
+          String(url).includes('/api/projects/pinned/pinned-1') && (init as RequestInit | undefined)?.method === 'DELETE'
         )
       ).toBe(true)
     })
@@ -493,7 +493,7 @@ describe('App action coverage', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Promote$/i }))
     await waitFor(() => {
       const promoteCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/v3/quick-actions/qa-1/promote') &&
+        String(url).includes('/api/quick-actions/qa-1/promote') &&
         (init as RequestInit | undefined)?.method === 'POST'
       )
       expect(promoteCall).toBeTruthy()
@@ -506,7 +506,7 @@ describe('App action coverage', () => {
 
     await waitFor(() => {
       const quickActionCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/v3/quick-actions') &&
+        String(url).includes('/api/quick-actions') &&
         !String(url).includes('/promote') &&
         (init as RequestInit | undefined)?.method === 'POST'
       )
@@ -522,7 +522,7 @@ describe('App action coverage', () => {
 
     await waitFor(() => {
       const previewCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/v3/import/prd/preview') && (init as RequestInit | undefined)?.method === 'POST'
+        String(url).includes('/api/import/prd/preview') && (init as RequestInit | undefined)?.method === 'POST'
       )
       expect(previewCall).toBeTruthy()
       const body = JSON.parse(String((previewCall?.[1] as RequestInit).body))
@@ -532,7 +532,7 @@ describe('App action coverage', () => {
     fireEvent.click(screen.getByRole('button', { name: /Commit to board/i }))
     await waitFor(() => {
       const commitCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/v3/import/prd/commit') && (init as RequestInit | undefined)?.method === 'POST'
+        String(url).includes('/api/import/prd/commit') && (init as RequestInit | undefined)?.method === 'POST'
       )
       expect(commitCall).toBeTruthy()
       const body = JSON.parse(String((commitCall?.[1] as RequestInit).body))

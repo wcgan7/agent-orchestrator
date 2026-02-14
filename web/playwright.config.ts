@@ -19,7 +19,7 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: `mkdir -p ${backendProjectDir} && PYTHONPATH=../src python -c "from feature_prd_runner.cli_v3 import main; import sys; raise SystemExit(main(sys.argv[1:]))" --project-dir ${backendProjectDir} server --host 127.0.0.1 --port ${backendPort}`,
+      command: `mkdir -p ${backendProjectDir} && PYTHONPATH=../src python -c "from agent_orchestrator.cli import main; import sys; raise SystemExit(main(sys.argv[1:]))" --project-dir ${backendProjectDir} server --host 127.0.0.1 --port ${backendPort}`,
       url: `http://127.0.0.1:${backendPort}/`,
       timeout: 120_000,
       reuseExistingServer: false,

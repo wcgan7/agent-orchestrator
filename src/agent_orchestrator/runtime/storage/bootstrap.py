@@ -11,7 +11,7 @@ except ImportError:  # pragma: no cover
     yaml = None
 
 
-V3_FILES = {
+STATE_FILES = {
     "tasks": "tasks.yaml",
     "runs": "runs.yaml",
     "review_cycles": "review_cycles.yaml",
@@ -39,34 +39,33 @@ def _schema_version(path: Path) -> int | None:
         return None
 
 
-def _needs_archive(base: Path, v3_root: Path) -> bool:
+def _needs_archive(base: Path) -> bool:
     if not base.exists():
         return False
-    if not v3_root.exists():
-        # Contract: if .prd_runner exists and is not v3, archive before fresh init.
+    if not (base / "config.yaml").exists():
         return True
-    return _schema_version(v3_root / "config.yaml") != 3
+    return _schema_version(base / "config.yaml") != 3
 
 
-def ensure_v3_state_root(project_dir: Path) -> Path:
-    base = project_dir / ".prd_runner"
-    v3_root = base / "v3"
+def ensure_state_root(project_dir: Path) -> Path:
+    base = project_dir / ".agent_orchestrator"
+    state_root = base
 
-    if _needs_archive(base, v3_root):
-        archive_target = project_dir / f".prd_runner_legacy_{_utc_stamp()}"
+    if _needs_archive(base):
+        archive_target = project_dir / f".agent_orchestrator_legacy_{_utc_stamp()}"
         base.rename(archive_target)
         base.mkdir(parents=True, exist_ok=True)
 
-    v3_root.mkdir(parents=True, exist_ok=True)
+    state_root.mkdir(parents=True, exist_ok=True)
 
-    for file_name in V3_FILES.values():
-        target = v3_root / file_name
+    for file_name in STATE_FILES.values():
+        target = state_root / file_name
         if file_name.endswith(".yaml") and not target.exists():
             target.write_text("version: 3\n", encoding="utf-8")
         if file_name.endswith(".jsonl") and not target.exists():
             target.touch()
 
-    config_repo = FileConfigRepository(v3_root / "config.yaml", v3_root / "config.lock")
+    config_repo = FileConfigRepository(state_root / "config.yaml", state_root / "config.lock")
     config = config_repo.load()
     config["schema_version"] = 3
     config.setdefault("pinned_projects", [])
@@ -75,4 +74,4 @@ def ensure_v3_state_root(project_dir: Path) -> Path:
     config.setdefault("project", {"commands": {}})
     config_repo.save(config)
 
-    return v3_root
+    return state_root

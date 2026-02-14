@@ -254,8 +254,8 @@ type CollaborationCommentItem = {
   parent_id?: string | null
 }
 
-const STORAGE_PROJECT = 'feature-prd-runner-v3-project'
-const STORAGE_ROUTE = 'feature-prd-runner-v3-route'
+const STORAGE_PROJECT = 'agent-orchestrator-project'
+const STORAGE_ROUTE = 'agent-orchestrator-route'
 const ADD_REPO_VALUE = '__add_new_repo__'
 const WS_RELOAD_CHANNELS = new Set(['tasks', 'queue', 'agents', 'review', 'quick_actions', 'notifications'])
 
@@ -1029,7 +1029,7 @@ export default function App() {
     setSettingsError('')
     setSettingsSuccess('')
     try {
-      const payload = await requestJson<Partial<SystemSettings>>(buildApiUrl('/api/v3/settings', projectDir))
+      const payload = await requestJson<Partial<SystemSettings>>(buildApiUrl('/api/settings', projectDir))
       applySettings(normalizeSettings(payload))
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unknown error'
@@ -1048,7 +1048,7 @@ export default function App() {
   useEffect(() => {
     const fetchModes = async () => {
       try {
-        const data = await requestJson<{ modes?: CollaborationMode[] }>(buildApiUrl('/api/v3/collaboration/modes', projectDir))
+        const data = await requestJson<{ modes?: CollaborationMode[] }>(buildApiUrl('/api/collaboration/modes', projectDir))
         const modes = (data.modes || []).map((mode) => ({
           mode: mode.mode,
           display_name: mode.display_name || humanizeLabel(mode.mode),
@@ -1073,7 +1073,7 @@ export default function App() {
     taskDetailRequestSeqRef.current = requestSeq
     setSelectedTaskDetailLoading(true)
     try {
-      const detail = await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/v3/tasks/${taskId}`, projectDir))
+      const detail = await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}`, projectDir))
       if (requestSeq !== taskDetailRequestSeqRef.current || selectedTaskIdRef.current !== taskId) {
         return
       }
@@ -1117,9 +1117,9 @@ export default function App() {
     setCollaborationError('')
     try {
       const [timelinePayload, feedbackPayload, commentsPayload] = await Promise.all([
-        requestJson<unknown>(buildApiUrl(`/api/v3/collaboration/timeline/${taskId}`, projectDir)),
-        requestJson<unknown>(buildApiUrl(`/api/v3/collaboration/feedback/${taskId}`, projectDir)),
-        requestJson<unknown>(buildApiUrl(`/api/v3/collaboration/comments/${taskId}`, projectDir)),
+        requestJson<unknown>(buildApiUrl(`/api/collaboration/timeline/${taskId}`, projectDir)),
+        requestJson<unknown>(buildApiUrl(`/api/collaboration/feedback/${taskId}`, projectDir)),
+        requestJson<unknown>(buildApiUrl(`/api/collaboration/comments/${taskId}`, projectDir)),
       ])
       if (requestSeq !== collaborationRequestSeqRef.current || selectedTaskIdRef.current !== taskId) {
         return
@@ -1165,7 +1165,7 @@ export default function App() {
       if (effectiveStatus) params.status = effectiveStatus
       if (taskExplorerType) params.task_type = taskExplorerType
       if (taskExplorerPriority) params.priority = taskExplorerPriority
-      const response = await requestJson<{ tasks: TaskRecord[] }>(buildApiUrl('/api/v3/tasks', projectDir, params))
+      const response = await requestJson<{ tasks: TaskRecord[] }>(buildApiUrl('/api/tasks', projectDir, params))
       const tasks = response.tasks || []
       const query = taskExplorerQuery.trim().toLowerCase()
       const filtered = query
@@ -1219,7 +1219,7 @@ export default function App() {
     setSelectedImportJobError('')
     setSelectedImportJobErrorAt('')
     try {
-      const payload = await requestJson<{ job: ImportJobRecord }>(buildApiUrl(`/api/v3/import/${jobId}`, projectDir))
+      const payload = await requestJson<{ job: ImportJobRecord }>(buildApiUrl(`/api/import/${jobId}`, projectDir))
       setSelectedImportJob(payload.job)
     } catch (err) {
       setSelectedImportJob(null)
@@ -1262,7 +1262,7 @@ export default function App() {
     setSelectedQuickActionError('')
     setSelectedQuickActionErrorAt('')
     try {
-      const payload = await requestJson<{ quick_action: QuickActionRecord }>(buildApiUrl(`/api/v3/quick-actions/${quickActionId}`, projectDir))
+      const payload = await requestJson<{ quick_action: QuickActionRecord }>(buildApiUrl(`/api/quick-actions/${quickActionId}`, projectDir))
       setSelectedQuickActionDetail(payload.quick_action)
     } catch (err) {
       setSelectedQuickActionDetail(null)
@@ -1288,12 +1288,12 @@ export default function App() {
     const refreshProjectDir = projectDirRef.current
     try {
       const [boardData, orchestratorData, reviewData, executionOrderData, phasesData, metricsData] = await Promise.all([
-        requestJson<BoardResponse>(buildApiUrl('/api/v3/tasks/board', refreshProjectDir)),
-        requestJson<OrchestratorStatus>(buildApiUrl('/api/v3/orchestrator/status', refreshProjectDir)),
-        requestJson<{ tasks: TaskRecord[] }>(buildApiUrl('/api/v3/review-queue', refreshProjectDir)),
-        requestJson<{ batches: string[][] }>(buildApiUrl('/api/v3/tasks/execution-order', refreshProjectDir)),
-        requestJson<unknown>(buildApiUrl('/api/v3/phases', refreshProjectDir)).catch(() => []),
-        requestJson<unknown>(buildApiUrl('/api/v3/metrics', refreshProjectDir)).catch(() => null),
+        requestJson<BoardResponse>(buildApiUrl('/api/tasks/board', refreshProjectDir)),
+        requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/status', refreshProjectDir)),
+        requestJson<{ tasks: TaskRecord[] }>(buildApiUrl('/api/review-queue', refreshProjectDir)),
+        requestJson<{ batches: string[][] }>(buildApiUrl('/api/tasks/execution-order', refreshProjectDir)),
+        requestJson<unknown>(buildApiUrl('/api/phases', refreshProjectDir)).catch(() => []),
+        requestJson<unknown>(buildApiUrl('/api/metrics', refreshProjectDir)).catch(() => null),
       ])
       if (refreshProjectDir !== projectDirRef.current) {
         return
@@ -1321,9 +1321,9 @@ export default function App() {
     const refreshProjectDir = projectDirRef.current
     try {
       const [agentData, presenceData, agentTypesData] = await Promise.all([
-        requestJson<{ agents: AgentRecord[] }>(buildApiUrl('/api/v3/agents', refreshProjectDir)),
-        requestJson<unknown>(buildApiUrl('/api/v3/collaboration/presence', refreshProjectDir)).catch(() => ({ users: [] })),
-        requestJson<unknown>(buildApiUrl('/api/v3/agents/types', refreshProjectDir)).catch(() => ({ types: [] })),
+        requestJson<{ agents: AgentRecord[] }>(buildApiUrl('/api/agents', refreshProjectDir)),
+        requestJson<unknown>(buildApiUrl('/api/collaboration/presence', refreshProjectDir)).catch(() => ({ users: [] })),
+        requestJson<unknown>(buildApiUrl('/api/agents/types', refreshProjectDir)).catch(() => ({ types: [] })),
       ])
       if (refreshProjectDir !== projectDirRef.current) {
         return
@@ -1342,7 +1342,7 @@ export default function App() {
   async function refreshQuickActionsSurface(): Promise<void> {
     const refreshProjectDir = projectDirRef.current
     try {
-      const payload = await requestJson<{ quick_actions: QuickActionRecord[] }>(buildApiUrl('/api/v3/quick-actions', refreshProjectDir))
+      const payload = await requestJson<{ quick_actions: QuickActionRecord[] }>(buildApiUrl('/api/quick-actions', refreshProjectDir))
       if (refreshProjectDir !== projectDirRef.current) {
         return
       }
@@ -1380,18 +1380,18 @@ export default function App() {
         metricsData,
         agentTypesData,
       ] = await Promise.all([
-        requestJson<BoardResponse>(buildApiUrl('/api/v3/tasks/board', projectDir)),
-        requestJson<OrchestratorStatus>(buildApiUrl('/api/v3/orchestrator/status', projectDir)),
-        requestJson<{ tasks: TaskRecord[] }>(buildApiUrl('/api/v3/review-queue', projectDir)),
-        requestJson<{ agents: AgentRecord[] }>(buildApiUrl('/api/v3/agents', projectDir)),
-        requestJson<{ projects: ProjectRef[] }>(buildApiUrl('/api/v3/projects', projectDir)),
-        requestJson<{ items: PinnedProjectRef[] }>(buildApiUrl('/api/v3/projects/pinned', projectDir)),
-        requestJson<{ quick_actions: QuickActionRecord[] }>(buildApiUrl('/api/v3/quick-actions', projectDir)),
-        requestJson<{ batches: string[][] }>(buildApiUrl('/api/v3/tasks/execution-order', projectDir)),
-        requestJson<unknown>(buildApiUrl('/api/v3/phases', projectDir)).catch(() => []),
-        requestJson<unknown>(buildApiUrl('/api/v3/collaboration/presence', projectDir)).catch(() => ({ users: [] })),
-        requestJson<unknown>(buildApiUrl('/api/v3/metrics', projectDir)).catch(() => null),
-        requestJson<unknown>(buildApiUrl('/api/v3/agents/types', projectDir)).catch(() => ({ types: [] })),
+        requestJson<BoardResponse>(buildApiUrl('/api/tasks/board', projectDir)),
+        requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/status', projectDir)),
+        requestJson<{ tasks: TaskRecord[] }>(buildApiUrl('/api/review-queue', projectDir)),
+        requestJson<{ agents: AgentRecord[] }>(buildApiUrl('/api/agents', projectDir)),
+        requestJson<{ projects: ProjectRef[] }>(buildApiUrl('/api/projects', projectDir)),
+        requestJson<{ items: PinnedProjectRef[] }>(buildApiUrl('/api/projects/pinned', projectDir)),
+        requestJson<{ quick_actions: QuickActionRecord[] }>(buildApiUrl('/api/quick-actions', projectDir)),
+        requestJson<{ batches: string[][] }>(buildApiUrl('/api/tasks/execution-order', projectDir)),
+        requestJson<unknown>(buildApiUrl('/api/phases', projectDir)).catch(() => []),
+        requestJson<unknown>(buildApiUrl('/api/collaboration/presence', projectDir)).catch(() => ({ users: [] })),
+        requestJson<unknown>(buildApiUrl('/api/metrics', projectDir)).catch(() => null),
+        requestJson<unknown>(buildApiUrl('/api/agents/types', projectDir)).catch(() => ({ types: [] })),
       ])
       if (requestSeq !== reloadAllSeqRef.current) {
         return
@@ -1583,7 +1583,7 @@ export default function App() {
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean)
-    await requestJson<{ task: TaskRecord }>(buildApiUrl('/api/v3/tasks', projectDir), {
+    await requestJson<{ task: TaskRecord }>(buildApiUrl('/api/tasks', projectDir), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1620,7 +1620,7 @@ export default function App() {
   async function previewImport(event: FormEvent): Promise<void> {
     event.preventDefault()
     if (!importText.trim()) return
-    const preview = await requestJson<{ job_id: string; preview: PrdPreview }>(buildApiUrl('/api/v3/import/prd/preview', projectDir), {
+    const preview = await requestJson<{ job_id: string; preview: PrdPreview }>(buildApiUrl('/api/import/prd/preview', projectDir), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ content: importText, default_priority: 'P2' }),
@@ -1633,7 +1633,7 @@ export default function App() {
 
   async function commitImport(): Promise<void> {
     if (!importJobId) return
-    const commitResponse = await requestJson<{ created_task_ids: string[] }>(buildApiUrl('/api/v3/import/prd/commit', projectDir), {
+    const commitResponse = await requestJson<{ created_task_ids: string[] }>(buildApiUrl('/api/import/prd/commit', projectDir), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ job_id: importJobId }),
@@ -1654,7 +1654,7 @@ export default function App() {
   async function submitQuickAction(event: FormEvent): Promise<void> {
     event.preventDefault()
     if (!quickPrompt.trim()) return
-    const resp = await requestJson<{ quick_action: QuickActionRecord }>(buildApiUrl('/api/v3/quick-actions', projectDir), {
+    const resp = await requestJson<{ quick_action: QuickActionRecord }>(buildApiUrl('/api/quick-actions', projectDir), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt: quickPrompt.trim() }),
@@ -1669,7 +1669,7 @@ export default function App() {
   }
 
   async function taskAction(taskId: string, action: 'run' | 'retry' | 'cancel'): Promise<void> {
-    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/v3/tasks/${taskId}/${action}`, projectDir), {
+    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/${action}`, projectDir), {
       method: 'POST',
     })
     await reloadAll()
@@ -1679,7 +1679,7 @@ export default function App() {
   }
 
   async function transitionTask(taskId: string): Promise<void> {
-    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/v3/tasks/${taskId}/transition`, projectDir), {
+    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/transition`, projectDir), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: selectedTaskTransition }),
@@ -1692,7 +1692,7 @@ export default function App() {
 
   async function addDependency(taskId: string): Promise<void> {
     if (!newDependencyId.trim()) return
-    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/v3/tasks/${taskId}/dependencies`, projectDir), {
+    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/dependencies`, projectDir), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ depends_on: newDependencyId.trim() }),
@@ -1705,7 +1705,7 @@ export default function App() {
   }
 
   async function removeDependency(taskId: string, depId: string): Promise<void> {
-    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/v3/tasks/${taskId}/dependencies/${depId}`, projectDir), {
+    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/dependencies/${depId}`, projectDir), {
       method: 'DELETE',
     })
     await reloadAll()
@@ -1719,7 +1719,7 @@ export default function App() {
     setDependencyActionMessage('')
     try {
       const result = await requestJson<{ edges?: Array<{ from: string; to: string; reason?: string }> }>(
-        buildApiUrl('/api/v3/tasks/analyze-dependencies', projectDir),
+        buildApiUrl('/api/tasks/analyze-dependencies', projectDir),
         { method: 'POST' },
       )
       const edgeCount = result.edges?.length || 0
@@ -1740,7 +1740,7 @@ export default function App() {
     setDependencyActionLoading(true)
     setDependencyActionMessage('')
     try {
-      await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/v3/tasks/${taskId}/reset-dep-analysis`, projectDir), {
+      await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/reset-dep-analysis`, projectDir), {
         method: 'POST',
       })
       setDependencyActionMessage('Reset inferred dependency analysis for selected task.')
@@ -1755,7 +1755,7 @@ export default function App() {
   }
 
   async function approveGate(taskId: string, gate?: string | null): Promise<void> {
-    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/v3/tasks/${taskId}/approve-gate`, projectDir), {
+    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/approve-gate`, projectDir), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ gate: gate || undefined }),
@@ -1770,7 +1770,7 @@ export default function App() {
     if (!feedbackSummary.trim()) return
     setCollaborationError('')
     try {
-      await requestJson<{ feedback: CollaborationFeedbackItem }>(buildApiUrl('/api/v3/collaboration/feedback', projectDir), {
+      await requestJson<{ feedback: CollaborationFeedbackItem }>(buildApiUrl('/api/collaboration/feedback', projectDir), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1795,7 +1795,7 @@ export default function App() {
   async function dismissFeedback(taskId: string, feedbackId: string): Promise<void> {
     setCollaborationError('')
     try {
-      await requestJson<{ feedback: CollaborationFeedbackItem }>(buildApiUrl(`/api/v3/collaboration/feedback/${feedbackId}/dismiss`, projectDir), {
+      await requestJson<{ feedback: CollaborationFeedbackItem }>(buildApiUrl(`/api/collaboration/feedback/${feedbackId}/dismiss`, projectDir), {
         method: 'POST',
       })
       await loadCollaboration(taskId)
@@ -1809,7 +1809,7 @@ export default function App() {
     if (!commentFilePath.trim() || !commentBody.trim()) return
     setCollaborationError('')
     try {
-      await requestJson<{ comment: CollaborationCommentItem }>(buildApiUrl('/api/v3/collaboration/comments', projectDir), {
+      await requestJson<{ comment: CollaborationCommentItem }>(buildApiUrl('/api/collaboration/comments', projectDir), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1830,7 +1830,7 @@ export default function App() {
   async function resolveComment(taskId: string, commentId: string): Promise<void> {
     setCollaborationError('')
     try {
-      await requestJson<{ comment: CollaborationCommentItem }>(buildApiUrl(`/api/v3/collaboration/comments/${commentId}/resolve`, projectDir), {
+      await requestJson<{ comment: CollaborationCommentItem }>(buildApiUrl(`/api/collaboration/comments/${commentId}/resolve`, projectDir), {
         method: 'POST',
       })
       await loadCollaboration(taskId)
@@ -1841,7 +1841,7 @@ export default function App() {
   }
 
   async function saveTaskEdits(taskId: string): Promise<void> {
-    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/v3/tasks/${taskId}`, projectDir), {
+    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}`, projectDir), {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1897,7 +1897,7 @@ export default function App() {
           commands: projectCommands,
         },
       }
-      const updated = await requestJson<Partial<SystemSettings>>(buildApiUrl('/api/v3/settings', projectDir), {
+      const updated = await requestJson<Partial<SystemSettings>>(buildApiUrl('/api/settings', projectDir), {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -1914,7 +1914,7 @@ export default function App() {
   }
 
   async function promoteQuickAction(quickActionId: string): Promise<void> {
-    await requestJson<{ task: TaskRecord; already_promoted: boolean }>(buildApiUrl(`/api/v3/quick-actions/${quickActionId}/promote`, projectDir), {
+    await requestJson<{ task: TaskRecord; already_promoted: boolean }>(buildApiUrl(`/api/quick-actions/${quickActionId}/promote`, projectDir), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ priority: 'P2' }),
@@ -1926,7 +1926,7 @@ export default function App() {
   }
 
   async function controlOrchestrator(action: 'pause' | 'resume' | 'drain' | 'stop'): Promise<void> {
-    await requestJson<OrchestratorStatus>(buildApiUrl('/api/v3/orchestrator/control', projectDir), {
+    await requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/control', projectDir), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action }),
@@ -1935,7 +1935,7 @@ export default function App() {
   }
 
   async function reviewAction(taskId: string, action: 'approve' | 'request-changes'): Promise<void> {
-    const endpoint = action === 'approve' ? `/api/v3/review/${taskId}/approve` : `/api/v3/review/${taskId}/request-changes`
+    const endpoint = action === 'approve' ? `/api/review/${taskId}/approve` : `/api/review/${taskId}/request-changes`
     await requestJson<{ task: TaskRecord }>(buildApiUrl(endpoint, projectDir), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1946,7 +1946,7 @@ export default function App() {
   }
 
   async function spawnAgent(): Promise<void> {
-    await requestJson<{ agent: AgentRecord }>(buildApiUrl('/api/v3/agents/spawn', projectDir), {
+    await requestJson<{ agent: AgentRecord }>(buildApiUrl('/api/agents/spawn', projectDir), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -1960,12 +1960,12 @@ export default function App() {
   }
 
   async function agentAction(agentId: string, action: 'pause' | 'resume' | 'terminate'): Promise<void> {
-    await requestJson<{ agent: AgentRecord }>(buildApiUrl(`/api/v3/agents/${agentId}/${action}`, projectDir), { method: 'POST' })
+    await requestJson<{ agent: AgentRecord }>(buildApiUrl(`/api/agents/${agentId}/${action}`, projectDir), { method: 'POST' })
     await reloadAll()
   }
 
   async function pinProjectPath(path: string, allowNonGitValue: boolean): Promise<void> {
-    const pinned = await requestJson<{ project: ProjectRef }>(buildApiUrl('/api/v3/projects/pinned', projectDir), {
+    const pinned = await requestJson<{ project: ProjectRef }>(buildApiUrl('/api/projects/pinned', projectDir), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ path, allow_non_git: allowNonGitValue }),
@@ -1975,7 +1975,7 @@ export default function App() {
   }
 
   async function unpinProject(projectId: string): Promise<void> {
-    await requestJson<{ removed: boolean }>(buildApiUrl(`/api/v3/projects/pinned/${projectId}`, projectDir), {
+    await requestJson<{ removed: boolean }>(buildApiUrl(`/api/projects/pinned/${projectId}`, projectDir), {
       method: 'DELETE',
     })
     await reloadAll()
@@ -2002,7 +2002,7 @@ export default function App() {
     setBrowseError('')
     try {
       const data = await requestJson<BrowseProjectsResponse>(
-        buildApiUrl('/api/v3/projects/browse', projectDir, nextPath ? { path: nextPath } : {})
+        buildApiUrl('/api/projects/browse', projectDir, nextPath ? { path: nextPath } : {})
       )
       setBrowsePath(data.path)
       setBrowseParentPath(data.parent)
@@ -2849,7 +2849,7 @@ export default function App() {
       <header className="topbar">
         <div>
           <p className="kicker">orchestrator-first</p>
-          <h1>Feature PRD Runner</h1>
+          <h1>Agent Orchestrator</h1>
         </div>
         <div className="topbar-actions">
           <select

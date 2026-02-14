@@ -7,26 +7,26 @@ from unittest.mock import patch
 
 import pytest
 
-from feature_prd_runner.v3.domain.models import Task
-from feature_prd_runner.v3.orchestrator.live_worker_adapter import (
+from agent_orchestrator.runtime.domain.models import Task
+from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
     LiveWorkerAdapter,
     _extract_json,
     build_step_prompt,
     detect_project_languages,
 )
-from feature_prd_runner.v3.orchestrator.worker_adapter import StepResult
-from feature_prd_runner.v3.storage.container import V3Container
-from feature_prd_runner.workers.config import WorkerProviderSpec
-from feature_prd_runner.workers.run import WorkerRunResult
+from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+from agent_orchestrator.runtime.storage.container import Container
+from agent_orchestrator.workers.config import WorkerProviderSpec
+from agent_orchestrator.workers.run import WorkerRunResult
 
 
 @pytest.fixture()
-def container(tmp_path: Path) -> V3Container:
-    return V3Container(tmp_path)
+def container(tmp_path: Path) -> Container:
+    return Container(tmp_path)
 
 
 @pytest.fixture()
-def adapter(container: V3Container) -> LiveWorkerAdapter:
+def adapter(container: Container) -> LiveWorkerAdapter:
     return LiveWorkerAdapter(container)
 
 
@@ -76,7 +76,7 @@ def test_error_when_no_worker_available(adapter: LiveWorkerAdapter) -> None:
     task = _make_task()
 
     with patch(
-        "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+        "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
         return_value=(False, "Executable not found in PATH: codex"),
     ):
         result = adapter.run_step(task=task, step="implement", attempt=1)
@@ -90,7 +90,7 @@ def test_error_when_worker_cannot_be_resolved(adapter: LiveWorkerAdapter) -> Non
     task = _make_task()
 
     with patch(
-        "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config",
+        "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config",
         side_effect=ValueError("No workers section in config"),
     ):
         result = adapter.run_step(task=task, step="implement", attempt=1)
@@ -109,18 +109,18 @@ def test_codex_success_maps_to_ok(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -140,18 +140,18 @@ def test_timeout_override_from_task_metadata(adapter: LiveWorkerAdapter) -> None
 
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ) as run_worker_mock,
     ):
@@ -172,18 +172,18 @@ def test_timeout_defaults_from_pipeline_template(adapter: LiveWorkerAdapter) -> 
 
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ) as run_worker_mock,
     ):
@@ -203,18 +203,18 @@ def test_codex_failure_maps_to_error(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -234,18 +234,18 @@ def test_codex_timeout_maps_to_error(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -265,18 +265,18 @@ def test_codex_no_heartbeat_maps_to_stalled_error(adapter: LiveWorkerAdapter) ->
 
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -299,18 +299,18 @@ def test_human_blocking_issues_map_to_human_blocked(adapter: LiveWorkerAdapter) 
 
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -333,18 +333,18 @@ def test_ollama_review_parses_findings(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_OLLAMA_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -368,18 +368,18 @@ def test_ollama_generate_tasks_parses_tasks(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_OLLAMA_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -402,18 +402,18 @@ def test_ollama_implement_extracts_summary(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_OLLAMA_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -504,18 +504,18 @@ def test_worker_exception_returns_error(adapter: LiveWorkerAdapter) -> None:
     """When run_worker raises, return error — don't silently succeed."""
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=RuntimeError("Codex crashed"),
         ),
     ):
@@ -536,18 +536,18 @@ def test_ollama_verify_pass(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_OLLAMA_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -563,18 +563,18 @@ def test_ollama_verify_fail(adapter: LiveWorkerAdapter) -> None:
 
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_OLLAMA_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             return_value=run_result,
         ),
     ):
@@ -603,7 +603,7 @@ def test_prompt_includes_guardrails(step: str) -> None:
     task = _make_task()
     prompt = build_step_prompt(task=task, step=step, attempt=1, is_codex=True)
     assert "Do NOT commit" in prompt
-    assert ".prd_runner/" in prompt
+    assert ".agent_orchestrator/" in prompt
     assert "suppress" in prompt.lower()
 
 
@@ -950,7 +950,7 @@ def test_commands_non_dict_language_entry_skipped() -> None:
     assert "### Go" not in prompt
 
 
-def test_run_step_reads_project_commands_from_config(container: V3Container, adapter: LiveWorkerAdapter) -> None:
+def test_run_step_reads_project_commands_from_config(container: Container, adapter: LiveWorkerAdapter) -> None:
     """run_step reads project.commands from config and passes them to the prompt."""
     # Write project commands to config
     cfg = container.config.load()
@@ -969,18 +969,18 @@ def test_run_step_reads_project_commands_from_config(container: V3Container, ada
 
     with (
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.get_workers_runtime_config"
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
             return_value=_CODEX_SPEC,
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.test_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
         ),
         patch(
-            "feature_prd_runner.v3.orchestrator.live_worker_adapter.run_worker",
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
             side_effect=_capture_run_worker,
         ),
     ):

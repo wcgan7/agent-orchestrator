@@ -1,6 +1,6 @@
 # Example Project
 
-Small Python module for validating the Feature PRD Runner.
+Small Python module for validating the Agent Orchestrator.
 
 ## Functions (to be implemented)
 

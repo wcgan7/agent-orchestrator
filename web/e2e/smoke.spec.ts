@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test'
 
 test.beforeEach(async ({ page }) => {
   await page.goto('/')
-  await expect(page.getByRole('heading', { name: 'Feature PRD Runner' })).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Agent Orchestrator' })).toBeVisible()
 })
 
 test('loads shell and core navigation', async ({ page }) => {

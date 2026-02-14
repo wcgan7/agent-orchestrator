@@ -1,14 +1,14 @@
-# Feature PRD Runner - Web Dashboard
+# Agent Orchestrator - Web Dashboard
 
 > **Status (2026-02-11):** Current frontend setup/development guide.
 > **Docs index:** [`../docs/README.md`](../docs/README.md)
 > **User guide:** [`../docs/USER_GUIDE.md`](../docs/USER_GUIDE.md)
 
-Modern web dashboard for monitoring and controlling Feature PRD Runner.
+Modern web dashboard for monitoring and controlling Agent Orchestrator.
 
 ## Homepage
 
-![Feature PRD Runner homepage](./public/homepage-screenshot.png)
+![Agent Orchestrator homepage](./public/homepage-screenshot.png)
 
 ## Setup
 
@@ -20,7 +20,7 @@ Modern web dashboard for monitoring and controlling Feature PRD Runner.
 For the backend, if you prefer `uv`, you can install the server extra with:
 
 ```bash
-uv pip install 'feature-prd-runner[server]'
+uv pip install 'agent-orchestrator[server]'
 ```
 
 ### Installation
@@ -115,7 +115,7 @@ npm run preview
 
 The frontend connects to the FastAPI backend:
 
-- REST API (`/api/v3/*`) for data fetching
+- REST API (`/api/*`) for data fetching
 - WebSocket (`/ws`) for real-time updates
 
 See `vite.config.ts` for proxy configuration.

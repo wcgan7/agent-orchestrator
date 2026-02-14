@@ -6,16 +6,16 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from feature_prd_runner.v3.domain.models import QuickActionRun
-from feature_prd_runner.v3.quick_actions.shortcuts import (
+from agent_orchestrator.runtime.domain.models import QuickActionRun
+from agent_orchestrator.runtime.quick_actions.shortcuts import (
     ShortcutMatch,
     ShortcutRule,
     load_shortcuts,
     match_prompt,
 )
-from feature_prd_runner.v3.quick_actions.executor import QuickActionExecutor
-from feature_prd_runner.v3.storage.container import V3Container
-from feature_prd_runner.v3.events.bus import EventBus
+from agent_orchestrator.runtime.quick_actions.executor import QuickActionExecutor
+from agent_orchestrator.runtime.storage.container import Container
+from agent_orchestrator.runtime.events.bus import EventBus
 
 
 # ---------------------------------------------------------------------------
@@ -94,7 +94,7 @@ def test_shortcut_auto_test_no_project_files(tmp_path: Path) -> None:
 
 
 def test_user_override_replaces_builtin(tmp_path: Path) -> None:
-    config_dir = tmp_path / ".prd_runner"
+    config_dir = tmp_path / ".agent_orchestrator"
     config_dir.mkdir(exist_ok=True)
     (config_dir / "quick_shortcuts.yaml").write_text(
         "- name: run_tests\n"
@@ -110,7 +110,7 @@ def test_user_override_replaces_builtin(tmp_path: Path) -> None:
 
 
 def test_user_addition_alongside_builtins(tmp_path: Path) -> None:
-    config_dir = tmp_path / ".prd_runner"
+    config_dir = tmp_path / ".agent_orchestrator"
     config_dir.mkdir(exist_ok=True)
     (config_dir / "quick_shortcuts.yaml").write_text(
         "- name: deploy\n"
@@ -129,8 +129,8 @@ def test_user_addition_alongside_builtins(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _make_executor(tmp_path: Path) -> tuple[QuickActionExecutor, V3Container, MagicMock]:
-    container = V3Container(tmp_path)
+def _make_executor(tmp_path: Path) -> tuple[QuickActionExecutor, Container, MagicMock]:
+    container = Container(tmp_path)
     mock_bus = MagicMock(spec=EventBus)
     executor = QuickActionExecutor(container, mock_bus)
     return executor, container, mock_bus
@@ -141,7 +141,7 @@ def test_executor_shortcut_success(tmp_path: Path) -> None:
     run = QuickActionRun(prompt="echo hello")
 
     # Add a custom shortcut that matches "echo hello"
-    config_dir = tmp_path / ".prd_runner"
+    config_dir = tmp_path / ".agent_orchestrator"
     config_dir.mkdir(exist_ok=True)
     (config_dir / "quick_shortcuts.yaml").write_text(
         "- name: echo_hello\n"
@@ -160,7 +160,7 @@ def test_executor_shortcut_success(tmp_path: Path) -> None:
 def test_executor_shortcut_failure(tmp_path: Path) -> None:
     executor, container, mock_bus = _make_executor(tmp_path)
 
-    config_dir = tmp_path / ".prd_runner"
+    config_dir = tmp_path / ".agent_orchestrator"
     config_dir.mkdir(exist_ok=True)
     (config_dir / "quick_shortcuts.yaml").write_text(
         "- name: fail_cmd\n"
@@ -179,7 +179,7 @@ def test_executor_shortcut_failure(tmp_path: Path) -> None:
 def test_executor_rejects_shortcut_with_shell_metacharacters(tmp_path: Path) -> None:
     executor, _, _ = _make_executor(tmp_path)
 
-    config_dir = tmp_path / ".prd_runner"
+    config_dir = tmp_path / ".agent_orchestrator"
     config_dir.mkdir(exist_ok=True)
     (config_dir / "quick_shortcuts.yaml").write_text(
         "- name: unsafe\n"
@@ -209,7 +209,7 @@ def test_executor_status_flow(tmp_path: Path) -> None:
     """Verify the executor upserts through queued → running → completed."""
     executor, container, mock_bus = _make_executor(tmp_path)
 
-    config_dir = tmp_path / ".prd_runner"
+    config_dir = tmp_path / ".agent_orchestrator"
     config_dir.mkdir(exist_ok=True)
     (config_dir / "quick_shortcuts.yaml").write_text(
         "- name: hello\n"
@@ -232,7 +232,7 @@ def test_executor_status_flow(tmp_path: Path) -> None:
 def test_executor_bus_events_emitted(tmp_path: Path) -> None:
     executor, container, mock_bus = _make_executor(tmp_path)
 
-    config_dir = tmp_path / ".prd_runner"
+    config_dir = tmp_path / ".agent_orchestrator"
     config_dir.mkdir(exist_ok=True)
     (config_dir / "quick_shortcuts.yaml").write_text(
         "- name: hw\n"

@@ -12,7 +12,7 @@ from ...collaboration.modes import should_gate
 from ...pipelines.registry import PipelineRegistry
 from ..domain.models import ReviewCycle, ReviewFinding, RunRecord, Task, now_iso
 from ..events.bus import EventBus
-from ..storage.container import V3Container
+from ..storage.container import Container
 from .worker_adapter import DefaultWorkerAdapter, StepResult, WorkerAdapter
 
 logger = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ class OrchestratorService:
 
     def __init__(
         self,
-        container: V3Container,
+        container: Container,
         bus: EventBus,
         *,
         worker_adapter: WorkerAdapter | None = None,
@@ -70,7 +70,7 @@ class OrchestratorService:
         if self._pool is None:
             cfg = self.container.config.load()
             max_workers = int(dict(cfg.get("orchestrator") or {}).get("concurrency", 2) or 2)
-            self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="v3-task")
+            self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="orchestrator-task")
         return self._pool
 
     def status(self) -> dict[str, Any]:
@@ -117,7 +117,7 @@ class OrchestratorService:
             self._recover_in_progress_tasks()
             self._cleanup_orphaned_worktrees()
             self._stop.clear()
-            self._thread = threading.Thread(target=self._loop, daemon=True, name="v3-orchestrator")
+            self._thread = threading.Thread(target=self._loop, daemon=True, name="orchestrator")
             self._thread.start()
 
     def shutdown(self, *, timeout: float = 10.0) -> None:
@@ -267,7 +267,7 @@ class OrchestratorService:
         if not git_dir.exists():
             return None
         self._ensure_branch()  # ensure run branch exists as merge target
-        worktree_dir = self.container.v3_root / "worktrees" / task.id
+        worktree_dir = self.container.state_root / "worktrees" / task.id
         branch = f"task-{task.id}"
         subprocess.run(
             ["git", "worktree", "add", str(worktree_dir), "-b", branch],
@@ -386,7 +386,7 @@ class OrchestratorService:
                 task.metadata["worktree_dir"] = saved_worktree_dir
 
     def _cleanup_orphaned_worktrees(self) -> None:
-        worktrees_dir = self.container.v3_root / "worktrees"
+        worktrees_dir = self.container.state_root / "worktrees"
         if not worktrees_dir.exists():
             return
         if not (self.container.project_dir / ".git").exists():
@@ -1023,7 +1023,7 @@ class OrchestratorService:
 
 
 def create_orchestrator(
-    container: V3Container,
+    container: Container,
     bus: EventBus,
     *,
     worker_adapter: WorkerAdapter | None = None,

@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "feature-prd-runner"
+name = "agent-orchestrator"
 version = "0.1.0"
 description = "Standalone helper module for long-running feature development driven by a PRD."
 readme = "README.md"
@@ -40,12 +40,12 @@ notifications = [
 [tool.mypy]
 python_version = "3.10"
 mypy_path = "src"
-packages = ["feature_prd_runner"]
+packages = ["agent_orchestrator"]
 strict = true
 ignore_missing_imports = true
 
 [project.scripts]
-feature-prd-runner = "feature_prd_runner.cli_v3:main"
+agent-orchestrator = "agent_orchestrator.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
