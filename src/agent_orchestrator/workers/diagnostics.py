@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import urllib.error
 import urllib.request
 from typing import Any
@@ -11,12 +12,15 @@ from .config import WorkerProviderSpec
 
 
 def test_worker(spec: WorkerProviderSpec) -> tuple[bool, str]:
-    if spec.type == "codex":
+    if spec.type in {"codex", "claude"}:
         from shutil import which
 
         if not spec.command:
             return False, "Missing command"
-        exe = spec.command.split()[0]
+        parts = shlex.split(spec.command)
+        if not parts:
+            return False, "Missing command executable"
+        exe = parts[0]
         if which(exe):
             return True, f"Found executable in PATH: {exe}"
         return False, f"Executable not found in PATH: {exe}"
@@ -53,4 +57,3 @@ def test_worker(spec: WorkerProviderSpec) -> tuple[bool, str]:
         return False, f"Ollama reachable, but no models found (missing pull?)"
 
     return False, f"Unsupported worker type: {spec.type}"
-

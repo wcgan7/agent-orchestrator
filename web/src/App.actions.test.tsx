@@ -68,8 +68,12 @@ function installFetchMock() {
     defaults: { quality_gate: { critical: 0, high: 0, medium: 0, low: 0 } },
     workers: {
       default: 'codex',
+      default_model: '',
       routing: {},
-      providers: { codex: { type: 'codex', command: 'codex' } },
+      providers: {
+        codex: { type: 'codex', command: 'codex' },
+        claude: { type: 'claude', command: 'claude -p', model: 'sonnet', reasoning_effort: 'medium' },
+      },
     },
     project: {
       commands: {},
@@ -108,6 +112,7 @@ function installFetchMock() {
     if (u.includes('/api/tasks/task-1/reset-dep-analysis') && method === 'POST') return jsonResponse({ task })
     if (u.includes('/api/tasks/task-1/approve-gate') && method === 'POST') return jsonResponse({ task })
     if (u.includes('/api/tasks/task-1') && method === 'PATCH') return jsonResponse({ task })
+    if (u.includes('/api/tasks') && !u.includes('/api/tasks/') && method === 'POST') return jsonResponse({ task })
 
     if (u.includes('/api/orchestrator/control') && method === 'POST') {
       return jsonResponse({ status: 'running', queue_depth: 1, in_progress: 0, draining: false, run_branch: null })
@@ -438,6 +443,11 @@ describe('App action coverage', () => {
     fireEvent.change(screen.getByLabelText(/Default role/i), { target: { value: 'reviewer' } })
     fireEvent.change(screen.getByLabelText(/Task type role map/i), { target: { value: '{"bug":"debugger"}' } })
     fireEvent.change(screen.getByLabelText(/Role provider overrides/i), { target: { value: '{"reviewer":"codex"}' } })
+    fireEvent.change(screen.getByLabelText(/Default worker model/i), { target: { value: 'gpt-5-codex' } })
+    fireEvent.change(screen.getByLabelText(/Claude provider name/i), { target: { value: 'claude-dev' } })
+    fireEvent.change(screen.getByLabelText(/Claude command/i), { target: { value: 'claude -p' } })
+    fireEvent.change(screen.getByLabelText(/Claude model/i), { target: { value: 'sonnet' } })
+    fireEvent.change(screen.getByLabelText(/Claude effort/i), { target: { value: 'high' } })
     fireEvent.change(screen.getByLabelText(/Worker routing map/i), { target: { value: '{"review":"codex"}' } })
     fireEvent.change(
       screen.getByLabelText(/Worker providers/i),
@@ -464,7 +474,14 @@ describe('App action coverage', () => {
       expect(body.orchestrator.max_review_attempts).toBe(5)
       expect(body.defaults.quality_gate).toEqual({ critical: 1, high: 2, medium: 3, low: 4 })
       expect(body.agent_routing.task_type_roles).toEqual({ bug: 'debugger' })
+      expect(body.workers.default_model).toBe('gpt-5-codex')
       expect(body.workers.routing).toEqual({ review: 'codex' })
+      expect(body.workers.providers['claude-dev']).toEqual({
+        type: 'claude',
+        command: 'claude -p',
+        model: 'sonnet',
+        reasoning_effort: 'high',
+      })
       expect(body.project.commands.python.test).toBe('pytest -n auto')
       expect(body.project.commands.python.lint).toBe('ruff check .')
     })
@@ -476,6 +493,32 @@ describe('App action coverage', () => {
           String(url).includes('/api/projects/pinned/pinned-1') && (init as RequestInit | undefined)?.method === 'DELETE'
         )
       ).toBe(true)
+    })
+  })
+
+  it('submits task with worker model override', async () => {
+    const mockedFetch = installFetchMock()
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: /^Create Work$/i }).length).toBeGreaterThan(0)
+    })
+
+    fireEvent.click(screen.getAllByRole('button', { name: /^Create Work$/i })[0])
+    fireEvent.change(screen.getByLabelText(/^Title$/i), { target: { value: 'Implement checkout' } })
+    fireEvent.change(screen.getByLabelText(/Worker model override/i), { target: { value: 'gpt-5-codex' } })
+    fireEvent.click(screen.getAllByRole('button', { name: /^Create Task$/i })[1])
+
+    await waitFor(() => {
+      const taskCreateCall = mockedFetch.mock.calls.find(([url, init]) =>
+        String(url).includes('/api/tasks') &&
+        !String(url).includes('/api/tasks/') &&
+        (init as RequestInit | undefined)?.method === 'POST'
+      )
+      expect(taskCreateCall).toBeTruthy()
+      const body = JSON.parse(String((taskCreateCall?.[1] as RequestInit).body))
+      expect(body.title).toBe('Implement checkout')
+      expect(body.worker_model).toBe('gpt-5-codex')
     })
   })
 

@@ -105,6 +105,7 @@ class Task:
     pending_gate: Optional[str] = None
 
     source: str = "manual"
+    worker_model: Optional[str] = None
 
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)

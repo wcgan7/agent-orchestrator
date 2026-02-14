@@ -28,6 +28,7 @@ class CreateTaskRequest(BaseModel):
     approval_mode: str = "human_review"
     hitl_mode: str = "autopilot"
     source: str = "manual"
+    worker_model: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -41,6 +42,7 @@ class UpdateTaskRequest(BaseModel):
     blocked_by: Optional[list[str]] = None
     approval_mode: Optional[str] = None
     hitl_mode: Optional[str] = None
+    worker_model: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
 
 
@@ -71,6 +73,11 @@ class PromoteQuickActionRequest(BaseModel):
     priority: str = "P2"
 
 
+class GenerateTasksRequest(BaseModel):
+    plan_override: Optional[str] = None
+    infer_deps: bool = True
+
+
 class ApproveGateRequest(BaseModel):
     gate: Optional[str] = None
 
@@ -94,6 +101,7 @@ class AgentRoutingSettingsRequest(BaseModel):
 class WorkerProviderSettingsRequest(BaseModel):
     type: str = "codex"
     command: Optional[str] = None
+    reasoning_effort: Optional[str] = None
     endpoint: Optional[str] = None
     model: Optional[str] = None
     temperature: Optional[float] = None
@@ -102,6 +110,7 @@ class WorkerProviderSettingsRequest(BaseModel):
 
 class WorkersSettingsRequest(BaseModel):
     default: str = "codex"
+    default_model: Optional[str] = None
     routing: dict[str, str] = Field(default_factory=dict)
     providers: dict[str, WorkerProviderSettingsRequest] = Field(default_factory=dict)
 
@@ -302,12 +311,20 @@ def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
         provider_type = str(raw_item.get("type") or ("codex" if name == "codex" else "")).strip().lower()
         if provider_type == "local":
             provider_type = "ollama"
-        if provider_type not in {"codex", "ollama"}:
+        if provider_type not in {"codex", "ollama", "claude"}:
             continue
 
-        if provider_type == "codex":
-            command = str(raw_item.get("command") or "codex").strip() or "codex"
-            providers[name] = {"type": "codex", "command": command}
+        if provider_type in {"codex", "claude"}:
+            default_command = "codex" if provider_type == "codex" else "claude -p"
+            command = str(raw_item.get("command") or default_command).strip() or default_command
+            provider: dict[str, Any] = {"type": provider_type, "command": command}
+            model = str(raw_item.get("model") or "").strip()
+            if model:
+                provider["model"] = model
+            reasoning_effort = str(raw_item.get("reasoning_effort") or "").strip().lower()
+            if reasoning_effort in {"low", "medium", "high"}:
+                provider["reasoning_effort"] = reasoning_effort
+            providers[name] = provider
             continue
 
         endpoint = str(raw_item.get("endpoint") or "").strip()
@@ -327,9 +344,18 @@ def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
 
     codex = providers.get("codex")
     codex_command = "codex"
+    codex_model = None
+    codex_reasoning = None
     if isinstance(codex, dict):
         codex_command = str(codex.get("command") or "codex").strip() or "codex"
+        codex_model = str(codex.get("model") or "").strip() or None
+        raw_reasoning = str(codex.get("reasoning_effort") or "").strip().lower()
+        codex_reasoning = raw_reasoning if raw_reasoning in {"low", "medium", "high"} else None
     providers["codex"] = {"type": "codex", "command": codex_command}
+    if codex_model:
+        providers["codex"]["model"] = codex_model
+    if codex_reasoning:
+        providers["codex"]["reasoning_effort"] = codex_reasoning
     return providers
 
 
@@ -341,6 +367,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     workers_cfg = dict(cfg.get("workers") or {})
     workers_providers = _normalize_workers_providers(workers_cfg.get("providers"))
     workers_default = str(workers_cfg.get("default") or "codex").strip() or "codex"
+    workers_default_model = str(workers_cfg.get("default_model") or "").strip()
     if workers_default not in workers_providers:
         workers_default = "codex"
     return {
@@ -364,6 +391,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
         },
         "workers": {
             "default": workers_default,
+            "default_model": workers_default_model,
             "routing": _normalize_str_map(workers_cfg.get("routing")),
             "providers": workers_providers,
         },
@@ -616,6 +644,7 @@ def create_router(
             approval_mode=body.approval_mode,
             hitl_mode=body.hitl_mode,
             source=body.source,
+            worker_model=(str(body.worker_model).strip() if body.worker_model else None),
             metadata=body.metadata,
         )
         if task.parent_id:
@@ -838,6 +867,52 @@ def create_router(
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.dep_analysis_reset", entity_id=task.id, payload={})
         return {"task": _task_payload(task)}
+
+    @router.get("/tasks/{task_id}/plan")
+    async def get_task_plan(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        plans = metadata.get("plans")
+        if not isinstance(plans, list):
+            plans = []
+        return {"plans": plans, "latest": plans[-1] if plans else None}
+
+    @router.post("/tasks/{task_id}/generate-tasks")
+    async def generate_tasks_from_plan(
+        task_id: str, body: GenerateTasksRequest, project_dir: Optional[str] = Query(None)
+    ) -> dict[str, Any]:
+        container, _, orchestrator = _ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+
+        # Determine plan text: explicit override or latest stored plan
+        plan_text = body.plan_override
+        if not plan_text:
+            plans = metadata.get("plans")
+            if not isinstance(plans, list) or not plans:
+                raise HTTPException(status_code=400, detail="No plan available. Run a plan step first or provide plan_override.")
+            plan_text = str(plans[-1].get("content") or "")
+            if not plan_text.strip():
+                raise HTTPException(status_code=400, detail="Latest plan has no content. Provide plan_override.")
+
+        try:
+            created_ids = orchestrator.generate_tasks_from_plan(task_id, plan_text, infer_deps=body.infer_deps)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        # Re-fetch parent to get updated children_ids
+        updated_task = container.tasks.get(task_id)
+        children = [_task_payload(container.tasks.get(cid)) for cid in created_ids if container.tasks.get(cid)]
+        return {
+            "task": _task_payload(updated_task) if updated_task else None,
+            "created_task_ids": created_ids,
+            "children": children,
+        }
 
     @router.post("/import/prd/preview")
     async def preview_import(body: PrdPreviewRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1324,6 +1399,12 @@ def create_router(
 
             if "default" in incoming_workers:
                 workers_cfg["default"] = str(incoming_workers.get("default") or "codex")
+            if "default_model" in incoming_workers:
+                default_model = str(incoming_workers.get("default_model") or "").strip()
+                if default_model:
+                    workers_cfg["default_model"] = default_model
+                else:
+                    workers_cfg.pop("default_model", None)
             if "routing" in incoming_workers:
                 workers_cfg["routing"] = dict(incoming_workers.get("routing") or {})
             if "providers" in incoming_workers:

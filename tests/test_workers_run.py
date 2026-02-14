@@ -118,3 +118,225 @@ def test_run_worker_extracts_human_blocking_issues_for_ollama(
 
     assert len(result.human_blocking_issues) == 1
     assert result.human_blocking_issues[0]["summary"] == "Need legal approval"
+
+
+def test_run_worker_codex_adds_model_and_reasoning_flags(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    progress_path = run_dir / "progress.json"
+    captured: dict[str, str] = {}
+
+    def _fake_codex_worker(**kwargs: object) -> dict[str, object]:
+        captured["command"] = str(kwargs.get("command") or "")
+        return {
+            "prompt_path": str(run_dir / "prompt.txt"),
+            "stdout_path": str(run_dir / "stdout.log"),
+            "stderr_path": str(run_dir / "stderr.log"),
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-01T00:00:10Z",
+            "runtime_seconds": 10,
+            "exit_code": 0,
+            "timed_out": False,
+            "no_heartbeat": False,
+        }
+
+    monkeypatch.setattr(
+        "agent_orchestrator.workers.run._run_codex_worker",
+        _fake_codex_worker,
+    )
+    monkeypatch.setattr(
+        "agent_orchestrator.workers.run._codex_supports_reasoning_effort",
+        lambda _exe: True,
+    )
+
+    run_worker(
+        spec=WorkerProviderSpec(
+            name="codex",
+            type="codex",
+            command="codex",
+            model="gpt-5-codex",
+            reasoning_effort="medium",
+        ),
+        prompt="test",
+        project_dir=project_dir,
+        run_dir=run_dir,
+        timeout_seconds=60,
+        heartbeat_seconds=30,
+        heartbeat_grace_seconds=15,
+        progress_path=progress_path,
+    )
+
+    assert "--model" in captured["command"]
+    assert "gpt-5-codex" in captured["command"]
+    assert "--reasoning-effort" in captured["command"]
+    assert "medium" in captured["command"]
+
+
+def test_run_worker_codex_skips_reasoning_flag_when_unsupported(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    progress_path = run_dir / "progress.json"
+    captured: dict[str, str] = {}
+
+    def _fake_codex_worker(**kwargs: object) -> dict[str, object]:
+        captured["command"] = str(kwargs.get("command") or "")
+        return {
+            "prompt_path": str(run_dir / "prompt.txt"),
+            "stdout_path": str(run_dir / "stdout.log"),
+            "stderr_path": str(run_dir / "stderr.log"),
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-01T00:00:10Z",
+            "runtime_seconds": 10,
+            "exit_code": 0,
+            "timed_out": False,
+            "no_heartbeat": False,
+        }
+
+    monkeypatch.setattr(
+        "agent_orchestrator.workers.run._run_codex_worker",
+        _fake_codex_worker,
+    )
+    monkeypatch.setattr(
+        "agent_orchestrator.workers.run._codex_supports_reasoning_effort",
+        lambda _exe: False,
+    )
+
+    run_worker(
+        spec=WorkerProviderSpec(
+            name="codex",
+            type="codex",
+            command="codex",
+            model="gpt-5-codex",
+            reasoning_effort="medium",
+        ),
+        prompt="test",
+        project_dir=project_dir,
+        run_dir=run_dir,
+        timeout_seconds=60,
+        heartbeat_seconds=30,
+        heartbeat_grace_seconds=15,
+        progress_path=progress_path,
+    )
+
+    assert "--model" in captured["command"]
+    assert "gpt-5-codex" in captured["command"]
+    assert "--reasoning-effort" not in captured["command"]
+
+
+def test_run_worker_claude_adds_model_and_effort_flags(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    progress_path = run_dir / "progress.json"
+    captured: dict[str, str] = {}
+
+    def _fake_worker(**kwargs: object) -> dict[str, object]:
+        captured["command"] = str(kwargs.get("command") or "")
+        return {
+            "prompt_path": str(run_dir / "prompt.txt"),
+            "stdout_path": str(run_dir / "stdout.log"),
+            "stderr_path": str(run_dir / "stderr.log"),
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-01T00:00:10Z",
+            "runtime_seconds": 10,
+            "exit_code": 0,
+            "timed_out": False,
+            "no_heartbeat": False,
+        }
+
+    monkeypatch.setattr(
+        "agent_orchestrator.workers.run._run_codex_worker",
+        _fake_worker,
+    )
+    monkeypatch.setattr(
+        "agent_orchestrator.workers.run._claude_supports_effort",
+        lambda _exe: True,
+    )
+
+    run_worker(
+        spec=WorkerProviderSpec(
+            name="claude",
+            type="claude",
+            command="claude -p",
+            model="sonnet",
+            reasoning_effort="medium",
+        ),
+        prompt="test",
+        project_dir=project_dir,
+        run_dir=run_dir,
+        timeout_seconds=60,
+        heartbeat_seconds=30,
+        heartbeat_grace_seconds=15,
+        progress_path=progress_path,
+    )
+
+    assert "--model" in captured["command"]
+    assert "sonnet" in captured["command"]
+    assert "--effort" in captured["command"]
+    assert "medium" in captured["command"]
+
+
+def test_run_worker_claude_skips_effort_when_unsupported(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    progress_path = run_dir / "progress.json"
+    captured: dict[str, str] = {}
+
+    def _fake_worker(**kwargs: object) -> dict[str, object]:
+        captured["command"] = str(kwargs.get("command") or "")
+        return {
+            "prompt_path": str(run_dir / "prompt.txt"),
+            "stdout_path": str(run_dir / "stdout.log"),
+            "stderr_path": str(run_dir / "stderr.log"),
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-01T00:00:10Z",
+            "runtime_seconds": 10,
+            "exit_code": 0,
+            "timed_out": False,
+            "no_heartbeat": False,
+        }
+
+    monkeypatch.setattr(
+        "agent_orchestrator.workers.run._run_codex_worker",
+        _fake_worker,
+    )
+    monkeypatch.setattr(
+        "agent_orchestrator.workers.run._claude_supports_effort",
+        lambda _exe: False,
+    )
+
+    run_worker(
+        spec=WorkerProviderSpec(
+            name="claude",
+            type="claude",
+            command="claude -p",
+            model="sonnet",
+            reasoning_effort="high",
+        ),
+        prompt="test",
+        project_dir=project_dir,
+        run_dir=run_dir,
+        timeout_seconds=60,
+        heartbeat_seconds=30,
+        heartbeat_grace_seconds=15,
+        progress_path=progress_path,
+    )
+
+    assert "--model" in captured["command"]
+    assert "sonnet" in captured["command"]
+    assert "--effort" not in captured["command"]

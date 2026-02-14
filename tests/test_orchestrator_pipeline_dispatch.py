@@ -558,3 +558,167 @@ def test_verify_only_runs_checks_no_changes(tmp_path: Path) -> None:
     assert steps == ["verify", "report"]
     assert "implement" not in steps
     assert "commit" not in steps
+
+
+# ---------------------------------------------------------------------------
+# 20. Plan output stored in metadata
+# ---------------------------------------------------------------------------
+
+
+def test_plan_output_stored_in_metadata(tmp_path: Path) -> None:
+    """Plan/analyze steps store their summary in task.metadata['plans']."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+
+    real_adapter = DefaultWorkerAdapter()
+
+    def spy_run_step(*, task, step, attempt):
+        if step in ("plan", "plan_impl", "analyze"):
+            return StepResult(status="ok", summary=f"Plan output for {step}")
+        return real_adapter.run_step(task=task, step=step, attempt=attempt)
+
+    adapter = MagicMock()
+    adapter.run_step = spy_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+
+    task = Task(
+        title="Plan storage test",
+        task_type="feature",
+        status="ready",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+
+    assert result.status == "done"
+    plans = result.metadata.get("plans")
+    assert isinstance(plans, list)
+    assert len(plans) == 2  # plan + plan_impl (feature pipeline)
+    assert plans[0]["step"] == "plan"
+    assert plans[0]["content"] == "Plan output for plan"
+    assert plans[1]["step"] == "plan_impl"
+    assert plans[1]["content"] == "Plan output for plan_impl"
+    assert "ts" in plans[0]
+
+
+# ---------------------------------------------------------------------------
+# 21. Generate tasks from plan
+# ---------------------------------------------------------------------------
+
+
+def test_generate_tasks_from_plan(tmp_path: Path) -> None:
+    """generate_tasks_from_plan() creates child tasks from plan text."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "generate_tasks":
+            assert task.metadata.get("plan_for_generation") == "Build auth system"
+            return StepResult(
+                status="ok",
+                generated_tasks=[
+                    {"title": "Add login", "task_type": "feature", "priority": "P1"},
+                    {"title": "Add session", "task_type": "feature", "priority": "P2"},
+                ],
+            )
+        return StepResult(status="ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+
+    task = Task(title="Auth epic", task_type="decompose", status="ready")
+    container.tasks.upsert(task)
+
+    created_ids = service.generate_tasks_from_plan(task.id, "Build auth system", infer_deps=False)
+
+    assert len(created_ids) == 2
+    parent = container.tasks.get(task.id)
+    assert set(parent.children_ids) == set(created_ids)
+
+    children = [container.tasks.get(cid) for cid in created_ids]
+    assert children[0].title == "Add login"
+    assert children[0].parent_id == task.id
+    assert children[1].title == "Add session"
+
+    # plan_for_generation should be cleaned up
+    assert "plan_for_generation" not in parent.metadata
+
+
+# ---------------------------------------------------------------------------
+# 22. Generate tasks from plan with dependencies
+# ---------------------------------------------------------------------------
+
+
+def test_generate_tasks_from_plan_with_deps(tmp_path: Path) -> None:
+    """depends_on indices are wired as blocked_by/blocks between children."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "generate_tasks":
+            return StepResult(
+                status="ok",
+                generated_tasks=[
+                    {"title": "Setup DB", "task_type": "feature", "priority": "P0"},
+                    {"title": "Add models", "task_type": "feature", "priority": "P1", "depends_on": [0]},
+                    {"title": "Add API", "task_type": "feature", "priority": "P1", "depends_on": [0, 1]},
+                ],
+            )
+        return StepResult(status="ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+
+    task = Task(title="Backend epic", task_type="decompose", status="ready")
+    container.tasks.upsert(task)
+
+    created_ids = service.generate_tasks_from_plan(task.id, "Backend plan", infer_deps=True)
+
+    assert len(created_ids) == 3
+    db_task = container.tasks.get(created_ids[0])
+    models_task = container.tasks.get(created_ids[1])
+    api_task = container.tasks.get(created_ids[2])
+
+    # Setup DB blocks Models and API
+    assert created_ids[1] in db_task.blocks
+    assert created_ids[2] in db_task.blocks
+
+    # Models depends on DB, blocks API
+    assert created_ids[0] in models_task.blocked_by
+    assert created_ids[2] in models_task.blocks
+
+    # API depends on both DB and Models
+    assert created_ids[0] in api_task.blocked_by
+    assert created_ids[1] in api_task.blocked_by
+
+
+# ---------------------------------------------------------------------------
+# 23. Generate tasks from plan fails when no plan
+# ---------------------------------------------------------------------------
+
+
+def test_generate_tasks_from_plan_no_task_fails(tmp_path: Path) -> None:
+    """generate_tasks_from_plan() raises ValueError for missing task."""
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus)
+
+    import pytest
+    with pytest.raises(ValueError, match="Task not found"):
+        service.generate_tasks_from_plan("nonexistent", "some plan")

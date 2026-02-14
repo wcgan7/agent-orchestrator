@@ -5,18 +5,19 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
 
-WorkerProviderType = Literal["codex", "ollama"]
+WorkerProviderType = Literal["codex", "ollama", "claude"]
 
 
 @dataclass(frozen=True)
 class WorkerProviderSpec:
     name: str
     type: WorkerProviderType
-    # codex
+    # codex / claude
     command: Optional[str] = None
+    model: Optional[str] = None
+    reasoning_effort: Optional[str] = None
     # ollama
     endpoint: Optional[str] = None
-    model: Optional[str] = None
     temperature: Optional[float] = None
     num_ctx: Optional[int] = None
 
@@ -28,6 +29,7 @@ class WorkersRuntimeConfig:
     default_worker: str
     routing: dict[str, str]
     providers: dict[str, WorkerProviderSpec]
+    default_model: Optional[str] = None
     cli_worker_override: Optional[str] = None
 
 
@@ -50,13 +52,24 @@ def get_workers_runtime_config(
     providers_cfg = _as_dict(workers_cfg.get("providers"))
 
     default_worker = str(workers_cfg.get("default") or "codex").strip() or "codex"
+    default_model = str(workers_cfg.get("default_model") or "").strip() or None
 
     providers: dict[str, WorkerProviderSpec] = {}
 
     # Always provide a built-in codex provider; config can override fields.
     codex_cfg = _as_dict(providers_cfg.get("codex"))
     codex_command = str(codex_cfg.get("command") or codex_command_fallback).strip()
-    providers["codex"] = WorkerProviderSpec(name="codex", type="codex", command=codex_command)
+    codex_model = str(codex_cfg.get("model") or "").strip() or None
+    codex_reasoning = str(codex_cfg.get("reasoning_effort") or "").strip().lower() or None
+    if codex_reasoning not in {None, "low", "medium", "high"}:
+        codex_reasoning = None
+    providers["codex"] = WorkerProviderSpec(
+        name="codex",
+        type="codex",
+        command=codex_command,
+        model=codex_model,
+        reasoning_effort=codex_reasoning,
+    )
 
     for name, raw in providers_cfg.items():
         if not isinstance(name, str) or not name.strip():
@@ -65,11 +78,22 @@ def get_workers_runtime_config(
         typ = str(item.get("type") or "").strip().lower()
         if typ == "local":
             typ = "ollama"
-        if typ not in {"codex", "ollama"}:
+        if typ not in {"codex", "ollama", "claude"}:
             continue
-        if typ == "codex":
-            cmd = str(item.get("command") or codex_command_fallback).strip()
-            providers[name] = WorkerProviderSpec(name=name, type="codex", command=cmd)
+        if typ in {"codex", "claude"}:
+            command_fallback = codex_command_fallback if typ == "codex" else "claude -p"
+            cmd = str(item.get("command") or command_fallback).strip()
+            model = str(item.get("model") or "").strip() or None
+            reasoning_effort = str(item.get("reasoning_effort") or "").strip().lower() or None
+            if reasoning_effort not in {None, "low", "medium", "high"}:
+                reasoning_effort = None
+            providers[name] = WorkerProviderSpec(
+                name=name,
+                type=typ,
+                command=cmd,
+                model=model,
+                reasoning_effort=reasoning_effort,
+            )
             continue
 
         endpoint = str(item.get("endpoint") or "").strip() or None
@@ -98,6 +122,7 @@ def get_workers_runtime_config(
         default_worker=default_worker,
         routing=routing_out,
         providers=providers,
+        default_model=default_model,
         cli_worker_override=cli_worker.strip() if isinstance(cli_worker, str) and cli_worker.strip() else None,
     )
 
@@ -118,7 +143,7 @@ def resolve_worker_for_step(runtime: WorkersRuntimeConfig, step: str) -> WorkerP
         raise ValueError(f"Unknown worker '{name}' (available: {available})")
     spec = runtime.providers[name]
 
-    if spec.type == "codex":
+    if spec.type in {"codex", "claude"}:
         if not spec.command:
             raise ValueError(f"Worker '{spec.name}' missing required 'command'")
         return spec

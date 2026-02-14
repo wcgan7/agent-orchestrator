@@ -509,13 +509,23 @@ class OrchestratorService:
 
         task.metadata.pop("human_blocking_issues", None)
 
+        # Store plan output in metadata for later retrieval
+        if step in ("plan", "plan_impl", "analyze") and result.summary:
+            if not isinstance(task.metadata, dict):
+                task.metadata = {}
+            plans = task.metadata.setdefault("plans", [])
+            plans.append({"step": step, "ts": now_iso(), "content": result.summary})
+            self.container.tasks.upsert(task)
+
         # Handle generate_tasks: create child tasks from step output
         if step == "generate_tasks" and result.generated_tasks:
             self._create_child_tasks(task, result.generated_tasks)
 
         return True
 
-    def _create_child_tasks(self, parent: Task, task_defs: list[dict[str, Any]]) -> list[str]:
+    def _create_child_tasks(
+        self, parent: Task, task_defs: list[dict[str, Any]], *, apply_deps: bool = False
+    ) -> list[str]:
         created_ids: list[str] = []
         for item in task_defs:
             if not isinstance(item, dict):
@@ -538,9 +548,67 @@ class OrchestratorService:
                 entity_id=child.id,
                 payload={"parent_id": parent.id, "source": "generate_tasks"},
             )
+
+        # Wire up depends_on indices between generated tasks
+        if apply_deps and created_ids:
+            for idx, item in enumerate(task_defs):
+                if not isinstance(item, dict) or idx >= len(created_ids):
+                    continue
+                deps = item.get("depends_on")
+                if not isinstance(deps, list):
+                    continue
+                child_id = created_ids[idx]
+                child_task = self.container.tasks.get(child_id)
+                if not child_task:
+                    continue
+                for dep_idx in deps:
+                    if not isinstance(dep_idx, int) or dep_idx < 0 or dep_idx >= len(created_ids):
+                        continue
+                    if dep_idx == idx:
+                        continue
+                    dep_id = created_ids[dep_idx]
+                    if dep_id not in child_task.blocked_by:
+                        child_task.blocked_by.append(dep_id)
+                    dep_task = self.container.tasks.get(dep_id)
+                    if dep_task and child_id not in dep_task.blocks:
+                        dep_task.blocks.append(child_id)
+                        self.container.tasks.upsert(dep_task)
+                self.container.tasks.upsert(child_task)
+
         if created_ids:
             parent.children_ids.extend(created_ids)
             self.container.tasks.upsert(parent)
+        return created_ids
+
+    def generate_tasks_from_plan(
+        self, task_id: str, plan_text: str, *, infer_deps: bool = True
+    ) -> list[str]:
+        """Generate child tasks from an explicit plan text.
+
+        This supports a two-phase workflow: run a plan step, review the output,
+        then explicitly trigger task generation from the plan.
+        """
+        task = self.container.tasks.get(task_id)
+        if not task:
+            raise ValueError(f"Task not found: {task_id}")
+
+        # Inject the plan so the worker prompt can include it
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        task.metadata["plan_for_generation"] = plan_text
+        self.container.tasks.upsert(task)
+
+        try:
+            result = self.worker_adapter.run_step(task=task, step="generate_tasks", attempt=1)
+            if result.status != "ok":
+                raise ValueError(f"generate_tasks step failed: {result.summary or result.status}")
+            task_defs = list(result.generated_tasks or [])
+            created_ids = self._create_child_tasks(task, task_defs, apply_deps=infer_deps)
+        finally:
+            # Clean up the injected plan context
+            task.metadata.pop("plan_for_generation", None)
+            self.container.tasks.upsert(task)
+
         return created_ids
 
     def _findings_from_result(self, task: Task, review_attempt: int) -> tuple[list[ReviewFinding], StepResult]:

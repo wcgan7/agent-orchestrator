@@ -38,6 +38,10 @@ Project scoping:
 - `POST /tasks/analyze-dependencies`
 - `POST /tasks/{task_id}/reset-dep-analysis`
 
+Task payload fields include optional `worker_model`:
+- On `POST /tasks`, set `worker_model` to pin a model for that task.
+- On `PATCH /tasks/{task_id}`, `worker_model` can be updated.
+
 ## PRD Import
 
 - `POST /import/prd/preview`
@@ -73,6 +77,16 @@ Top-level settings payload sections:
 - `defaults`
 - `workers`
 - `project`
+
+`workers.providers.<name>` fields:
+- codex: `type`, `command`, optional `model`, optional `reasoning_effort` (`low|medium|high`)
+- claude: `type`, `command` (default `claude -p`), optional `model`, optional `reasoning_effort` (`low|medium|high`, mapped to Claude CLI `--effort`)
+- ollama: `type`, `endpoint`, `model`, optional `temperature`, optional `num_ctx`
+
+`workers` also supports:
+- `default`: default worker provider name
+- `default_model`: optional default model for codex workers (used when task has no `worker_model`)
+- `routing`: per-step provider routing map
 
 ### Project Commands
 

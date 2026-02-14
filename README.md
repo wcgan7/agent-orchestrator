@@ -94,11 +94,36 @@ Primary configurable areas:
 - `workers` (default provider, routing, providers)
 - `project.commands` (per-language test, lint, typecheck, format commands)
 
+Claude provider example:
+```json
+{
+  "workers": {
+    "default": "claude",
+    "providers": {
+      "claude": {
+        "type": "claude",
+        "command": "claude -p",
+        "model": "sonnet",
+        "reasoning_effort": "medium"
+      }
+    }
+  }
+}
+```
+
+Notes:
+- Claude CLI must be installed and authenticated locally.
+- Reasoning effort flags are only passed when supported by your installed CLI version.
+
 ## Verify Locally
 
 ```bash
 # Backend tests
 pytest
+
+# Optional integration tests (skipped by default and in CI)
+AGENT_ORCHESTRATOR_RUN_INTEGRATION=1 pytest tests/test_integration_worker_model_fallback.py
+AGENT_ORCHESTRATOR_RUN_INTEGRATION=1 pytest tests/test_integration_claude_provider.py
 
 # Frontend checks
 npm --prefix web run check

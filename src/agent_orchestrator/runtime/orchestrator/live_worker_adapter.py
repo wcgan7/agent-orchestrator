@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -216,7 +217,9 @@ _CATEGORY_INSTRUCTIONS: dict[str, str] = {
         "Generate subtasks for the following task.\n"
         "Each subtask must be independently implementable. Include title,\n"
         "description, task_type, and priority. Cover the full scope without\n"
-        "overlap."
+        "overlap.\n"
+        "If a plan is provided, decompose it into ordered subtasks and specify\n"
+        "depends_on indices for tasks that must complete before others can start."
     ),
     "merge_resolution": "Resolve the merge conflicts in the following files. Both tasks' objectives must be fulfilled in the resolution.",
     "dependency_analysis": (
@@ -246,7 +249,7 @@ _CATEGORY_JSON_SCHEMAS: dict[str, str] = {
     "review": '{"findings": [{"severity": "critical|high|medium|low", "category": "string", "summary": "string", "file": "path", "line": 0, "suggested_fix": "string"}]}',
     "reporting": '{"summary": "detailed report text"}',
     "scanning": '{"findings": [{"severity": "critical|high|medium|low", "category": "string", "summary": "string", "file": "path"}]}',
-    "task_generation": '{"tasks": [{"title": "string", "description": "string", "task_type": "feature|bugfix|research", "priority": "P0|P1|P2|P3"}]}',
+    "task_generation": '{"tasks": [{"title": "string", "description": "string", "task_type": "feature|bugfix|research", "priority": "P0|P1|P2|P3", "depends_on": [0, 1]}]}',
     "merge_resolution": '{"status": "ok|error", "summary": "string"}',
     "dependency_analysis": '{"edges": [{"from": "task_id_first", "to": "task_id_depends", "reason": "why"}]}',
     "general": '{"status": "ok|error", "summary": "string"}',
@@ -340,6 +343,18 @@ def build_step_prompt(
                 line_ = finding.get("line", "")
                 loc = f" ({file_}:{line_})" if file_ else ""
                 parts.append(f"  - [{sev}] {summary}{loc}")
+
+    # Include plan context for task generation
+    plan_for_generation = task.metadata.get("plan_for_generation") if isinstance(task.metadata, dict) else None
+    if plan_for_generation and category == "task_generation":
+        parts.append("")
+        parts.append("## Plan to decompose into subtasks")
+        parts.append(str(plan_for_generation))
+        parts.append("")
+        parts.append(
+            "Decompose this plan into ordered subtasks. Use the depends_on field "
+            "(array of task indices) to specify execution order where needed."
+        )
 
     # Include merge conflict context for resolve_merge step
     if category == "merge_resolution" and isinstance(task.metadata, dict):
@@ -470,6 +485,14 @@ class LiveWorkerAdapter:
             cfg = self._container.config.load()
             runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex")
             spec = resolve_worker_for_step(runtime, step)
+            if spec.type in {"codex", "claude"}:
+                task_model = str(getattr(task, "worker_model", "") or "").strip()
+                if not task_model and isinstance(task.metadata, dict):
+                    task_model = str(task.metadata.get("worker_model") or "").strip()
+                default_model = str(getattr(runtime, "default_model", "") or "").strip() if spec.type == "codex" else ""
+                effective_model = task_model or default_model or str(spec.model or "").strip()
+                if effective_model and effective_model != (spec.model or ""):
+                    spec = replace(spec, model=effective_model)
             available, reason = test_worker(spec)
             if not available:
                 return StepResult(status="error", summary=f"Worker not available: {reason}")
@@ -487,7 +510,7 @@ class LiveWorkerAdapter:
         } or None
         prompt = build_step_prompt(
             task=task, step=step, attempt=attempt,
-            is_codex=(spec.type == "codex"), project_languages=langs or None,
+            is_codex=(spec.type in {"codex", "claude"}), project_languages=langs or None,
             project_commands=project_commands,
         )
 
