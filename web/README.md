@@ -115,7 +115,7 @@ npm run preview
 
 The frontend connects to the FastAPI backend:
 
-- REST API (`/api/v3/*`) for data fetching
+- REST API (`/api/*`) for data fetching
 - WebSocket (`/ws`) for real-time updates
 
 See `vite.config.ts` for proxy configuration.

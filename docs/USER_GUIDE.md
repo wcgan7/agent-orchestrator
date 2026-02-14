@@ -118,7 +118,7 @@ Workers receive generic verification instructions by default ("run the project's
 To give them exact commands, add a `project.commands` section keyed by language:
 
 ```yaml
-# .prd_runner/v3/config.yaml
+# .agent_orchestrator/config.yaml
 project:
   commands:
     python:
@@ -142,7 +142,7 @@ Rules:
 You can also set commands via the API:
 
 ```bash
-curl -X PATCH http://localhost:8080/api/v3/settings \
+curl -X PATCH http://localhost:8080/api/settings \
   -H 'Content-Type: application/json' \
   -d '{
     "project": {
@@ -159,7 +159,7 @@ curl -X PATCH http://localhost:8080/api/v3/settings \
 To remove a single command, set it to an empty string:
 
 ```bash
-curl -X PATCH http://localhost:8080/api/v3/settings \
+curl -X PATCH http://localhost:8080/api/settings \
   -H 'Content-Type: application/json' \
   -d '{"project": {"commands": {"python": {"lint": ""}}}}'
 ```
@@ -182,7 +182,7 @@ The UI subscribes and auto-refreshes mounted surfaces when relevant events arriv
 ## Data Storage and Backups
 
 State root:
-- `.prd_runner/v3/`
+- `.agent_orchestrator/`
 
 Key files:
 - `tasks.yaml`
@@ -194,7 +194,7 @@ Key files:
 - `config.yaml`
 
 If legacy state exists, it is archived automatically to:
-- `.prd_runner_legacy_<timestamp>/`
+- `.agent_orchestrator_legacy_<timestamp>/`
 
 ## Troubleshooting
 

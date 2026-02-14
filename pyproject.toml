@@ -40,12 +40,12 @@ notifications = [
 [tool.mypy]
 python_version = "3.10"
 mypy_path = "src"
-packages = ["feature_prd_runner"]
+packages = ["agent_orchestrator"]
 strict = true
 ignore_missing_imports = true
 
 [project.scripts]
-agent-orchestrator = "feature_prd_runner.cli_v3:main"
+agent-orchestrator = "agent_orchestrator.cli:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

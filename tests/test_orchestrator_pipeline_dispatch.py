@@ -3,20 +3,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from feature_prd_runner.v3.domain.models import Task
-from feature_prd_runner.v3.events import EventBus
-from feature_prd_runner.v3.orchestrator import OrchestratorService
-from feature_prd_runner.v3.storage.container import V3Container
+from agent_orchestrator.runtime.domain.models import Task
+from agent_orchestrator.runtime.events import EventBus
+from agent_orchestrator.runtime.orchestrator import OrchestratorService
+from agent_orchestrator.runtime.storage.container import Container
 
 
-def _service(tmp_path: Path) -> tuple[V3Container, OrchestratorService, EventBus]:
-    container = V3Container(tmp_path)
+def _service(tmp_path: Path) -> tuple[Container, OrchestratorService, EventBus]:
+    container = Container(tmp_path)
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus)
     return container, service, bus
 
 
-def _step_names(container: V3Container, task_id: str) -> list[str]:
+def _step_names(container: Container, task_id: str) -> list[str]:
     """Return the step names recorded in the run for the given task."""
     runs = container.runs.list()
     for run in runs:
@@ -276,7 +276,7 @@ def test_review_findings_passed_to_implement_fix(tmp_path: Path) -> None:
     task.metadata['review_findings'] before implement_fix runs."""
     from unittest.mock import MagicMock
 
-    from feature_prd_runner.v3.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
 
     captured_metadata: list[dict] = []
     real_adapter = DefaultWorkerAdapter()
@@ -290,7 +290,7 @@ def test_review_findings_passed_to_implement_fix(tmp_path: Path) -> None:
     adapter = MagicMock()
     adapter.run_step = spy_run_step
 
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus, worker_adapter=adapter)
 

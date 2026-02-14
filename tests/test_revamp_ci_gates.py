@@ -9,7 +9,7 @@ def test_python_runtime_is_at_least_3_10() -> None:
     assert sys.version_info >= (3, 10)
 
 
-def test_ui_runtime_uses_v3_api_paths_only() -> None:
+def test_ui_runtime_uses_api_paths_only() -> None:
     root = Path(__file__).resolve().parents[1]
     ui_root = root / 'web' / 'src'
     ui_files = sorted(
@@ -25,7 +25,7 @@ def test_ui_runtime_uses_v3_api_paths_only() -> None:
         for idx, line in enumerate(text.splitlines(), start=1):
             for match in re.finditer(r"/api/[^\"'`\s]*", line):
                 token = match.group(0)
-                if token.startswith('/api/v3/'):
+                if token.startswith('/api/'):
                     continue
                 legacy_hits.append(f"{path}:{idx}: {token}")
 

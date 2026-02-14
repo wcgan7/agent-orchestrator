@@ -7,17 +7,17 @@ from pathlib import Path
 from typing import Optional
 
 from .server import create_app
-from .v3.events import EventBus
-from .v3.orchestrator import OrchestratorService
-from .v3.storage import V3Container
+from .runtime.events import EventBus
+from .runtime.orchestrator import OrchestratorService
+from .runtime.storage import Container
 
 
 def _resolve_project_dir(project_dir: Optional[str]) -> Path:
     return Path(project_dir).expanduser().resolve() if project_dir else Path.cwd().resolve()
 
 
-def _ctx(project_dir: Optional[str]) -> tuple[V3Container, OrchestratorService]:
-    container = V3Container(_resolve_project_dir(project_dir))
+def _ctx(project_dir: Optional[str]) -> tuple[Container, OrchestratorService]:
+    container = Container(_resolve_project_dir(project_dir))
     bus = EventBus(container.events, container.project_id)
     orchestrator = OrchestratorService(container, bus)
     return container, orchestrator
@@ -63,7 +63,7 @@ def _project_unpin(args: argparse.Namespace) -> int:
 
 def _task_create(args: argparse.Namespace) -> int:
     container, _ = _ctx(args.project_dir)
-    from .v3.domain.models import Task
+    from .runtime.domain.models import Task
 
     task = Task(
         title=args.title,
@@ -99,8 +99,8 @@ def _task_run(args: argparse.Namespace) -> int:
 
 def _quick_action(args: argparse.Namespace) -> int:
     container, orchestrator = _ctx(args.project_dir)
-    from .v3.domain.models import QuickActionRun
-    from .v3.quick_actions.executor import QuickActionExecutor
+    from .runtime.domain.models import QuickActionRun
+    from .runtime.quick_actions.executor import QuickActionExecutor
 
     bus = EventBus(container.events, container.project_id)
     run = QuickActionRun(prompt=args.prompt)
@@ -140,11 +140,11 @@ def _server(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description='Agent Orchestrator v3 CLI (UI-first minimal)')
+    parser = argparse.ArgumentParser(description='Agent Orchestrator CLI (UI-first minimal)')
     parser.add_argument('--project-dir', default=None, help='Target project directory (default: current working directory)')
     subparsers = parser.add_subparsers(dest='command', required=True)
 
-    server = subparsers.add_parser('server', help='Start the v3 web server')
+    server = subparsers.add_parser('server', help='Start the web server')
     server.add_argument('--host', default='127.0.0.1')
     server.add_argument('--port', default=8080, type=int)
     server.add_argument('--reload', action='store_true')

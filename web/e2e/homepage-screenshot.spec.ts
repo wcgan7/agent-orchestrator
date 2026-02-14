@@ -9,7 +9,7 @@ async function createTask(
   description: string,
   priority: 'P0' | 'P1' | 'P2' | 'P3' = 'P2',
 ): Promise<string> {
-  const response = await request.post('/api/v3/tasks', {
+  const response = await request.post('/api/tasks', {
     data: {
       title,
       description,
@@ -31,7 +31,7 @@ async function transitionTask(
   taskId: string,
   status: BoardStage,
 ): Promise<void> {
-  const response = await request.post(`/api/v3/tasks/${taskId}/transition`, {
+  const response = await request.post(`/api/tasks/${taskId}/transition`, {
     data: { status },
   })
   expect(response.ok()).toBeTruthy()

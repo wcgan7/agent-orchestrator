@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 import threading
 
-from feature_prd_runner.v3.events.ws import V3WebSocketHub
+from agent_orchestrator.runtime.events.ws import WebSocketHub
 
 
 def test_publish_sync_from_background_thread_uses_attached_loop() -> None:
     async def _run() -> None:
-        hub = V3WebSocketHub()
+        hub = WebSocketHub()
         received: list[dict[str, object]] = []
         done = asyncio.Event()
 

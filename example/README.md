@@ -27,4 +27,4 @@ agent-orchestrator --project-dir ./example/project task create "Smoke test examp
 agent-orchestrator --project-dir ./example/project task list
 ```
 
-After running flows, inspect `.prd_runner/v3/` inside `example/project/` for state and events.
+After running flows, inspect `.agent_orchestrator/` inside `example/project/` for state and events.

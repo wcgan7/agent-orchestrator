@@ -8,8 +8,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from feature_prd_runner.utils import _now_iso
-from feature_prd_runner.worker import _run_codex_worker
+from agent_orchestrator.utils import _now_iso
+from agent_orchestrator.worker import _run_codex_worker
 
 
 def test_worker_uses_output_as_heartbeat(tmp_path: Path) -> None:

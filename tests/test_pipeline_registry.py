@@ -1,7 +1,7 @@
 """Tests for pipeline templates and registry."""
 
 import pytest
-from feature_prd_runner.pipelines.registry import (
+from agent_orchestrator.pipelines.registry import (
     BUILTIN_TEMPLATES,
     PipelineRegistry,
     PipelineTemplate,

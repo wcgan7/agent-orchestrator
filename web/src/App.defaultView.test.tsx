@@ -38,22 +38,22 @@ describe('App default route', () => {
 
     global.fetch = vi.fn().mockImplementation((url) => {
       const u = String(url)
-      if (u.includes('/api/v3/tasks/board')) {
+      if (u.includes('/api/tasks/board')) {
         return Promise.resolve({ ok: true, json: async () => ({ columns: { backlog: [], ready: [], in_progress: [], in_review: [], blocked: [], done: [] } }) })
       }
-      if (u.includes('/api/v3/tasks') && !u.includes('/api/v3/tasks/')) {
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
         return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
       }
-      if (u.includes('/api/v3/orchestrator/status')) {
+      if (u.includes('/api/orchestrator/status')) {
         return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
       }
-      if (u.includes('/api/v3/review-queue')) {
+      if (u.includes('/api/review-queue')) {
         return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
       }
-      if (u.includes('/api/v3/agents')) {
+      if (u.includes('/api/agents')) {
         return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
       }
-      if (u.includes('/api/v3/projects')) {
+      if (u.includes('/api/projects')) {
         return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
       }
       return Promise.resolve({ ok: true, json: async () => ({}) })
@@ -89,8 +89,8 @@ describe('App default route', () => {
     render(<App />)
 
     await waitFor(() => {
-      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/v3/metrics'))).toBe(true)
-      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/v3/agents/types'))).toBe(true)
+      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/metrics'))).toBe(true)
+      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/agents/types'))).toBe(true)
     })
   })
 
@@ -114,13 +114,13 @@ describe('App default route', () => {
 
     await waitFor(() => {
       const taskCreateCall = mockedFetch.mock.calls.find(([url, init]) => {
-        return String(url).includes('/api/v3/tasks') && (init as RequestInit | undefined)?.method === 'POST'
+        return String(url).includes('/api/tasks') && (init as RequestInit | undefined)?.method === 'POST'
       })
       expect(taskCreateCall).toBeTruthy()
     })
 
     const taskCreateCall = mockedFetch.mock.calls.find(([url, init]) => {
-      return String(url).includes('/api/v3/tasks') && (init as RequestInit | undefined)?.method === 'POST'
+      return String(url).includes('/api/tasks') && (init as RequestInit | undefined)?.method === 'POST'
     })
     expect(taskCreateCall).toBeTruthy()
 
@@ -143,8 +143,8 @@ describe('App default route', () => {
 
     await waitFor(() => {
       const blockedTasksCall = mockedFetch.mock.calls.find(([url, init]) => {
-        return String(url).includes('/api/v3/tasks') &&
-          !String(url).includes('/api/v3/tasks/') &&
+        return String(url).includes('/api/tasks') &&
+          !String(url).includes('/api/tasks/') &&
           String(url).includes('status=blocked') &&
           ((init as RequestInit | undefined)?.method || 'GET') === 'GET'
       })
@@ -156,10 +156,10 @@ describe('App default route', () => {
     const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
     mockedFetch.mockImplementation((url) => {
       const u = String(url)
-      if (u.includes('/api/v3/tasks/board')) {
+      if (u.includes('/api/tasks/board')) {
         return Promise.resolve({ ok: true, json: async () => ({ columns: { backlog: [], ready: [], in_progress: [], in_review: [], blocked: [], done: [] } }) })
       }
-      if (u.includes('/api/v3/tasks') && !u.includes('/api/v3/tasks/')) {
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
         return Promise.resolve({
           ok: true,
           json: async () => ({
@@ -172,16 +172,16 @@ describe('App default route', () => {
           }),
         })
       }
-      if (u.includes('/api/v3/orchestrator/status')) {
+      if (u.includes('/api/orchestrator/status')) {
         return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
       }
-      if (u.includes('/api/v3/review-queue')) {
+      if (u.includes('/api/review-queue')) {
         return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
       }
-      if (u.includes('/api/v3/agents')) {
+      if (u.includes('/api/agents')) {
         return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
       }
-      if (u.includes('/api/v3/projects')) {
+      if (u.includes('/api/projects')) {
         return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
       }
       return Promise.resolve({ ok: true, json: async () => ({}) })
@@ -206,7 +206,7 @@ describe('App default route', () => {
     const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
     mockedFetch.mockImplementation((url, init) => {
       const u = String(url)
-      if (u.includes('/api/v3/tasks/board')) {
+      if (u.includes('/api/tasks/board')) {
         return Promise.resolve({
           ok: true,
           json: async () => ({
@@ -221,7 +221,7 @@ describe('App default route', () => {
           }),
         })
       }
-      if (u.includes('/api/v3/tasks/task-1')) {
+      if (u.includes('/api/tasks/task-1')) {
         return Promise.resolve({
           ok: true,
           json: async () => ({
@@ -229,38 +229,38 @@ describe('App default route', () => {
           }),
         })
       }
-      if (u.includes('/api/v3/tasks') && !u.includes('/api/v3/tasks/')) {
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
         return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
       }
-      if (u.includes('/api/v3/collaboration/timeline/task-1')) {
+      if (u.includes('/api/collaboration/timeline/task-1')) {
         return Promise.resolve({ ok: true, json: async () => ({ events: [] }) })
       }
-      if (u.includes('/api/v3/collaboration/feedback/task-1')) {
+      if (u.includes('/api/collaboration/feedback/task-1')) {
         return Promise.resolve({ ok: true, json: async () => ({ feedback: [] }) })
       }
-      if (u.includes('/api/v3/collaboration/comments/task-1')) {
+      if (u.includes('/api/collaboration/comments/task-1')) {
         return Promise.resolve({ ok: true, json: async () => ({ comments: [] }) })
       }
-      if (u.includes('/api/v3/collaboration/feedback') && (init as RequestInit | undefined)?.method === 'POST') {
+      if (u.includes('/api/collaboration/feedback') && (init as RequestInit | undefined)?.method === 'POST') {
         return Promise.resolve({ ok: true, json: async () => ({ feedback: { id: 'fb-1' } }) })
       }
       if (
-        u.includes('/api/v3/collaboration/comments') &&
+        u.includes('/api/collaboration/comments') &&
         !u.includes('/resolve') &&
         (init as RequestInit | undefined)?.method === 'POST'
       ) {
         return Promise.resolve({ ok: true, json: async () => ({ comment: { id: 'cm-1' } }) })
       }
-      if (u.includes('/api/v3/orchestrator/status')) {
+      if (u.includes('/api/orchestrator/status')) {
         return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
       }
-      if (u.includes('/api/v3/review-queue')) {
+      if (u.includes('/api/review-queue')) {
         return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
       }
-      if (u.includes('/api/v3/agents')) {
+      if (u.includes('/api/agents')) {
         return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
       }
-      if (u.includes('/api/v3/projects')) {
+      if (u.includes('/api/projects')) {
         return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
       }
       return Promise.resolve({ ok: true, json: async () => ({}) })
@@ -269,9 +269,9 @@ describe('App default route', () => {
     render(<App />)
 
     await waitFor(() => {
-      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/v3/collaboration/timeline/task-1'))).toBe(true)
-      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/v3/collaboration/feedback/task-1'))).toBe(true)
-      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/v3/collaboration/comments/task-1'))).toBe(true)
+      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/collaboration/timeline/task-1'))).toBe(true)
+      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/collaboration/feedback/task-1'))).toBe(true)
+      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/collaboration/comments/task-1'))).toBe(true)
     })
 
     fireEvent.change(screen.getByLabelText(/Summary/i), { target: { value: 'Please tighten validation.' } })
@@ -279,7 +279,7 @@ describe('App default route', () => {
 
     await waitFor(() => {
       const feedbackCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/v3/collaboration/feedback') &&
+        String(url).includes('/api/collaboration/feedback') &&
         (init as RequestInit | undefined)?.method === 'POST'
       )
       expect(feedbackCall).toBeTruthy()
@@ -291,7 +291,7 @@ describe('App default route', () => {
 
     await waitFor(() => {
       const commentCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/v3/collaboration/comments') &&
+        String(url).includes('/api/collaboration/comments') &&
         !String(url).includes('/resolve') &&
         (init as RequestInit | undefined)?.method === 'POST'
       )
@@ -337,7 +337,7 @@ describe('App default route', () => {
     render(<App />)
 
     const boardCallCount = () =>
-      mockedFetch.mock.calls.filter(([url]) => String(url).includes('/api/v3/tasks/board')).length
+      mockedFetch.mock.calls.filter(([url]) => String(url).includes('/api/tasks/board')).length
 
     await waitFor(() => {
       expect(boardCallCount()).toBeGreaterThan(0)
@@ -358,11 +358,11 @@ describe('App default route', () => {
 
   it('ignores websocket events from other projects', async () => {
     const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
-    localStorage.setItem('agent-orchestrator-v3-project', '/tmp/repo-alpha')
+    localStorage.setItem('agent-orchestrator-project', '/tmp/repo-alpha')
     render(<App />)
 
     const boardCallCount = () =>
-      mockedFetch.mock.calls.filter(([url]) => String(url).includes('/api/v3/tasks/board')).length
+      mockedFetch.mock.calls.filter(([url]) => String(url).includes('/api/tasks/board')).length
 
     await waitFor(() => {
       expect(boardCallCount()).toBeGreaterThan(0)
@@ -385,7 +385,7 @@ describe('App default route', () => {
     const rootCallCount = () =>
       mockedFetch.mock.calls.filter(([url]) => String(url).startsWith('/?') || String(url) === '/').length
     const boardCallCount = () =>
-      mockedFetch.mock.calls.filter(([url]) => String(url).includes('/api/v3/tasks/board')).length
+      mockedFetch.mock.calls.filter(([url]) => String(url).includes('/api/tasks/board')).length
 
     await waitFor(() => {
       expect(rootCallCount()).toBeGreaterThan(0)

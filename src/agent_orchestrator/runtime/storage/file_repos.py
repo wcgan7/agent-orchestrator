@@ -27,7 +27,7 @@ except ImportError:  # pragma: no cover
 
 def _require_yaml() -> None:
     if yaml is None:
-        raise RuntimeError("PyYAML is required for v3 file repositories")
+        raise RuntimeError("PyYAML is required for runtime file repositories")
 
 
 T = TypeVar("T")

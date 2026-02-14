@@ -27,22 +27,22 @@ function installFetchMock() {
   const projects = [{ id: 'p1', path: '/tmp/repo', source: 'pinned', is_git: true }]
   global.fetch = vi.fn().mockImplementation((url, init) => {
     const u = String(url)
-    if (u.includes('/api/v3/tasks/board')) {
+    if (u.includes('/api/tasks/board')) {
       return Promise.resolve({ ok: true, json: async () => ({ columns: { backlog: [], ready: [], in_progress: [], in_review: [], blocked: [], done: [] } }) })
     }
-    if (u.includes('/api/v3/orchestrator/status')) {
+    if (u.includes('/api/orchestrator/status')) {
       return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 1, in_progress: 0, draining: false, run_branch: null }) })
     }
-    if (u.includes('/api/v3/review-queue')) {
+    if (u.includes('/api/review-queue')) {
       return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
     }
-    if (u.includes('/api/v3/agents') && (init?.method || 'GET') === 'GET') {
+    if (u.includes('/api/agents') && (init?.method || 'GET') === 'GET') {
       return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
     }
-    if (u.includes('/api/v3/projects') && (init?.method || 'GET') === 'GET') {
+    if (u.includes('/api/projects') && (init?.method || 'GET') === 'GET') {
       return Promise.resolve({ ok: true, json: async () => ({ projects }) })
     }
-    if (u.includes('/api/v3/projects/pinned') && (init?.method || 'GET') === 'POST') {
+    if (u.includes('/api/projects/pinned') && (init?.method || 'GET') === 'POST') {
       projects.push({ id: 'p2', path: '/abs/path', source: 'pinned', is_git: false })
       return Promise.resolve({ ok: true, json: async () => ({ project: { id: 'p2', path: '/abs/path', source: 'pinned', is_git: false } }) })
     }
@@ -92,7 +92,7 @@ describe('App navigation and settings flows', () => {
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/v3/projects/pinned'),
+        expect.stringContaining('/api/projects/pinned'),
         expect.objectContaining({ method: 'POST' }),
       )
     })

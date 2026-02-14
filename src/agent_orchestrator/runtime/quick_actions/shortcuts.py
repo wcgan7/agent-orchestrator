@@ -134,7 +134,7 @@ def load_shortcuts(project_dir: Path) -> list[ShortcutRule]:
     """Load built-in shortcuts, then merge user overrides from config."""
     rules = list(_BUILTINS)
 
-    user_file = project_dir / ".prd_runner" / "quick_shortcuts.yaml"
+    user_file = project_dir / ".agent_orchestrator" / "quick_shortcuts.yaml"
     if user_file.exists():
         try:
             import yaml

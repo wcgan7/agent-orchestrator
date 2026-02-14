@@ -1,6 +1,6 @@
 """Tests for the collaboration package — HITL modes."""
 
-from feature_prd_runner.collaboration.modes import (
+from agent_orchestrator.collaboration.modes import (
     HITLMode,
     MODE_CONFIGS,
     get_mode_config,

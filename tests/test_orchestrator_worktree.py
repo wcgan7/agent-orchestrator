@@ -7,12 +7,12 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from feature_prd_runner.v3.domain.models import Task
-from feature_prd_runner.v3.events import EventBus
-from feature_prd_runner.v3.orchestrator import OrchestratorService
-from feature_prd_runner.v3.orchestrator.live_worker_adapter import build_step_prompt
-from feature_prd_runner.v3.orchestrator.worker_adapter import StepResult
-from feature_prd_runner.v3.storage.container import V3Container
+from agent_orchestrator.runtime.domain.models import Task
+from agent_orchestrator.runtime.events import EventBus
+from agent_orchestrator.runtime.orchestrator import OrchestratorService
+from agent_orchestrator.runtime.orchestrator.live_worker_adapter import build_step_prompt
+from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+from agent_orchestrator.runtime.storage.container import Container
 
 
 def _git_init(path: Path) -> None:
@@ -31,10 +31,10 @@ def _service(
     adapter: object | None = None,
     concurrency: int = 4,
     git: bool = True,
-) -> tuple[V3Container, OrchestratorService, EventBus]:
+) -> tuple[Container, OrchestratorService, EventBus]:
     if git:
         _git_init(tmp_path)
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
     cfg = container.config.load()
     cfg["orchestrator"] = {"concurrency": concurrency, "auto_deps": False}
     container.config.save(cfg)
@@ -347,10 +347,10 @@ def test_no_worktree_without_git(tmp_path: Path) -> None:
 def test_orphaned_worktree_cleanup(tmp_path: Path) -> None:
     """Leftover worktree dirs from previous runs are cleaned up on startup."""
     _git_init(tmp_path)
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
 
     # Simulate orphaned worktree by creating one via git
-    orphan_dir = container.v3_root / "worktrees" / "orphan-task"
+    orphan_dir = container.state_root / "worktrees" / "orphan-task"
     subprocess.run(
         ["git", "worktree", "add", str(orphan_dir), "-b", "task-orphan-task"],
         cwd=tmp_path,
@@ -460,7 +460,7 @@ def test_blocked_task_metadata_cleaned(tmp_path: Path) -> None:
     assert "worktree_dir" not in result.metadata
 
     # Worktree directory should not exist
-    worktree_dir = container.v3_root / "worktrees" / task.id
+    worktree_dir = container.state_root / "worktrees" / task.id
     assert not worktree_dir.exists()
 
     # Task branch should be cleaned up
@@ -480,7 +480,7 @@ def test_worktree_creation_failure_falls_back(tmp_path: Path) -> None:
     """If git worktree add fails (e.g., branch already exists), the task
     should still attempt to run without a worktree rather than crash."""
     _git_init(tmp_path)
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
 
     # Pre-create the branch so worktree add will fail
     task = Task(

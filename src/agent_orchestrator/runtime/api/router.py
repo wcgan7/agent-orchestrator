@@ -13,7 +13,7 @@ from ...pipelines.registry import PipelineRegistry
 from ..domain.models import AgentRecord, QuickActionRun, Task, now_iso
 from ..events.bus import EventBus
 from ..orchestrator.service import OrchestratorService
-from ..storage.container import V3Container
+from ..storage.container import Container
 
 
 class CreateTaskRequest(BaseModel):
@@ -398,7 +398,7 @@ def _execution_batches(tasks: list[Task]) -> list[list[str]]:
     return batches
 
 
-def _has_unresolved_blockers(container: V3Container, task: Task) -> Optional[str]:
+def _has_unresolved_blockers(container: Container, task: Task) -> Optional[str]:
     for dep_id in task.blocked_by:
         dep = container.tasks.get(dep_id)
         if dep is None or dep.status not in {"done", "cancelled"}:
@@ -423,44 +423,44 @@ def _parse_prd_into_tasks(content: str, default_priority: str) -> list[dict[str,
     return tasks
 
 
-def create_v3_router(
+def create_router(
     resolve_container: Any,
     resolve_orchestrator: Any,
     job_store: dict[str, dict[str, Any]],
 ) -> APIRouter:
-    router = APIRouter(prefix="/api/v3", tags=["v3"])
+    router = APIRouter(prefix="/api", tags=["api"])
 
-    def _ctx(project_dir: Optional[str]) -> tuple[V3Container, EventBus, OrchestratorService]:
-        container: V3Container = resolve_container(project_dir)
+    def _ctx(project_dir: Optional[str]) -> tuple[Container, EventBus, OrchestratorService]:
+        container: Container = resolve_container(project_dir)
         bus = EventBus(container.events, container.project_id)
         orchestrator: OrchestratorService = resolve_orchestrator(project_dir)
         return container, bus, orchestrator
 
-    def _load_feedback_records(container: V3Container) -> list[dict[str, Any]]:
+    def _load_feedback_records(container: Container) -> list[dict[str, Any]]:
         cfg = container.config.load()
         raw = cfg.get("collaboration_feedback")
         if not isinstance(raw, list):
             return []
         return [item for item in raw if isinstance(item, dict)]
 
-    def _save_feedback_records(container: V3Container, items: list[dict[str, Any]]) -> None:
+    def _save_feedback_records(container: Container, items: list[dict[str, Any]]) -> None:
         cfg = container.config.load()
         cfg["collaboration_feedback"] = items
         container.config.save(cfg)
 
-    def _load_comment_records(container: V3Container) -> list[dict[str, Any]]:
+    def _load_comment_records(container: Container) -> list[dict[str, Any]]:
         cfg = container.config.load()
         raw = cfg.get("collaboration_comments")
         if not isinstance(raw, list):
             return []
         return [item for item in raw if isinstance(item, dict)]
 
-    def _save_comment_records(container: V3Container, items: list[dict[str, Any]]) -> None:
+    def _save_comment_records(container: Container, items: list[dict[str, Any]]) -> None:
         cfg = container.config.load()
         cfg["collaboration_comments"] = items
         container.config.save(cfg)
 
-    def _load_import_jobs(container: V3Container) -> dict[str, dict[str, Any]]:
+    def _load_import_jobs(container: Container) -> dict[str, dict[str, Any]]:
         cfg = container.config.load()
         raw = cfg.get("import_jobs")
         jobs: dict[str, dict[str, Any]] = {}
@@ -480,12 +480,12 @@ def create_v3_router(
                         jobs[job_id] = dict(value)
         return _pruned_import_jobs(jobs)
 
-    def _save_import_jobs(container: V3Container, jobs: dict[str, dict[str, Any]]) -> None:
+    def _save_import_jobs(container: Container, jobs: dict[str, dict[str, Any]]) -> None:
         cfg = container.config.load()
         cfg["import_jobs"] = list(_pruned_import_jobs(jobs).values())
         container.config.save(cfg)
 
-    def _upsert_import_job(container: V3Container, job: dict[str, Any]) -> None:
+    def _upsert_import_job(container: Container, job: dict[str, Any]) -> None:
         jobs = _load_import_jobs(container)
         job_id = str(job.get("id") or "").strip()
         if not job_id:
@@ -493,7 +493,7 @@ def create_v3_router(
         jobs[job_id] = job
         _save_import_jobs(container, jobs)
 
-    def _fetch_import_job(container: V3Container, job_id: str) -> Optional[dict[str, Any]]:
+    def _fetch_import_job(container: Container, job_id: str) -> Optional[dict[str, Any]]:
         jobs = _load_import_jobs(container)
         _save_import_jobs(container, jobs)
         return jobs.get(job_id)
@@ -894,7 +894,7 @@ def create_v3_router(
         _prune_in_memory_jobs()
         job = job_store.get(job_id)
         if not job:
-            container: V3Container = resolve_container(project_dir)
+            container: Container = resolve_container(project_dir)
             job = _fetch_import_job(container, job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Import job not found")

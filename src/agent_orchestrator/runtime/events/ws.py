@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import WebSocket
 
 
-V3_CHANNELS = {
+CHANNELS = {
     "tasks",
     "queue",
     "agents",
@@ -27,7 +27,7 @@ class _WsClient:
     project_ids: set[str] = field(default_factory=set)
 
 
-class V3WebSocketHub:
+class WebSocketHub:
     def __init__(self) -> None:
         self._clients: dict[int, _WsClient] = {}
         self._counter = 0
@@ -46,7 +46,7 @@ class V3WebSocketHub:
         cid = id(websocket)
         self._clients[cid] = client
         try:
-            await websocket.send_text(json.dumps({"channel": "system", "type": "connected", "payload": {"channels": sorted(V3_CHANNELS)}}))
+            await websocket.send_text(json.dumps({"channel": "system", "type": "connected", "payload": {"channels": sorted(CHANNELS)}}))
             while True:
                 raw = await websocket.receive_text()
                 message = json.loads(raw)
@@ -61,7 +61,7 @@ class V3WebSocketHub:
                 if single_project_id:
                     project_ids.add(single_project_id)
                 if action == "subscribe":
-                    client.channels |= channels & V3_CHANNELS
+                    client.channels |= channels & CHANNELS
                     client.project_ids |= project_ids
                     await websocket.send_text(
                         json.dumps(
@@ -129,4 +129,4 @@ class V3WebSocketHub:
             pass
 
 
-hub = V3WebSocketHub()
+hub = WebSocketHub()

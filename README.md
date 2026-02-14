@@ -71,7 +71,7 @@ Frontend URL:
 - End-to-end usage guide: `docs/USER_GUIDE.md`
 
 API base path:
-- `/api/v3`
+- `/api`
 
 WebSocket endpoint:
 - `/ws`
@@ -79,13 +79,13 @@ WebSocket endpoint:
 ## Configuration and Runtime Data
 
 Runtime state is stored in the selected project directory:
-- `.prd_runner/v3/tasks.yaml`
-- `.prd_runner/v3/runs.yaml`
-- `.prd_runner/v3/review_cycles.yaml`
-- `.prd_runner/v3/agents.yaml`
-- `.prd_runner/v3/quick_actions.yaml`
-- `.prd_runner/v3/events.jsonl`
-- `.prd_runner/v3/config.yaml`
+- `.agent_orchestrator/tasks.yaml`
+- `.agent_orchestrator/runs.yaml`
+- `.agent_orchestrator/review_cycles.yaml`
+- `.agent_orchestrator/agents.yaml`
+- `.agent_orchestrator/quick_actions.yaml`
+- `.agent_orchestrator/events.jsonl`
+- `.agent_orchestrator/config.yaml`
 
 Primary configurable areas:
 - `orchestrator` (concurrency, auto deps, review attempts)

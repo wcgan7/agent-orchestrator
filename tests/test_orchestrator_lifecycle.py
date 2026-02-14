@@ -4,33 +4,33 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from feature_prd_runner.server.api import create_app
-from feature_prd_runner.v3.domain.models import RunRecord, Task, now_iso
-from feature_prd_runner.v3.events.bus import EventBus
-from feature_prd_runner.v3.orchestrator.service import OrchestratorService
-from feature_prd_runner.v3.orchestrator.worker_adapter import DefaultWorkerAdapter
-from feature_prd_runner.v3.storage.container import V3Container
+from agent_orchestrator.server.api import create_app
+from agent_orchestrator.runtime.domain.models import RunRecord, Task, now_iso
+from agent_orchestrator.runtime.events.bus import EventBus
+from agent_orchestrator.runtime.orchestrator.service import OrchestratorService
+from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter
+from agent_orchestrator.runtime.storage.container import Container
 
 
 def test_app_shutdown_stops_orchestrators(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     orchestrator: OrchestratorService | None = None
     with TestClient(app) as client:
-        response = client.get("/api/v3/orchestrator/status")
+        response = client.get("/api/orchestrator/status")
         assert response.status_code == 200
-        values = list(app.state.v3_orchestrators.values())
+        values = list(app.state.orchestrators.values())
         assert values
         orchestrator = values[0]
         assert orchestrator._thread is not None
         assert orchestrator._thread.is_alive()
 
     assert orchestrator is not None
-    assert app.state.v3_orchestrators == {}
+    assert app.state.orchestrators == {}
     assert orchestrator._thread is None
 
 
 def test_in_progress_tasks_recover_on_worker_start(tmp_path: Path) -> None:
-    container = V3Container(tmp_path)
+    container = Container(tmp_path)
     bus = EventBus(container.events, container.project_id)
 
     task = Task(
