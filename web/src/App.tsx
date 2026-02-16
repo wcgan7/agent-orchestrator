@@ -147,8 +147,16 @@ type LogAccumState = {
   stderrOffset: number
   stdoutBackfillOffset: number
   stderrBackfillOffset: number
-  stdout: string
-  stderr: string
+  stdoutRaw: string
+  stderrRaw: string
+  stdoutRendered: string
+  stderrRendered: string
+  stdoutParsedLines: number
+  stderrParsedLines: number
+  stdoutStreamEvents: number
+  stderrStreamEvents: number
+  stdoutHasTextDelta: boolean
+  stderrHasTextDelta: boolean
   phase: LogAccumPhase
   stdoutTailStart: number
   stderrTailStart: number
@@ -323,8 +331,16 @@ function createEmptyLogAccum(taskId = ''): LogAccumState {
     stderrOffset: 0,
     stdoutBackfillOffset: 0,
     stderrBackfillOffset: 0,
-    stdout: '',
-    stderr: '',
+    stdoutRaw: '',
+    stderrRaw: '',
+    stdoutRendered: '',
+    stderrRendered: '',
+    stdoutParsedLines: 0,
+    stderrParsedLines: 0,
+    stdoutStreamEvents: 0,
+    stderrStreamEvents: 0,
+    stdoutHasTextDelta: false,
+    stderrHasTextDelta: false,
     phase: 'init',
     stdoutTailStart: 0,
     stderrTailStart: 0,
@@ -992,31 +1008,64 @@ function summarizePlanDiff(nextText: string, prevText: string): { added: number;
   return { added, removed, preview }
 }
 
-function looksLikeJson(s: string): boolean {
-  const c = s[0]
-  return c === '{' || c === '[' || c === '"' || s.includes('":') || s.includes('_json_delta') || s.includes('session_id')
-}
-
-function renderStructuredStdout(raw: string): {
+type StructuredStdoutChunk = {
   text: string
   hasContent: boolean
   structured: boolean
   parsedLines: number
   streamEvents: number
-} {
+  hasTextDelta: boolean
+}
+
+function coerceMessageText(value: unknown): string {
+  if (value == null) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (typeof item === 'string') return item
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return ''
+        const rec = item as Record<string, unknown>
+        if (typeof rec.text === 'string') return rec.text
+        if (typeof rec.content === 'string') return rec.content
+        return ''
+      })
+      .filter((item) => item.length > 0)
+      .join('\n')
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const rec = value as Record<string, unknown>
+    if (typeof rec.text === 'string') return rec.text
+    if (typeof rec.content === 'string') return rec.content
+  }
+  return ''
+}
+
+function renderStructuredStdoutChunk(raw: string, prevHasTextDelta = false): StructuredStdoutChunk {
   const input = String(raw || '')
   if (!input.trim()) {
-    return { text: '', hasContent: false, structured: false, parsedLines: 0, streamEvents: 0 }
+    return { text: '', hasContent: false, structured: false, parsedLines: 0, streamEvents: 0, hasTextDelta: prevHasTextDelta }
   }
   const lines = input.split('\n')
-  let parsedCount = 0
+  let parsedLines = 0
   let streamEvents = 0
-  const deltaParts: string[] = []
-  const toolNames: string[] = []
-  const toolErrors: string[] = []
-  const plainLines: string[] = []
-  let assistantMessage = ''
-  let resultMessage = ''
+  let hasTextDelta = prevHasTextDelta
+  let lastAssistantText = ''
+  const parts: string[] = []
+  const pushText = (text: string): void => {
+    if (!text) return
+    parts.push(text)
+  }
+  const pushLine = (line: string): void => {
+    if (!line.trim()) return
+    if (parts.length > 0 && !parts[parts.length - 1].endsWith('\n')) {
+      parts.push('\n')
+    }
+    parts.push(line.trimEnd())
+    parts.push('\n')
+  }
+
   for (const line of lines) {
     const trimmed = line.trim()
     if (!trimmed) continue
@@ -1024,36 +1073,62 @@ function renderStructuredStdout(raw: string): {
     try {
       obj = JSON.parse(trimmed)
     } catch {
-      if (!looksLikeJson(trimmed)) plainLines.push(trimmed)
       continue
     }
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
-      if (!looksLikeJson(trimmed)) plainLines.push(trimmed)
       continue
     }
-    parsedCount += 1
+    parsedLines += 1
     const record = obj as Record<string, unknown>
     const type = String(record.type || '')
+    const emittedToolErrors = new Set<string>()
+    const emitToolError = (rawError: string): void => {
+      const toolError = rawError.trim()
+      if (!toolError || emittedToolErrors.has(toolError)) return
+      emittedToolErrors.add(toolError)
+      pushLine(`Tool error: ${toolError}`)
+    }
+
+    const topLevelToolError = coerceMessageText(record.tool_use_result).trim()
+    if (topLevelToolError) {
+      emitToolError(topLevelToolError)
+    }
+
+    if (type === 'tool_use_result') {
+      const toolResultError = coerceMessageText(record.result ?? record.content ?? record.message).trim()
+      if (toolResultError) {
+        emitToolError(toolResultError)
+      }
+      continue
+    }
+
     if (type === 'assistant') {
+      // Save but don't emit yet — assistant records duplicate text already
+      // captured by stream_event text_deltas.  With --include-partial-messages
+      // there can be many partial assistant snapshots that each repeat a
+      // growing prefix.  We keep only the last one as a fallback for logs
+      // that lack stream_events entirely.
       const message = record.message
       if (message && typeof message === 'object' && !Array.isArray(message)) {
         const content = (message as Record<string, unknown>).content
         if (Array.isArray(content)) {
-          const text = content
-            .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
-            .filter((item) => String(item.type || '') === 'text')
-            .map((item) => String(item.text || ''))
-            .join('')
-            .trim()
-          if (text) assistantMessage = text
+          const texts: string[] = []
+          for (const item of content) {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+            const ci = item as Record<string, unknown>
+            if (String(ci.type || '') !== 'text') continue
+            const text = coerceMessageText(ci.text)
+            if (text) texts.push(text)
+          }
+          if (texts.length > 0) lastAssistantText = texts.join('')
         }
       }
       continue
     }
     if (type === 'result') {
-      const result = record.result
-      if (typeof result === 'string' && result.trim()) {
-        resultMessage = result.trim()
+      const resultText = coerceMessageText(record.result).trim()
+      if (resultText) {
+        pushLine(`Result: ${resultText}`)
       }
       continue
     }
@@ -1069,11 +1144,13 @@ function renderStructuredStdout(raw: string): {
           const b = block as Record<string, unknown>
           const blockType = String(b.type || '')
           if (blockType === 'tool_use') {
-            const name = String(b.name || '')
-            if (name) toolNames.push(name)
+            const toolName = String(b.name || '').trim()
+            if (toolName) {
+              pushLine(`Tools used: ${toolName}`)
+            }
           }
-          const startText = String(b.text || '')
-          if (startText) deltaParts.push(startText)
+          const startText = coerceMessageText(b.text)
+          if (startText) pushText(startText)
         }
         continue
       }
@@ -1083,12 +1160,14 @@ function renderStructuredStdout(raw: string): {
         const d = delta as Record<string, unknown>
         const deltaType = String(d.type || '')
         if (deltaType === 'text_delta') {
-          const text = String(d.text || '')
-          if (text) deltaParts.push(text)
+          const text = coerceMessageText(d.text)
+          if (text) {
+            pushText(text)
+            hasTextDelta = true
+          }
         }
       }
-      // All other stream events (message_start, message_delta, message_stop,
-      // content_block_stop, input_json_delta, ping) are silently skipped.
+      // Other stream events are intentionally ignored.
       continue
     }
     if (type === 'user') {
@@ -1100,74 +1179,45 @@ function renderStructuredStdout(raw: string): {
             if (!item || typeof item !== 'object' || Array.isArray(item)) continue
             const ci = item as Record<string, unknown>
             if (String(ci.type || '') === 'tool_result' && ci.is_error) {
-              const errText = String(ci.content || '').trim()
-              if (errText && !toolErrors.includes(errText)) toolErrors.push(errText)
+              const errText = coerceMessageText(ci.content).trim()
+              if (errText) {
+                emitToolError(errText)
+              }
             }
           }
         }
       }
-      // Also check top-level tool_use_result shorthand
-      const toolUseResult = record.tool_use_result
-      if (typeof toolUseResult === 'string' && toolUseResult.trim()) {
-        const errText = toolUseResult.trim()
-        if (!toolErrors.includes(errText)) toolErrors.push(errText)
-      }
       continue
     }
-    // Other top-level types (system, init, etc.) are silently skipped.
+    // Other top-level events are intentionally ignored.
   }
 
-  const structured = parsedCount > 0
-  if (!structured) {
-    return { text: input, hasContent: true, structured: false, parsedLines: parsedCount, streamEvents }
+  if (parsedLines === 0) {
+    return { text: input, hasContent: true, structured: false, parsedLines: 0, streamEvents: 0, hasTextDelta }
   }
 
-  // Build the display text from extracted content, never falling back to raw JSON.
-  const parts: string[] = []
-  if (deltaParts.length > 0) {
-    parts.push(deltaParts.join('').trim())
+  // Fallback: if no stream_event text_deltas were seen, use the last
+  // assistant message text (covers logs without streaming output).
+  if (!hasTextDelta && lastAssistantText) {
+    pushText(lastAssistantText)
   }
-  if (assistantMessage && !parts.length) {
-    parts.push(assistantMessage)
+
+  const text = parts.join('')
+  return {
+    text,
+    hasContent: text.length > 0,
+    structured: true,
+    parsedLines,
+    streamEvents,
+    hasTextDelta,
   }
-  if (toolNames.length > 0) {
-    parts.push(`\nTools used: ${[...new Set(toolNames)].join(', ')}`)
-  }
-  if (toolErrors.length > 0) {
-    parts.push(`\nTool errors:\n${toolErrors.join('\n')}`)
-  }
-  if (resultMessage) {
-    parts.push(`\n---\nResult: ${resultMessage}`)
-  }
-  // Intentionally skip plain non-JSON lines in structured mode. They are
-  // commonly orphaned tail fragments from truncated NDJSON streams.
-  const text = parts.join('\n').trim()
-  if (text) {
-    return { text, hasContent: true, structured: true, parsedLines: parsedCount, streamEvents }
-  }
-  return { text: `(${parsedCount} events processed, ${streamEvents} stream events — no text output)`, hasContent: false, structured: true, parsedLines: parsedCount, streamEvents }
 }
 
-function mergeAppendOnlyText(previous: string, incoming: string): string {
-  const prev = String(previous || '')
-  const next = String(incoming || '')
-  if (!next.trim()) return prev
-  if (!prev) return next
-  if (next === prev) return prev
-  if (next.startsWith(prev)) return next
-  if (prev.includes(next)) return prev
-
-  // Find the longest overlap where previous suffix equals incoming prefix.
-  const minStart = Math.max(0, prev.length - next.length)
-  for (let start = minStart; start < prev.length; start += 1) {
-    const suffix = prev.slice(start)
-    if (next.startsWith(suffix)) {
-      return prev + next.slice(suffix.length)
-    }
-  }
-
-  // If there is no overlap, preserve previous output and append incoming text.
-  return `${prev}\n${next}`.trim()
+function mergeTranscriptChunk(previous: string, incoming: string, mode: 'reset' | 'prepend' | 'append'): string {
+  if (mode === 'reset') return incoming
+  if (!incoming) return previous
+  if (mode === 'prepend') return `${incoming}${previous}`
+  return `${previous}${incoming}`
 }
 
 function formatProgressEntries(progress?: Record<string, unknown>): Array<{ key: string; value: string }> {
@@ -1299,11 +1349,18 @@ export default function App() {
   const [selectedTaskLogsError, setSelectedTaskLogsError] = useState('')
   const [selectedTaskLogsLoading, setSelectedTaskLogsLoading] = useState(false)
   const planManualSeedRef = useRef<{ taskId: string; workerText: string }>({ taskId: '', workerText: '' })
-  const planRefineOutputRef = useRef<{ taskId: string; jobKey: string; text: string }>({ taskId: '', jobKey: '', text: '' })
-  const planGenerateOutputRef = useRef<{ taskId: string; jobKey: string; text: string }>({ taskId: '', jobKey: '', text: '' })
+  const planRefineOutputRef = useRef<{ taskId: string; logId: string; jobKey: string; text: string }>({ taskId: '', logId: '', jobKey: '', text: '' })
+  const planGenerateOutputRef = useRef<{ taskId: string; logId: string; jobKey: string; text: string }>({ taskId: '', logId: '', jobKey: '', text: '' })
   const logAccumRef = useRef<LogAccumState>(createEmptyLogAccum())
   const [stdoutHistory, setStdoutHistory] = useState('')
   const [stderrHistory, setStderrHistory] = useState('')
+  const [stdoutRawHistory, setStdoutRawHistory] = useState('')
+  const [stderrRawHistory, setStderrRawHistory] = useState('')
+  const [stdoutRenderStats, setStdoutRenderStats] = useState<{ parsedLines: number; streamEvents: number; structured: boolean }>({
+    parsedLines: 0,
+    streamEvents: 0,
+    structured: false,
+  })
   const stdoutPreRef = useRef<HTMLPreElement>(null)
   const stderrPreRef = useRef<HTMLPreElement>(null)
   const taskLogsRequestSeqRef = useRef(0)
@@ -1738,8 +1795,8 @@ export default function App() {
   useEffect(() => {
     const refineOut = planRefineOutputRef.current
     if (refineOut.taskId !== selectedTaskId) {
-      planRefineOutputRef.current = { taskId: selectedTaskId || '', jobKey: '', text: '' }
-      planGenerateOutputRef.current = { taskId: selectedTaskId || '', jobKey: '', text: '' }
+      planRefineOutputRef.current = { taskId: selectedTaskId || '', logId: '', jobKey: '', text: '' }
+      planGenerateOutputRef.current = { taskId: selectedTaskId || '', logId: '', jobKey: '', text: '' }
       planManualSeedRef.current = { taskId: selectedTaskId || '', workerText: '' }
       setPlanRefineStdout('')
       setPlanGenerateStdout('')
@@ -1760,34 +1817,48 @@ export default function App() {
     void loadTaskDetail(selectedTaskId)
   }, [selectedTaskId, projectDir])
 
-  function appendPlanRefineStdout(taskId: string, jobKey: string, incoming: string): void {
-    const nextText = String(incoming || '').trim()
-    if (!taskId || !jobKey || !nextText) return
+  function appendPlanRefineStdout(
+    taskId: string,
+    logId: string,
+    jobKey: string,
+    incoming: string,
+    mode: 'reset' | 'prepend' | 'append',
+  ): void {
+    if (!taskId || !jobKey) return
+    const nextText = String(incoming || '')
     const current = planRefineOutputRef.current
-    if (current.taskId !== taskId || current.jobKey !== jobKey) {
-      planRefineOutputRef.current = { taskId, jobKey, text: nextText }
+    const logChanged = !!(logId && current.logId && logId !== current.logId)
+    if (current.taskId !== taskId || current.jobKey !== jobKey || logChanged || mode === 'reset') {
+      planRefineOutputRef.current = { taskId, logId, jobKey, text: nextText }
       setPlanRefineStdout(nextText)
       return
     }
-    const merged = mergeAppendOnlyText(current.text, nextText)
+    const merged = mergeTranscriptChunk(current.text, nextText, mode)
     if (merged !== current.text) {
-      planRefineOutputRef.current = { taskId, jobKey, text: merged }
+      planRefineOutputRef.current = { taskId, logId: logId || current.logId, jobKey, text: merged }
       setPlanRefineStdout(merged)
     }
   }
 
-  function appendPlanGenerateStdout(taskId: string, jobKey: string, incoming: string): void {
-    const nextText = String(incoming || '').trim()
-    if (!taskId || !jobKey || !nextText) return
+  function appendPlanGenerateStdout(
+    taskId: string,
+    logId: string,
+    jobKey: string,
+    incoming: string,
+    mode: 'reset' | 'prepend' | 'append',
+  ): void {
+    if (!taskId || !jobKey) return
+    const nextText = String(incoming || '')
     const current = planGenerateOutputRef.current
-    if (current.taskId !== taskId || current.jobKey !== jobKey) {
-      planGenerateOutputRef.current = { taskId, jobKey, text: nextText }
+    const logChanged = !!(logId && current.logId && logId !== current.logId)
+    if (current.taskId !== taskId || current.jobKey !== jobKey || logChanged || mode === 'reset') {
+      planGenerateOutputRef.current = { taskId, logId, jobKey, text: nextText }
       setPlanGenerateStdout(nextText)
       return
     }
-    const merged = mergeAppendOnlyText(current.text, nextText)
+    const merged = mergeTranscriptChunk(current.text, nextText, mode)
     if (merged !== current.text) {
-      planGenerateOutputRef.current = { taskId, jobKey, text: merged }
+      planGenerateOutputRef.current = { taskId, logId: logId || current.logId, jobKey, text: merged }
       setPlanGenerateStdout(merged)
     }
   }
@@ -1926,8 +1997,15 @@ export default function App() {
         reset.logId = payloadLogId
         logAccumRef.current = reset
         snapshotLogScrollOps('reset', 'reset')
+        planRefineOutputRef.current = { taskId, logId: payloadLogId, jobKey: '', text: '' }
+        planGenerateOutputRef.current = { taskId, logId: payloadLogId, jobKey: '', text: '' }
         setStdoutHistory('')
         setStderrHistory('')
+        setStdoutRawHistory('')
+        setStderrRawHistory('')
+        setStdoutRenderStats({ parsedLines: 0, streamEvents: 0, structured: false })
+        setPlanRefineStdout('')
+        setPlanGenerateStdout('')
         void loadTaskLogs(taskId, true)
         return
       }
@@ -1938,10 +2016,10 @@ export default function App() {
       setSelectedTaskLogs(payload)
       setSelectedTaskLogsError('')
 
-      const prevStdout = accum.stdout
-      const prevStderr = accum.stderr
       let stdoutOp: 'none' | 'prepend' | 'append' | 'reset' = 'none'
       let stderrOp: 'none' | 'prepend' | 'append' | 'reset' = 'none'
+      let stdoutChunkRendered = ''
+      let stdoutChunkMode: 'none' | 'prepend' | 'append' | 'reset' = 'none'
 
       const stdoutBackfillRequested = accum.phase === 'backfill' && accum.stdoutTailStart > 0 && accum.stdoutBackfillOffset > 0
       const stderrBackfillRequested = accum.phase === 'backfill' && accum.stderrTailStart > 0 && accum.stderrBackfillOffset > 0
@@ -1953,12 +2031,26 @@ export default function App() {
         : accum.stderrBackfillOffset
 
       if (accum.phase === 'init') {
-        const incomingStdout = payload.stdout || ''
-        const incomingStderr = payload.stderr || ''
-        accum.stdout = incomingStdout
-        accum.stderr = incomingStderr
-        if (incomingStdout !== prevStdout) stdoutOp = 'reset'
-        if (incomingStderr !== prevStderr) stderrOp = 'reset'
+        const stdoutChunkRaw = payload.stdout || ''
+        const stderrChunkRaw = payload.stderr || ''
+        const stdoutParsed = renderStructuredStdoutChunk(stdoutChunkRaw)
+        const stderrParsed = renderStructuredStdoutChunk(stderrChunkRaw)
+        accum.stdoutRaw = stdoutChunkRaw
+        accum.stderrRaw = stderrChunkRaw
+        accum.stdoutRendered = stdoutParsed.text
+        accum.stderrRendered = stderrParsed.text
+        accum.stdoutParsedLines = stdoutParsed.parsedLines
+        accum.stdoutStreamEvents = stdoutParsed.streamEvents
+        accum.stderrParsedLines = stderrParsed.parsedLines
+        accum.stderrStreamEvents = stderrParsed.streamEvents
+        accum.stdoutHasTextDelta = stdoutParsed.hasTextDelta
+        accum.stderrHasTextDelta = stderrParsed.hasTextDelta
+        stdoutOp = 'reset'
+        stderrOp = 'reset'
+        if (stdoutParsed.text) {
+          stdoutChunkRendered = stdoutParsed.text
+          stdoutChunkMode = 'reset'
+        }
         if (payload.stdout_offset != null) accum.stdoutOffset = payload.stdout_offset
         if (payload.stderr_offset != null) accum.stderrOffset = payload.stderr_offset
         accum.stdoutTailStart = payload.stdout_tail_start || 0
@@ -1971,20 +2063,38 @@ export default function App() {
         const stderrNeedsBackfill = stderrBackfillRequested
 
         if (stdoutNeedsBackfill) {
-          if (payload.stdout) {
-            accum.stdout = payload.stdout + accum.stdout
-            stdoutOp = 'prepend'
+          const stdoutChunkRaw = payload.stdout || ''
+          const stdoutParsed = renderStructuredStdoutChunk(stdoutChunkRaw)
+          if (stdoutChunkRaw) {
+            accum.stdoutRaw = stdoutChunkRaw + accum.stdoutRaw
           }
+          if (stdoutParsed.text) {
+            accum.stdoutRendered = stdoutParsed.text + accum.stdoutRendered
+            stdoutOp = 'prepend'
+            stdoutChunkRendered = stdoutParsed.text
+            stdoutChunkMode = 'prepend'
+          }
+          accum.stdoutParsedLines += stdoutParsed.parsedLines
+          accum.stdoutStreamEvents += stdoutParsed.streamEvents
+          accum.stdoutHasTextDelta = accum.stdoutHasTextDelta || stdoutParsed.hasTextDelta
           const reportedStart = typeof payload.stdout_chunk_start === 'number'
             ? payload.stdout_chunk_start
             : nextStdoutBackfillOffset
           accum.stdoutBackfillOffset = Math.max(0, Math.min(reportedStart, accum.stdoutBackfillOffset))
         }
         if (stderrNeedsBackfill) {
-          if (payload.stderr) {
-            accum.stderr = payload.stderr + accum.stderr
+          const stderrChunkRaw = payload.stderr || ''
+          const stderrParsed = renderStructuredStdoutChunk(stderrChunkRaw)
+          if (stderrChunkRaw) {
+            accum.stderrRaw = stderrChunkRaw + accum.stderrRaw
+          }
+          if (stderrParsed.text) {
+            accum.stderrRendered = stderrParsed.text + accum.stderrRendered
             stderrOp = 'prepend'
           }
+          accum.stderrParsedLines += stderrParsed.parsedLines
+          accum.stderrStreamEvents += stderrParsed.streamEvents
+          accum.stderrHasTextDelta = accum.stderrHasTextDelta || stderrParsed.hasTextDelta
           const reportedStart = typeof payload.stderr_chunk_start === 'number'
             ? payload.stderr_chunk_start
             : nextStderrBackfillOffset
@@ -1997,30 +2107,74 @@ export default function App() {
           accum.phase = 'forward'
         }
       } else {
-        if (payload.stdout) {
-          accum.stdout += payload.stdout
-          stdoutOp = 'append'
+        const stdoutChunkRaw = payload.stdout || ''
+        const stderrChunkRaw = payload.stderr || ''
+        const stdoutParsed = renderStructuredStdoutChunk(stdoutChunkRaw, accum.stdoutHasTextDelta)
+        const stderrParsed = renderStructuredStdoutChunk(stderrChunkRaw, accum.stderrHasTextDelta)
+        accum.stdoutHasTextDelta = stdoutParsed.hasTextDelta
+        accum.stderrHasTextDelta = stderrParsed.hasTextDelta
+        if (stdoutChunkRaw) {
+          accum.stdoutRaw += stdoutChunkRaw
         }
-        if (payload.stderr) {
-          accum.stderr += payload.stderr
+        if (stdoutParsed.text) {
+          accum.stdoutRendered += stdoutParsed.text
+          stdoutOp = 'append'
+          stdoutChunkRendered = stdoutParsed.text
+          stdoutChunkMode = 'append'
+        }
+        accum.stdoutParsedLines += stdoutParsed.parsedLines
+        accum.stdoutStreamEvents += stdoutParsed.streamEvents
+        if (stderrChunkRaw) {
+          accum.stderrRaw += stderrChunkRaw
+        }
+        if (stderrParsed.text) {
+          accum.stderrRendered += stderrParsed.text
           stderrOp = 'append'
         }
+        accum.stderrParsedLines += stderrParsed.parsedLines
+        accum.stderrStreamEvents += stderrParsed.streamEvents
         if (payload.stdout_offset != null) accum.stdoutOffset = payload.stdout_offset
         if (payload.stderr_offset != null) accum.stderrOffset = payload.stderr_offset
       }
 
-      if (accum.stdout.length > LOG_HISTORY_MAX_CHARS) {
-        accum.stdout = accum.stdout.slice(accum.stdout.length - LOG_HISTORY_MAX_CHARS)
-        stdoutOp = 'reset'
+      if (accum.stdoutRaw.length > LOG_HISTORY_MAX_CHARS) {
+        accum.stdoutRaw = accum.stdoutRaw.slice(accum.stdoutRaw.length - LOG_HISTORY_MAX_CHARS)
       }
-      if (accum.stderr.length > LOG_HISTORY_MAX_CHARS) {
-        accum.stderr = accum.stderr.slice(accum.stderr.length - LOG_HISTORY_MAX_CHARS)
+      if (accum.stderrRaw.length > LOG_HISTORY_MAX_CHARS) {
+        accum.stderrRaw = accum.stderrRaw.slice(accum.stderrRaw.length - LOG_HISTORY_MAX_CHARS)
+      }
+      if (accum.stdoutRendered.length > LOG_HISTORY_MAX_CHARS) {
+        accum.stdoutRendered = accum.stdoutRendered.slice(accum.stdoutRendered.length - LOG_HISTORY_MAX_CHARS)
+        stdoutOp = 'reset'
+        stdoutChunkMode = 'none'
+      }
+      if (accum.stderrRendered.length > LOG_HISTORY_MAX_CHARS) {
+        accum.stderrRendered = accum.stderrRendered.slice(accum.stderrRendered.length - LOG_HISTORY_MAX_CHARS)
         stderrOp = 'reset'
       }
 
       snapshotLogScrollOps(stdoutOp, stderrOp)
-      setStdoutHistory(accum.stdout)
-      setStderrHistory(accum.stderr)
+      setStdoutRawHistory(accum.stdoutRaw)
+      setStderrRawHistory(accum.stderrRaw)
+      setStdoutHistory(accum.stdoutRendered)
+      setStderrHistory(accum.stderrRendered)
+      setStdoutRenderStats({
+        parsedLines: accum.stdoutParsedLines,
+        streamEvents: accum.stdoutStreamEvents,
+        structured: accum.stdoutParsedLines > 0,
+      })
+
+      if (stdoutChunkMode !== 'none') {
+        const step = String(payload.step || '')
+        if (step === 'plan_refine') {
+          const refineJobKey = String(selectedTaskPlan?.active_refine_job?.id || payload.started_at || payload.log_id || 'plan_refine')
+          appendPlanRefineStdout(taskId, payloadLogId, refineJobKey, stdoutChunkRendered, stdoutChunkMode)
+        } else if (step === 'generate_tasks') {
+          const generateJobKey = String(payload.started_at || payload.finished_at || payload.log_id || 'generate_tasks')
+          appendPlanGenerateStdout(taskId, payloadLogId, generateJobKey, stdoutChunkRendered, stdoutChunkMode)
+        }
+      }
+
       const stdoutProgressed = accum.stdoutBackfillOffset < backfillStdoutBefore
       const stderrProgressed = accum.stderrBackfillOffset < backfillStderrBefore
       continueBackfill = accum.phase === 'backfill' && (stdoutProgressed || stderrProgressed)
@@ -2055,6 +2209,9 @@ export default function App() {
       }
       setStdoutHistory('')
       setStderrHistory('')
+      setStdoutRawHistory('')
+      setStderrRawHistory('')
+      setStdoutRenderStats({ parsedLines: 0, streamEvents: 0, structured: false })
       return
     }
     logAutoPinRef.current = { stdout: true, stderr: true }
@@ -2201,59 +2358,21 @@ export default function App() {
     const isActive = activeJob && (activeJob.status === 'queued' || activeJob.status === 'running')
     if (!isActive && planJobLoading) {
       setPlanJobLoading(false)
-      // Final log fetch to capture complete output
-      const taskId = selectedTaskIdRef.current
-      if (taskId) {
-        void (async () => {
-          try {
-            const logs = await requestJson<TaskLogsSnapshot>(buildApiUrl(`/api/tasks/${taskId}/logs?max_chars=50000`, projectDir))
-            if (selectedTaskIdRef.current !== taskId) return
-            if (logs.step === 'plan_refine' && logs.stdout) {
-              const rendered = renderStructuredStdout(logs.stdout)
-              if (rendered.hasContent) {
-                const jobKey = String(selectedTaskPlan?.active_refine_job?.id || logs.started_at || 'plan_refine')
-                appendPlanRefineStdout(taskId, jobKey, rendered.text)
-              }
-            }
-          } catch { /* ignore */ }
-        })()
-      }
     }
-  }, [selectedTaskPlan?.active_refine_job?.status, planJobLoading, projectDir])
+  }, [selectedTaskPlan?.active_refine_job?.status, planJobLoading])
 
   useEffect(() => {
     if (!selectedTaskId) return
     const activeJob = selectedTaskPlan?.active_refine_job
     if (!activeJob) return
     if (!(activeJob.status === 'queued' || activeJob.status === 'running')) return
-    const activeJobId = String(activeJob.id || '')
     async function pollRefine(): Promise<void> {
       void loadTaskPlan(selectedTaskId)
-      try {
-        const logs = await requestJson<TaskLogsSnapshot>(buildApiUrl(`/api/tasks/${selectedTaskId}/logs?max_chars=50000`, projectDir))
-        if (logs.step === 'plan_refine' && logs.stdout) {
-          const rendered = renderStructuredStdout(logs.stdout)
-          if (rendered.hasContent) {
-            const jobKey = String(activeJobId || logs.started_at || 'plan_refine')
-            appendPlanRefineStdout(selectedTaskId, jobKey, rendered.text)
-          }
-        }
-      } catch { /* ignore */ }
     }
     void pollRefine()
     const timer = window.setInterval(() => void pollRefine(), 2_000)
     return () => window.clearInterval(timer)
-  }, [selectedTaskId, selectedTaskPlan?.active_refine_job?.id, selectedTaskPlan?.active_refine_job?.status, projectDir])
-
-  useEffect(() => {
-    if (!planGenerateLoading) return
-    if (!selectedTaskId || !selectedTaskLogs) return
-    if (selectedTaskLogs.step !== 'generate_tasks' || !selectedTaskLogs.stdout) return
-    const rendered = renderStructuredStdout(selectedTaskLogs.stdout)
-    if (!rendered.hasContent) return
-    const jobKey = String(selectedTaskLogs.started_at || 'generate_tasks')
-    appendPlanGenerateStdout(selectedTaskId, jobKey, rendered.text)
-  }, [planGenerateLoading, selectedTaskId, selectedTaskLogs?.step, selectedTaskLogs?.stdout, selectedTaskLogs?.started_at])
+  }, [selectedTaskId, selectedTaskPlan?.active_refine_job?.status, projectDir])
 
   async function loadQuickActionDetail(quickActionId: string): Promise<void> {
     if (!quickActionId) {
@@ -2854,7 +2973,7 @@ export default function App() {
         }),
       })
       setPlanActionMessage('Plan refine job queued.')
-      planRefineOutputRef.current = { taskId, jobKey: '', text: '' }
+      planRefineOutputRef.current = { taskId, logId: '', jobKey: '', text: '' }
       setPlanRefineStdout('')
       await loadTaskPlan(taskId)
     } catch (err) {
@@ -2919,27 +3038,11 @@ export default function App() {
 
   async function generateTasksFromPlan(taskId: string): Promise<void> {
     setPlanGenerateLoading(true)
-    planGenerateOutputRef.current = { taskId, jobKey: '', text: '' }
+    planGenerateOutputRef.current = { taskId, logId: '', jobKey: '', text: '' }
     setPlanGenerateStdout('')
     setPlanActionMessage('')
     setPlanActionError('')
-    let aborted = false
-    const captureGenerateLogs = async (): Promise<void> => {
-      if (aborted || selectedTaskIdRef.current !== taskId) return
-      try {
-        const logs = await requestJson<TaskLogsSnapshot>(buildApiUrl(`/api/tasks/${taskId}/logs?max_chars=50000`, projectDir))
-        if (aborted || selectedTaskIdRef.current !== taskId) return
-        if (logs.step !== 'generate_tasks' || !logs.stdout) return
-        const rendered = renderStructuredStdout(logs.stdout)
-        if (!rendered.hasContent) return
-        const jobKey = String(logs.started_at || logs.finished_at || 'generate_tasks')
-        appendPlanGenerateStdout(taskId, jobKey, rendered.text)
-      } catch {
-        // Best-effort only.
-      }
-    }
-    void captureGenerateLogs()
-    const generateLogsTimer = window.setInterval(() => { void captureGenerateLogs() }, 1_000)
+    void loadTaskLogs(taskId, true)
     try {
       const payload: Record<string, unknown> = {
         source: planGenerateSource,
@@ -2975,9 +3078,7 @@ export default function App() {
     } catch (err) {
       setPlanActionError(toErrorMessage('Failed to generate tasks', err))
     } finally {
-      aborted = true
-      window.clearInterval(generateLogsTimer)
-      await captureGenerateLogs()
+      await loadTaskLogs(taskId, true)
       setPlanGenerateLoading(false)
     }
   }
@@ -3643,8 +3744,7 @@ export default function App() {
           </div>
         ) : null}
         {taskDetailTab === 'logs' ? (() => {
-          const hasTaskLogs = !!(stdoutHistory || stderrHistory) || (!!selectedTaskLogs && (selectedTaskLogs.mode !== 'none' || !!selectedTaskLogs.stdout || !!selectedTaskLogs.stderr))
-          const renderedStdout = renderStructuredStdout(stdoutHistory || '')
+          const hasTaskLogs = !!(stdoutHistory || stderrHistory || stdoutRawHistory || stderrRawHistory) || (!!selectedTaskLogs && (selectedTaskLogs.mode !== 'none' || !!selectedTaskLogs.stdout || !!selectedTaskLogs.stderr))
           const progressEntries = formatProgressEntries(selectedTaskLogs?.progress)
           return (
             <div className="task-detail-section-body">
@@ -3669,11 +3769,11 @@ export default function App() {
               {hasTaskLogs ? (
                 <div className="task-log-grid">
                   <div className="task-log-pane">
-                    <p className="field-label">Stdout{renderedStdout.structured ? ' (rendered)' : ''}</p>
-                    {renderedStdout.structured ? (
-                      <p className="task-meta">Parsed {renderedStdout.parsedLines} JSON lines · {renderedStdout.streamEvents} stream events</p>
+                    <p className="field-label">Stdout{stdoutRenderStats.structured ? ' (rendered)' : ''}</p>
+                    {stdoutRenderStats.structured ? (
+                      <p className="task-meta">Parsed {stdoutRenderStats.parsedLines} JSON lines · {stdoutRenderStats.streamEvents} stream events</p>
                     ) : null}
-                    <pre className="task-log-output" ref={stdoutPreRef} onScroll={() => handleLogPaneScroll('stdout')}>{renderedStdout.text || '(empty)'}</pre>
+                    <pre className="task-log-output" ref={stdoutPreRef} onScroll={() => handleLogPaneScroll('stdout')}>{stdoutHistory || '(empty)'}</pre>
                   </div>
                   <div className="task-log-pane">
                     <p className="field-label">Stderr</p>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -346,50 +347,115 @@ def _read_tail(path: Optional[Path], max_chars: int) -> tuple[str, int]:
     offset in the file where the returned text begins.  When the entire file
     fits within *max_chars*, ``tail_start_byte`` is ``0``.
     """
-    if not path or not path.exists() or not path.is_file():
+    if not path or not path.exists() or not path.is_file() or max_chars <= 0:
         return "", 0
     try:
-        text = path.read_text(encoding="utf-8", errors="replace")
+        size = path.stat().st_size
     except Exception:
         return "", 0
-    if len(text) <= max_chars:
-        return text, 0
-    cut_at = len(text) - max_chars
-    tail = text[cut_at:]
-    # If the cut starts in the middle of a line, drop that partial first line
-    # so consumers don't render orphaned JSON/text fragments.
-    if cut_at > 0 and text[cut_at - 1] != "\n":
-        first_newline = tail.find("\n")
+    if size <= 0:
+        return "", 0
+
+    # Read only a bounded tail window (overshoot bytes for multibyte chars).
+    max_bytes = min(size, max_chars * 4)
+    start_byte = max(0, size - max_bytes)
+    prev_byte = b"\n"
+    try:
+        with open(path, "rb") as fh:
+            if start_byte > 0:
+                fh.seek(start_byte - 1)
+                prev_byte = fh.read(1) or b"\n"
+            fh.seek(start_byte)
+            raw = fh.read(max_bytes)
+    except Exception:
+        return "", 0
+
+    text = raw.decode("utf-8", errors="replace")
+    if not text:
+        return "", size
+
+    cut_at = max(0, len(text) - max_chars)
+    slice_starts_mid_line = False
+    if cut_at > 0:
+        slice_starts_mid_line = text[cut_at - 1] != "\n"
+    elif start_byte > 0 and prev_byte != b"\n":
+        slice_starts_mid_line = True
+
+    # If the returned slice starts in the middle of a line, drop the orphaned
+    # prefix so NDJSON/text consumers only see full lines.
+    if slice_starts_mid_line:
+        first_newline = text.find("\n", cut_at)
         if first_newline == -1:
-            return "", len(text.encode("utf-8"))
-        tail = tail[first_newline + 1 :]
-        cut_at += first_newline + 1
-    tail_start_byte = len(text[:cut_at].encode("utf-8"))
+            return "", size
+        cut_at = first_newline + 1
+
+    tail = text[cut_at:]
+    tail_start_byte = start_byte + len(text[:cut_at].encode("utf-8"))
     return tail, tail_start_byte
 
 
 def _read_from_offset(
-    path: Optional[Path], offset: int, max_bytes: int, read_to: int = 0
-) -> tuple[str, int]:
-    """Read file content from *offset* bytes forward, returning (text, new_offset).
+    path: Optional[Path],
+    offset: int,
+    max_bytes: int,
+    read_to: int = 0,
+    *,
+    align_start_to_line: bool = False,
+) -> tuple[str, int, int]:
+    """Read file content from *offset* bytes forward.
+
+    Returns ``(text, new_offset, chunk_start_offset)`` where *new_offset* is the
+    byte offset after the returned chunk and *chunk_start_offset* is the actual
+    byte offset where the returned chunk begins.
 
     If *read_to* > 0, do not read past that byte position in the file.
     """
     if not path or not path.exists() or not path.is_file():
-        return "", 0
+        return "", 0, 0
     try:
         size = path.stat().st_size
         end = min(size, read_to) if read_to > 0 else size
         start = max(offset, 0)
         if start >= end:
-            return "", min(start, size)
+            bounded = min(start, size)
+            return "", bounded, bounded
+
+        aligned_start = start
+        if align_start_to_line and start > 0:
+            lookback = min(start, max(max_bytes, 8192))
+            with open(path, "rb") as fh:
+                fh.seek(start - lookback)
+                prefix = fh.read(lookback)
+            newline_idx = prefix.rfind(b"\n")
+            if newline_idx >= 0:
+                aligned_start = (start - lookback) + newline_idx + 1
+
+        read_limit = end - aligned_start
+        if read_limit <= 0:
+            bounded = min(aligned_start, size)
+            return "", bounded, bounded
+        # Allow aligned reads to exceed ``max_bytes`` by at most one chunk size.
+        capped = min(read_limit, max_bytes * 2 if align_start_to_line else max_bytes)
         with open(path, "rb") as fh:
-            fh.seek(start)
-            raw = fh.read(min(max_bytes, end - start))
+            fh.seek(aligned_start)
+            raw = fh.read(capped)
         text = raw.decode("utf-8", errors="replace")
-        return text, start + len(raw)
+        return text, aligned_start + len(raw), aligned_start
     except Exception:
-        return "", 0
+        return "", 0, 0
+
+
+def _logs_snapshot_id(logs_meta: dict[str, Any]) -> str:
+    parts = [
+        str(logs_meta.get("run_dir") or ""),
+        str(logs_meta.get("stdout_path") or ""),
+        str(logs_meta.get("stderr_path") or ""),
+        str(logs_meta.get("started_at") or ""),
+    ]
+    material = "|".join(parts).strip("|")
+    if not material:
+        return ""
+    return sha256(material.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
 def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
@@ -898,7 +964,7 @@ def create_router(
     async def get_task_logs(
         task_id: str,
         project_dir: Optional[str] = Query(None),
-        max_chars: int = Query(12000, ge=200, le=200000),
+        max_chars: int = Query(12000, ge=200, le=2000000),
         stdout_offset: int = Query(0, ge=0),
         stderr_offset: int = Query(0, ge=0),
         backfill: bool = Query(False),
@@ -932,14 +998,30 @@ def create_router(
         use_incremental = backfill or stdout_offset > 0 or stderr_offset > 0
         stdout_tail_start = 0
         stderr_tail_start = 0
+        stdout_chunk_start = 0
+        stderr_chunk_start = 0
         if use_incremental:
-            stdout_text, new_stdout_offset = _read_from_offset(stdout_path, stdout_offset, max_chars, read_to=stdout_read_to)
-            stderr_text, new_stderr_offset = _read_from_offset(stderr_path, stderr_offset, max_chars, read_to=stderr_read_to)
+            stdout_text, new_stdout_offset, stdout_chunk_start = _read_from_offset(
+                stdout_path,
+                stdout_offset,
+                max_chars,
+                read_to=stdout_read_to,
+                align_start_to_line=backfill,
+            )
+            stderr_text, new_stderr_offset, stderr_chunk_start = _read_from_offset(
+                stderr_path,
+                stderr_offset,
+                max_chars,
+                read_to=stderr_read_to,
+                align_start_to_line=backfill,
+            )
         else:
             stdout_text, stdout_tail_start = _read_tail(stdout_path, max_chars)
             stderr_text, stderr_tail_start = _read_tail(stderr_path, max_chars)
             new_stdout_offset = stdout_path.stat().st_size if stdout_path and stdout_path.exists() else 0
             new_stderr_offset = stderr_path.stat().st_size if stderr_path and stderr_path.exists() else 0
+            stdout_chunk_start = stdout_tail_start
+            stderr_chunk_start = stderr_tail_start
 
         return {
             "mode": mode,
@@ -949,10 +1031,13 @@ def create_router(
             "stderr": stderr_text,
             "stdout_offset": new_stdout_offset,
             "stderr_offset": new_stderr_offset,
+            "stdout_chunk_start": stdout_chunk_start,
+            "stderr_chunk_start": stderr_chunk_start,
             "stdout_tail_start": stdout_tail_start,
             "stderr_tail_start": stderr_tail_start,
             "started_at": logs_meta.get("started_at"),
             "finished_at": logs_meta.get("finished_at"),
+            "log_id": _logs_snapshot_id(logs_meta),
             "progress": progress_payload,
         }
 
