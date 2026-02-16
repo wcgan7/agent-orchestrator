@@ -27,8 +27,8 @@ def _service(tmp_path: Path, *, auto_deps: bool = True, adapter=None) -> tuple[C
 
 def test_independent_tasks_get_no_deps(tmp_path: Path) -> None:
     container, service, _ = _service(tmp_path)
-    t1 = Task(title="Task A", status="ready", metadata={"scripted_dependency_edges": []})
-    t2 = Task(title="Task B", status="ready", metadata={"scripted_dependency_edges": []})
+    t1 = Task(title="Task A", status="queued", metadata={"scripted_dependency_edges": []})
+    t2 = Task(title="Task B", status="queued", metadata={"scripted_dependency_edges": []})
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
 
@@ -49,8 +49,8 @@ def test_independent_tasks_get_no_deps(tmp_path: Path) -> None:
 
 def test_scripted_edges_applied(tmp_path: Path) -> None:
     container, service, _ = _service(tmp_path)
-    t1 = Task(title="Add auth", status="ready")
-    t2 = Task(title="Add profile", status="ready")
+    t1 = Task(title="Add auth", status="queued")
+    t2 = Task(title="Add profile", status="queued")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
 
@@ -88,7 +88,7 @@ def test_single_task_skips_analysis(tmp_path: Path) -> None:
             return StepResult(status="ok", dependency_edges=[])
 
     container, service, _ = _service(tmp_path, adapter=CountingAdapter())
-    t1 = Task(title="Solo task", status="ready")
+    t1 = Task(title="Solo task", status="queued")
     container.tasks.upsert(t1)
 
     service._maybe_analyze_dependencies()
@@ -113,8 +113,8 @@ def test_already_analyzed_not_reanalyzed(tmp_path: Path) -> None:
             return StepResult(status="ok", dependency_edges=[])
 
     container, service, _ = _service(tmp_path, adapter=CountingAdapter())
-    t1 = Task(title="Task A", status="ready")
-    t2 = Task(title="Task B", status="ready")
+    t1 = Task(title="Task A", status="queued")
+    t2 = Task(title="Task B", status="queued")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
 
@@ -133,8 +133,8 @@ def test_already_analyzed_not_reanalyzed(tmp_path: Path) -> None:
 
 def test_cycle_detection(tmp_path: Path) -> None:
     container, service, _ = _service(tmp_path)
-    t1 = Task(title="Task A", status="ready")
-    t2 = Task(title="Task B", status="ready")
+    t1 = Task(title="Task A", status="queued")
+    t2 = Task(title="Task B", status="queued")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
 
@@ -171,8 +171,8 @@ def test_prd_import_tasks_skipped(tmp_path: Path) -> None:
             return StepResult(status="ok", dependency_edges=[])
 
     container, service, _ = _service(tmp_path, adapter=CountingAdapter())
-    t1 = Task(title="PRD Task A", status="ready", source="prd_import")
-    t2 = Task(title="PRD Task B", status="ready", source="prd_import")
+    t1 = Task(title="PRD Task A", status="queued", source="prd_import")
+    t2 = Task(title="PRD Task B", status="queued", source="prd_import")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
 
@@ -187,9 +187,9 @@ def test_prd_import_tasks_skipped(tmp_path: Path) -> None:
 
 def test_tick_once_integrates_dep_analysis(tmp_path: Path) -> None:
     container, service, _ = _service(tmp_path)
-    t1 = Task(title="Foundation", status="ready", task_type="chore",
+    t1 = Task(title="Foundation", status="queued", task_type="chore",
               approval_mode="auto_approve", hitl_mode="autopilot")
-    t2 = Task(title="Dependent", status="ready", task_type="chore",
+    t2 = Task(title="Dependent", status="queued", task_type="chore",
               approval_mode="auto_approve", hitl_mode="autopilot")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
@@ -225,8 +225,8 @@ def test_tick_once_integrates_dep_analysis(tmp_path: Path) -> None:
 
 def test_analysis_failure_graceful(tmp_path: Path) -> None:
     container, service, _ = _service(tmp_path)
-    t1 = Task(title="Task A", status="ready")
-    t2 = Task(title="Task B", status="ready")
+    t1 = Task(title="Task A", status="queued")
+    t2 = Task(title="Task B", status="queued")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
 
@@ -262,8 +262,8 @@ def test_auto_deps_disabled_via_config(tmp_path: Path) -> None:
             return StepResult(status="ok", dependency_edges=[])
 
     container, service, _ = _service(tmp_path, auto_deps=False, adapter=CountingAdapter())
-    t1 = Task(title="Task A", status="ready")
-    t2 = Task(title="Task B", status="ready")
+    t1 = Task(title="Task A", status="queued")
+    t2 = Task(title="Task B", status="queued")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
 
@@ -286,8 +286,8 @@ def test_new_tasks_trigger_reanalysis(tmp_path: Path) -> None:
             return StepResult(status="ok", dependency_edges=[])
 
     container, service, _ = _service(tmp_path, adapter=CountingAdapter())
-    t1 = Task(title="Task A", status="ready")
-    t2 = Task(title="Task B", status="ready")
+    t1 = Task(title="Task A", status="queued")
+    t2 = Task(title="Task B", status="queued")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
 
@@ -295,8 +295,8 @@ def test_new_tasks_trigger_reanalysis(tmp_path: Path) -> None:
     assert call_count == 1
 
     # Add two new unanalyzed tasks
-    t3 = Task(title="Task C", status="ready")
-    t4 = Task(title="Task D", status="ready")
+    t3 = Task(title="Task C", status="queued")
+    t4 = Task(title="Task D", status="queued")
     container.tasks.upsert(t3)
     container.tasks.upsert(t4)
 

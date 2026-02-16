@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +24,7 @@ class CreateTaskRequest(BaseModel):
     description: str = ""
     task_type: str = "feature"
     priority: str = "P2"
+    status: Optional[str] = None
     labels: list[str] = Field(default_factory=list)
     blocked_by: list[str] = Field(default_factory=list)
     parent_id: Optional[str] = None
@@ -132,6 +134,8 @@ class WorkerProviderSettingsRequest(BaseModel):
 class WorkersSettingsRequest(BaseModel):
     default: str = "codex"
     default_model: Optional[str] = None
+    heartbeat_seconds: Optional[int] = Field(None, ge=1, le=3600)
+    heartbeat_grace_seconds: Optional[int] = Field(None, ge=1, le=7200)
     routing: dict[str, str] = Field(default_factory=dict)
     providers: dict[str, WorkerProviderSettingsRequest] = Field(default_factory=dict)
 
@@ -195,12 +199,12 @@ class AddCommentRequest(BaseModel):
 
 
 VALID_TRANSITIONS: dict[str, set[str]] = {
-    "backlog": {"ready", "cancelled"},
-    "ready": {"in_progress", "blocked", "backlog", "cancelled"},
-    "in_progress": {"in_review", "blocked", "ready", "cancelled"},
-    "in_review": {"done", "in_progress", "blocked", "cancelled"},
-    "blocked": {"ready", "cancelled", "backlog"},
-    "done": {"ready"},
+    "backlog": {"queued", "cancelled"},
+    "queued": {"backlog", "cancelled"},
+    "in_progress": {"cancelled"},
+    "in_review": {"done", "blocked", "cancelled"},
+    "blocked": {"queued", "cancelled"},
+    "done": set(),
     "cancelled": {"backlog"},
 }
 
@@ -322,6 +326,72 @@ def _task_payload(task: Task) -> dict[str, Any]:
     return payload
 
 
+def _safe_state_path(raw_path: Any, state_root: Path) -> Optional[Path]:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    try:
+        path = Path(raw_path).expanduser().resolve()
+        root = state_root.resolve()
+    except Exception:
+        return None
+    if path == root or root in path.parents:
+        return path
+    return None
+
+
+def _read_tail(path: Optional[Path], max_chars: int) -> tuple[str, int]:
+    """Read the tail of a file.
+
+    Returns ``(text, tail_start_byte)`` where *tail_start_byte* is the byte
+    offset in the file where the returned text begins.  When the entire file
+    fits within *max_chars*, ``tail_start_byte`` is ``0``.
+    """
+    if not path or not path.exists() or not path.is_file():
+        return "", 0
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return "", 0
+    if len(text) <= max_chars:
+        return text, 0
+    cut_at = len(text) - max_chars
+    tail = text[cut_at:]
+    # If the cut starts in the middle of a line, drop that partial first line
+    # so consumers don't render orphaned JSON/text fragments.
+    if cut_at > 0 and text[cut_at - 1] != "\n":
+        first_newline = tail.find("\n")
+        if first_newline == -1:
+            return "", len(text.encode("utf-8"))
+        tail = tail[first_newline + 1 :]
+        cut_at += first_newline + 1
+    tail_start_byte = len(text[:cut_at].encode("utf-8"))
+    return tail, tail_start_byte
+
+
+def _read_from_offset(
+    path: Optional[Path], offset: int, max_bytes: int, read_to: int = 0
+) -> tuple[str, int]:
+    """Read file content from *offset* bytes forward, returning (text, new_offset).
+
+    If *read_to* > 0, do not read past that byte position in the file.
+    """
+    if not path or not path.exists() or not path.is_file():
+        return "", 0
+    try:
+        size = path.stat().st_size
+        end = min(size, read_to) if read_to > 0 else size
+        start = max(offset, 0)
+        if start >= end:
+            return "", min(start, size)
+        with open(path, "rb") as fh:
+            fh.seek(start)
+            raw = fh.read(min(max_bytes, end - start))
+        text = raw.decode("utf-8", errors="replace")
+        return text, start + len(raw)
+    except Exception:
+        return "", 0
+
+
 def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
     raw_providers = value if isinstance(value, dict) else {}
     providers: dict[str, dict[str, Any]] = {}
@@ -389,6 +459,12 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     workers_providers = _normalize_workers_providers(workers_cfg.get("providers"))
     workers_default = str(workers_cfg.get("default") or "codex").strip() or "codex"
     workers_default_model = str(workers_cfg.get("default_model") or "").strip()
+    workers_heartbeat_seconds = _coerce_int(workers_cfg.get("heartbeat_seconds"), 60, minimum=1, maximum=3600)
+    workers_heartbeat_grace_seconds = _coerce_int(
+        workers_cfg.get("heartbeat_grace_seconds"), 240, minimum=1, maximum=7200
+    )
+    if workers_heartbeat_grace_seconds < workers_heartbeat_seconds:
+        workers_heartbeat_grace_seconds = workers_heartbeat_seconds
     if workers_default not in workers_providers:
         workers_default = "codex"
     return {
@@ -413,6 +489,8 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
         "workers": {
             "default": workers_default,
             "default_model": workers_default_model,
+            "heartbeat_seconds": workers_heartbeat_seconds,
+            "heartbeat_grace_seconds": workers_heartbeat_grace_seconds,
             "routing": _normalize_str_map(workers_cfg.get("routing")),
             "providers": workers_providers,
         },
@@ -760,6 +838,8 @@ def create_router(
             worker_model=(str(body.worker_model).strip() if body.worker_model else None),
             metadata=body.metadata,
         )
+        if body.status in ("backlog", "queued"):
+            task.status = body.status
         if task.parent_id:
             parent = container.tasks.get(task.parent_id)
             if parent and task.id not in parent.children_ids:
@@ -793,7 +873,7 @@ def create_router(
     @router.get("/tasks/board")
     async def board(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         container, _, _ = _ctx(project_dir)
-        columns = {name: [] for name in ["backlog", "ready", "in_progress", "in_review", "blocked", "done", "cancelled"]}
+        columns = {name: [] for name in ["backlog", "queued", "in_progress", "in_review", "blocked", "done", "cancelled"]}
         for task in container.tasks.list():
             columns.setdefault(task.status, []).append(_task_payload(task))
         for key, items in columns.items():
@@ -813,6 +893,68 @@ def create_router(
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         return {"task": _task_payload(task)}
+
+    @router.get("/tasks/{task_id}/logs")
+    async def get_task_logs(
+        task_id: str,
+        project_dir: Optional[str] = Query(None),
+        max_chars: int = Query(12000, ge=200, le=200000),
+        stdout_offset: int = Query(0, ge=0),
+        stderr_offset: int = Query(0, ge=0),
+        backfill: bool = Query(False),
+        stdout_read_to: int = Query(0, ge=0),
+        stderr_read_to: int = Query(0, ge=0),
+    ) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        active_meta = metadata.get("active_logs") if isinstance(metadata.get("active_logs"), dict) else None
+        last_meta = metadata.get("last_logs") if isinstance(metadata.get("last_logs"), dict) else None
+        logs_meta = active_meta or last_meta or {}
+        mode = "active" if active_meta else ("last" if last_meta else "none")
+
+        stdout_path = _safe_state_path(logs_meta.get("stdout_path"), container.state_root)
+        stderr_path = _safe_state_path(logs_meta.get("stderr_path"), container.state_root)
+        progress_path = _safe_state_path(logs_meta.get("progress_path"), container.state_root)
+
+        progress_payload: dict[str, Any] = {}
+        if progress_path and progress_path.exists():
+            try:
+                raw = json.loads(progress_path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    progress_payload = raw
+            except Exception:
+                progress_payload = {}
+
+        use_incremental = backfill or stdout_offset > 0 or stderr_offset > 0
+        stdout_tail_start = 0
+        stderr_tail_start = 0
+        if use_incremental:
+            stdout_text, new_stdout_offset = _read_from_offset(stdout_path, stdout_offset, max_chars, read_to=stdout_read_to)
+            stderr_text, new_stderr_offset = _read_from_offset(stderr_path, stderr_offset, max_chars, read_to=stderr_read_to)
+        else:
+            stdout_text, stdout_tail_start = _read_tail(stdout_path, max_chars)
+            stderr_text, stderr_tail_start = _read_tail(stderr_path, max_chars)
+            new_stdout_offset = stdout_path.stat().st_size if stdout_path and stdout_path.exists() else 0
+            new_stderr_offset = stderr_path.stat().st_size if stderr_path and stderr_path.exists() else 0
+
+        return {
+            "mode": mode,
+            "task_status": task.status,
+            "step": str(logs_meta.get("step") or task.current_step or ""),
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "stdout_offset": new_stdout_offset,
+            "stderr_offset": new_stderr_offset,
+            "stdout_tail_start": stdout_tail_start,
+            "stderr_tail_start": stderr_tail_start,
+            "started_at": logs_meta.get("started_at"),
+            "finished_at": logs_meta.get("finished_at"),
+            "progress": progress_payload,
+        }
 
     @router.patch("/tasks/{task_id}")
     async def patch_task(task_id: str, body: UpdateTaskRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -843,7 +985,7 @@ def create_router(
         valid = VALID_TRANSITIONS.get(task.status, set())
         if target not in valid:
             raise HTTPException(status_code=400, detail=f"Invalid transition {task.status} -> {target}")
-        if target in {"ready", "in_progress"}:
+        if target == "queued":
             unresolved = _has_unresolved_blockers(container, task)
             if unresolved is not None:
                 raise HTTPException(status_code=400, detail=f"Unresolved blocker: {unresolved}")
@@ -874,7 +1016,7 @@ def create_router(
         if unresolved is not None:
             raise HTTPException(status_code=400, detail=f"Unresolved blocker: {unresolved}")
         task.retry_count += 1
-        task.status = "ready"
+        task.status = "queued"
         task.error = None
         task.pending_gate = None
         if isinstance(task.metadata, dict):
@@ -1165,7 +1307,7 @@ def create_router(
             if not isinstance(item, dict):
                 continue
             task = Task(title=str(item.get("title") or "Imported task"), priority=str(item.get("priority") or "P2"), source="prd_import")
-            task.status = "ready"
+            task.status = "queued"
             if previous:
                 task.blocked_by.append(previous.id)
                 previous.blocks.append(task.id)
@@ -1244,11 +1386,11 @@ def create_router(
                 completed_steps = max(total_steps - 1, 1)
             elif task.status == "in_progress":
                 completed_steps = 2
-            elif task.status in {"ready", "blocked"}:
+            elif task.status in {"queued", "blocked"}:
                 completed_steps = 1
             progress = {
                 "backlog": 0.0,
-                "ready": 0.1,
+                "queued": 0.1,
                 "blocked": 0.1,
                 "in_progress": 0.6,
                 "in_review": 0.9,
@@ -1559,7 +1701,7 @@ def create_router(
             raise HTTPException(status_code=404, detail="Task not found")
         if task.status != "in_review":
             raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review")
-        task.status = "ready"
+        task.status = "queued"
         task.metadata["requested_changes"] = {"ts": now_iso(), "guidance": body.guidance}
         container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.changes_requested", entity_id=task.id, payload={"guidance": body.guidance})
@@ -1633,6 +1775,10 @@ def create_router(
                     workers_cfg["default_model"] = default_model
                 else:
                     workers_cfg.pop("default_model", None)
+            if "heartbeat_seconds" in incoming_workers:
+                workers_cfg["heartbeat_seconds"] = incoming_workers.get("heartbeat_seconds")
+            if "heartbeat_grace_seconds" in incoming_workers:
+                workers_cfg["heartbeat_grace_seconds"] = incoming_workers.get("heartbeat_grace_seconds")
             if "routing" in incoming_workers:
                 workers_cfg["routing"] = dict(incoming_workers.get("routing") or {})
             if "providers" in incoming_workers:

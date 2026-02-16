@@ -35,7 +35,7 @@ def test_feature_runs_full_pipeline(tmp_path: Path) -> None:
     task = Task(
         title="Feature task",
         task_type="feature",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -58,7 +58,7 @@ def test_bug_fix_runs_correct_steps(tmp_path: Path) -> None:
     task = Task(
         title="Bug fix task",
         task_type="bug",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -81,7 +81,7 @@ def test_research_runs_without_review_or_commit(tmp_path: Path) -> None:
     task = Task(
         title="Research task",
         task_type="research",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -107,7 +107,7 @@ def test_security_audit_runs_scan_steps(tmp_path: Path) -> None:
     task = Task(
         title="Security audit task",
         task_type="security",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -130,7 +130,7 @@ def test_repo_review_skips_review_and_commit(tmp_path: Path) -> None:
     task = Task(
         title="Repo review task",
         task_type="repo_review",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -153,7 +153,7 @@ def test_review_pipeline_has_review_but_no_commit(tmp_path: Path) -> None:
     task = Task(
         title="Code review task",
         task_type="review",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -180,7 +180,7 @@ def test_performance_pipeline(tmp_path: Path) -> None:
     task = Task(
         title="Performance task",
         task_type="performance",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -203,7 +203,7 @@ def test_unknown_type_falls_back_to_feature(tmp_path: Path) -> None:
     task = Task(
         title="Unknown type task",
         task_type="unknown_thing",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -227,7 +227,7 @@ def test_custom_pipeline_template_honored(tmp_path: Path) -> None:
     task = Task(
         title="Custom pipeline task",
         task_type="feature",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
         pipeline_template=["plan", "implement", "commit"],
@@ -251,7 +251,7 @@ def test_pipeline_template_stored_on_task(tmp_path: Path) -> None:
     task = Task(
         title="Template storage test",
         task_type="bug",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -297,7 +297,7 @@ def test_review_findings_passed_to_implement_fix(tmp_path: Path) -> None:
     task = Task(
         title="Fix findings task",
         task_type="feature",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
         metadata={
@@ -338,7 +338,7 @@ def test_generate_tasks_creates_child_tasks(tmp_path: Path) -> None:
     task = Task(
         title="Security audit parent",
         task_type="security",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
         metadata={
@@ -389,7 +389,7 @@ def test_generate_tasks_no_output_no_children(tmp_path: Path) -> None:
     task = Task(
         title="Clean repo review",
         task_type="repo_review",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -411,7 +411,7 @@ def test_hotfix_skips_diagnosis(tmp_path: Path) -> None:
     task = Task(
         title="Urgent fix",
         task_type="hotfix",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -434,7 +434,7 @@ def test_spike_runs_without_commit(tmp_path: Path) -> None:
     task = Task(
         title="Explore caching options",
         task_type="spike",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -459,7 +459,7 @@ def test_chore_skips_plan_and_review(tmp_path: Path) -> None:
     task = Task(
         title="Run formatter",
         task_type="chore",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -484,7 +484,7 @@ def test_plan_only_produces_report_no_code(tmp_path: Path) -> None:
     task = Task(
         title="Design auth system",
         task_type="plan_only",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -509,7 +509,7 @@ def test_decompose_generates_child_tasks(tmp_path: Path) -> None:
     task = Task(
         title="Break down auth epic",
         task_type="decompose",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
         metadata={
@@ -545,7 +545,7 @@ def test_verify_only_runs_checks_no_changes(tmp_path: Path) -> None:
     task = Task(
         title="Check CI status",
         task_type="verify_only",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -588,7 +588,7 @@ def test_plan_output_stored_in_metadata(tmp_path: Path) -> None:
     task = Task(
         title="Plan storage test",
         task_type="feature",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -637,7 +637,7 @@ def test_generate_tasks_from_plan(tmp_path: Path) -> None:
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus, worker_adapter=adapter)
 
-    task = Task(title="Auth epic", task_type="decompose", status="ready")
+    task = Task(title="Auth epic", task_type="decompose", status="queued")
     container.tasks.upsert(task)
 
     created_ids = service.generate_tasks_from_plan(task.id, "Build auth system", infer_deps=False)
@@ -685,7 +685,7 @@ def test_generate_tasks_from_plan_with_deps(tmp_path: Path) -> None:
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus, worker_adapter=adapter)
 
-    task = Task(title="Backend epic", task_type="decompose", status="ready")
+    task = Task(title="Backend epic", task_type="decompose", status="queued")
     container.tasks.upsert(task)
 
     created_ids = service.generate_tasks_from_plan(task.id, "Backend plan", infer_deps=True)
@@ -722,3 +722,29 @@ def test_generate_tasks_from_plan_no_task_fails(tmp_path: Path) -> None:
     import pytest
     with pytest.raises(ValueError, match="Task not found"):
         service.generate_tasks_from_plan("nonexistent", "some plan")
+
+
+def test_generate_tasks_from_plan_empty_worker_output_fails(tmp_path: Path) -> None:
+    """Explicit plan decomposition should fail if worker returns no tasks."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "generate_tasks":
+            return StepResult(status="ok", summary="No decomposition possible.")
+        return StepResult(status="ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+
+    task = Task(title="Empty decomposition", task_type="decompose", status="queued")
+    container.tasks.upsert(task)
+
+    import pytest
+    with pytest.raises(ValueError, match="no generated tasks"):
+        service.generate_tasks_from_plan(task.id, "Some plan text")

@@ -9,7 +9,7 @@ from typing import Any, Literal, Optional
 
 TaskStatus = Literal[
     "backlog",
-    "ready",
+    "queued",
     "in_progress",
     "in_review",
     "done",
@@ -92,7 +92,7 @@ class Task:
     description: str = ""
     task_type: str = "feature"
     priority: Priority = "P2"
-    status: TaskStatus = "backlog"
+    status: TaskStatus = "queued"
     labels: list[str] = field(default_factory=list)
 
     blocked_by: list[str] = field(default_factory=list)
@@ -128,7 +128,8 @@ class Task:
         payload["id"] = str(data.get("id") or _id("task"))
         payload["title"] = str(data.get("title") or "")
         payload["priority"] = str(data.get("priority") or "P2")
-        payload["status"] = str(data.get("status") or "backlog")
+        raw_status = str(data.get("status") or "backlog")
+        payload["status"] = "queued" if raw_status == "ready" else raw_status
         payload["created_at"] = str(data.get("created_at") or now_iso())
         payload["updated_at"] = str(data.get("updated_at") or now_iso())
         payload["blocked_by"] = list(data.get("blocked_by") or [])

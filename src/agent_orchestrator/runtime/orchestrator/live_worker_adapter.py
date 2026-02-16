@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -13,7 +14,7 @@ from ...pipelines.registry import PipelineRegistry
 from ...workers.config import get_workers_runtime_config, resolve_worker_for_step
 from ...workers.diagnostics import test_worker
 from ...workers.run import WorkerRunResult, run_worker
-from ..domain.models import Task
+from ..domain.models import Task, now_iso
 from ..storage.container import Container
 from .worker_adapter import StepResult
 
@@ -31,6 +32,8 @@ _MERGE_RESOLVE_STEPS = {"resolve_merge"}
 _DEP_ANALYSIS_STEPS = {"analyze_deps"}
 _STEP_TIMEOUT_ALIASES = {"implement_fix": "implement"}
 _DEFAULT_STEP_TIMEOUT_SECONDS = 600
+_DEFAULT_HEARTBEAT_SECONDS = 60
+_DEFAULT_HEARTBEAT_GRACE_SECONDS = 240
 
 # ---------------------------------------------------------------------------
 # Prompt layers
@@ -255,6 +258,60 @@ _CATEGORY_JSON_SCHEMAS: dict[str, str] = {
     "general": '{"status": "ok|error", "summary": "string"}',
 }
 
+_PLAN_PREAMBLE_PREFIXES: tuple[str, ...] = (
+    "the plan has been prepared",
+    "here's a summary",
+    "here is a summary",
+    "summary of the key",
+)
+_PLAN_TRAILING_CHAT_PREFIXES: tuple[str, ...] = (
+    "should i ",
+    "would you like",
+    "want me to ",
+    "do you want me to ",
+)
+
+
+def _normalize_planning_text(text: str) -> str:
+    """Normalize planning/refine outputs by stripping chatty wrappers.
+
+    Planning revisions should contain only the plan body. Some worker replies
+    add conversational prefaces or trailing confirmation questions; remove those
+    when they can be identified deterministically.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+
+    # Remove markdown fences when the whole payload is fenced text.
+    if raw.startswith("```") and raw.endswith("```"):
+        lines = raw.splitlines()
+        if len(lines) >= 2:
+            raw = "\n".join(lines[1:-1]).strip()
+
+    lines = raw.splitlines()
+    heading_idx = next((idx for idx, line in enumerate(lines) if re.match(r"^\s*#{1,6}\s+\S", line)), None)
+
+    # Drop meta-preface if the message starts with a known wrapper phrase.
+    if lines:
+        first = lines[0].strip().lower()
+        if any(first.startswith(prefix) for prefix in _PLAN_PREAMBLE_PREFIXES) and heading_idx is not None:
+            lines = lines[heading_idx:]
+
+    # Drop trailing "should I..." style follow-up questions and any divider right above.
+    cut_idx: int | None = None
+    for idx, line in enumerate(lines):
+        lowered = line.strip().lower()
+        if any(lowered.startswith(prefix) for prefix in _PLAN_TRAILING_CHAT_PREFIXES):
+            cut_idx = idx
+            break
+    if cut_idx is not None:
+        lines = lines[:cut_idx]
+        while lines and lines[-1].strip() in {"", "---"}:
+            lines.pop()
+
+    return "\n".join(lines).strip()
+
 
 def build_step_prompt(
     *,
@@ -376,6 +433,12 @@ def build_step_prompt(
         if not is_codex:
             parts.append("")
             parts.append("Return a full rewritten plan in the `plan` field.")
+    if category == "planning":
+        parts.append("")
+        parts.append("## Planning output requirements")
+        parts.append("- Return only the final plan body.")
+        parts.append("- Do not include prefaces, tool logs, or follow-up questions.")
+        parts.append("- For refinements, return the full rewritten plan, not just a change summary.")
 
     # Include merge conflict context for resolve_merge step
     if category == "merge_resolution" and isinstance(task.metadata, dict):
@@ -456,6 +519,53 @@ def _extract_json(text: str) -> dict[str, Any] | None:
         return None
 
 
+def _extract_json_value(text: str) -> Any | None:
+    """Try to extract a top-level JSON value (object or array) from text."""
+    text = text.strip()
+    if not text:
+        return None
+
+    # Try stripping markdown code fences first.
+    if text.startswith("```"):
+        lines = text.split("\n")
+        inner_lines = []
+        started = False
+        for line in lines:
+            if not started:
+                if line.strip().startswith("```"):
+                    started = True
+                    continue
+            elif line.strip() == "```":
+                break
+            else:
+                inner_lines.append(line)
+        text = "\n".join(inner_lines).strip()
+
+    # If the entire remaining payload is JSON, parse directly.
+    try:
+        value = json.loads(text)
+        if isinstance(value, (dict, list)):
+            return value
+    except json.JSONDecodeError:
+        pass
+
+    # Fallback object extraction.
+    obj = _extract_json(text)
+    if obj is not None:
+        return obj
+
+    # Fallback array extraction.
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return None
+    try:
+        value = json.loads(text[start : end + 1])
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, (dict, list)) else None
+
+
 class LiveWorkerAdapter:
     """Worker adapter that dispatches to real Codex/Ollama providers."""
 
@@ -490,6 +600,20 @@ class LiveWorkerAdapter:
             if key and key in step_timeouts:
                 return step_timeouts[key]
         return _DEFAULT_STEP_TIMEOUT_SECONDS
+
+    @staticmethod
+    def _heartbeat_settings(cfg: dict[str, Any]) -> tuple[int, int]:
+        workers_cfg = cfg.get("workers") if isinstance(cfg, dict) else {}
+        workers_cfg = workers_cfg if isinstance(workers_cfg, dict) else {}
+        heartbeat_seconds = LiveWorkerAdapter._coerce_timeout(
+            workers_cfg.get("heartbeat_seconds"), _DEFAULT_HEARTBEAT_SECONDS
+        )
+        heartbeat_grace_seconds = LiveWorkerAdapter._coerce_timeout(
+            workers_cfg.get("heartbeat_grace_seconds"), _DEFAULT_HEARTBEAT_GRACE_SECONDS
+        )
+        if heartbeat_grace_seconds < heartbeat_seconds:
+            heartbeat_grace_seconds = heartbeat_seconds
+        return heartbeat_seconds, heartbeat_grace_seconds
 
     @staticmethod
     def _human_blocker_summary(issues: list[dict[str, str]]) -> str:
@@ -538,7 +662,22 @@ class LiveWorkerAdapter:
         # 3. Execute
         run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
         progress_path = run_dir / "progress.json"
+        stdout_path = run_dir / "stdout.log"
+        stderr_path = run_dir / "stderr.log"
         timeout_seconds = self._timeout_for_step(task, step)
+        heartbeat_seconds, heartbeat_grace_seconds = self._heartbeat_settings(cfg)
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        log_meta = {
+            "step": step,
+            "run_dir": str(run_dir),
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(stderr_path),
+            "progress_path": str(progress_path),
+            "started_at": now_iso(),
+        }
+        task.metadata["active_logs"] = log_meta
+        self._container.tasks.upsert(task)
         try:
             result = run_worker(
                 spec=spec,
@@ -546,12 +685,18 @@ class LiveWorkerAdapter:
                 project_dir=project_dir,
                 run_dir=run_dir,
                 timeout_seconds=timeout_seconds,
-                heartbeat_seconds=30,
-                heartbeat_grace_seconds=15,
+                heartbeat_seconds=heartbeat_seconds,
+                heartbeat_grace_seconds=heartbeat_grace_seconds,
                 progress_path=progress_path,
             )
         except Exception as exc:
             return StepResult(status="error", summary=f"Worker execution failed: {exc}")
+        finally:
+            if not isinstance(task.metadata, dict):
+                task.metadata = {}
+            task.metadata.pop("active_logs", None)
+            task.metadata["last_logs"] = {**log_meta, "finished_at": now_iso()}
+            self._container.tasks.upsert(task)
 
         # 4. Map result
         return self._map_result(result, spec, step)
@@ -564,9 +709,27 @@ class LiveWorkerAdapter:
                 human_blocking_issues=result.human_blocking_issues,
             )
         if result.no_heartbeat:
-            return StepResult(status="error", summary="Worker stalled (no heartbeat or output activity).")
+            summary = "Worker stalled (no heartbeat or output activity)."
+            if result.stderr_path:
+                try:
+                    err_text = Path(result.stderr_path).read_text(errors="replace").strip()
+                    if err_text:
+                        tail = err_text[-500:]
+                        summary = f"{summary}\n{tail}"
+                except Exception:
+                    pass
+            return StepResult(status="error", summary=summary)
         if result.timed_out:
-            return StepResult(status="error", summary="Worker timed out")
+            summary = "Worker timed out"
+            if result.stderr_path:
+                try:
+                    err_text = Path(result.stderr_path).read_text(errors="replace").strip()
+                    if err_text:
+                        tail = err_text[-500:]
+                        summary = f"{summary}\n{tail}"
+                except Exception:
+                    pass
+            return StepResult(status="error", summary=summary)
         if result.exit_code != 0:
             summary = f"Worker exited with code {result.exit_code}"
             # Try to include stderr info
@@ -589,13 +752,19 @@ class LiveWorkerAdapter:
             if isinstance(parsed, dict):
                 summary = parsed.get("plan") or parsed.get("summary")
                 if summary:
-                    return StepResult(status="ok", summary=str(summary))
-            return StepResult(status="ok", summary=result.response_text[:20000])
+                    return StepResult(status="ok", summary=_normalize_planning_text(str(summary))[:20000])
+            return StepResult(status="ok", summary=_normalize_planning_text(result.response_text)[:20000])
 
         if category == "task_generation" and result.response_text:
-            parsed = _extract_json(result.response_text)
-            if isinstance(parsed, dict):
-                tasks = parsed.get("tasks")
+            parsed_value = _extract_json_value(result.response_text)
+            if isinstance(parsed_value, list):
+                return StepResult(status="ok", generated_tasks=parsed_value)
+            if isinstance(parsed_value, dict):
+                tasks = (
+                    parsed_value.get("tasks")
+                    or parsed_value.get("subtasks")
+                    or parsed_value.get("items")
+                )
                 if isinstance(tasks, list):
                     return StepResult(status="ok", generated_tasks=tasks)
 

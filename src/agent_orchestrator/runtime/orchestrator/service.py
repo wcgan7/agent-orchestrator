@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -18,6 +19,25 @@ from .worker_adapter import DefaultWorkerAdapter, StepResult, WorkerAdapter
 
 logger = logging.getLogger(__name__)
 
+_REFINE_SUMMARY_MARKERS: tuple[str, ...] = (
+    "the plan has been prepared",
+    "here's a summary",
+    "here is a summary",
+    "summary of the key",
+    "key changes",
+    "the rest of the plan remains",
+    "other plan details remain",
+    "should i write the full plan",
+    "would you like me to write the full plan",
+    "tools used:",
+)
+_REFINE_TRAILING_QUESTION_PREFIXES: tuple[str, ...] = (
+    "should i ",
+    "would you like",
+    "do you want me to ",
+    "want me to ",
+)
+
 
 def _has_cycle(adj: dict[str, list[str]], from_id: str, to_id: str) -> bool:
     """Return True if adding an edge from_id→to_id would create a cycle.
@@ -34,6 +54,34 @@ def _has_cycle(adj: dict[str, list[str]], from_id: str, to_id: str) -> bool:
             continue
         visited.add(node)
         stack.extend(adj.get(node, []))
+    return False
+
+
+def _looks_like_partial_refine_output(text: str) -> bool:
+    """Return True when refine output appears to be a summary, not full plan."""
+    normalized = str(text or "").strip()
+    if not normalized:
+        return False
+
+    lowered = normalized.lower()
+    if any(marker in lowered for marker in _REFINE_SUMMARY_MARKERS):
+        return True
+
+    lines = normalized.splitlines()
+    if lines:
+        first = lines[0].strip().lower()
+        if first.startswith("the plan has been prepared"):
+            return True
+        if any(first.startswith(prefix) for prefix in _REFINE_TRAILING_QUESTION_PREFIXES):
+            return True
+
+    # Common wrapper heading pattern: "Refined Plan — Key Changes"
+    for line in lines[:6]:
+        if re.search(r"refined\s+plan", line, flags=re.IGNORECASE) and re.search(
+            r"key\s+changes", line, flags=re.IGNORECASE
+        ):
+            return True
+
     return False
 
 
@@ -78,7 +126,7 @@ class OrchestratorService:
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         tasks = self.container.tasks.list()
-        queue_depth = len([task for task in tasks if task.status == "ready"])
+        queue_depth = len([task for task in tasks if task.status == "queued"])
         in_progress = len([task for task in tasks if task.status == "in_progress"])
         with self._futures_lock:
             active_workers = len(self._futures)
@@ -159,7 +207,7 @@ class OrchestratorService:
         for task in tasks:
             if task.id not in in_progress_ids:
                 continue
-            task.status = "ready"
+            task.status = "queued"
             task.current_step = None
             task.current_agent_id = None
             task.pending_gate = None
@@ -226,7 +274,7 @@ class OrchestratorService:
                     dep = self.container.tasks.get(dep_id)
                     if dep is None or dep.status not in terminal:
                         raise ValueError(f"Task {task_id} has unresolved blocker {dep_id}")
-                task.status = "ready"
+                task.status = "queued"
                 self.container.tasks.upsert(task)
 
         if wait_existing:
@@ -460,12 +508,15 @@ class OrchestratorService:
         job.status = "running"
         job.started_at = now_iso()
         self.container.plan_refine_jobs.upsert(job)
-        self.bus.emit(
-            channel="tasks",
-            event_type="plan.refine.started",
-            entity_id=job.task_id,
-            payload={"job_id": job.id},
-        )
+        try:
+            self.bus.emit(
+                channel="tasks",
+                event_type="plan.refine.started",
+                entity_id=job.task_id,
+                payload={"job_id": job.id},
+            )
+        except Exception:
+            logger.exception("Failed to emit plan.refine.started for job %s", job.id)
         task = self.container.tasks.get(job.task_id)
         base_revision = self.container.plan_revisions.get(job.base_revision_id)
         if not task or not base_revision or base_revision.task_id != job.task_id:
@@ -503,23 +554,42 @@ class OrchestratorService:
         self.container.tasks.upsert(live_task)
 
         try:
-            result = self.worker_adapter.run_step(task=live_task, step="plan_refine", attempt=1)
-            if result.status != "ok":
-                raise ValueError(result.summary or "plan_refine failed")
-            revised_plan = str(result.summary or "").strip()
-            if not revised_plan:
-                raise ValueError("Worker returned empty refined plan")
-            provider, model = self._resolve_worker_lineage(live_task, "plan_refine")
-            revision = self.create_plan_revision(
-                task_id=job.task_id,
-                content=revised_plan,
-                source="worker_refine",
-                parent_revision_id=base_revision.id,
-                step="plan_refine",
-                feedback_note=job.feedback,
-                provider=provider,
-                model=model,
-            )
+            try:
+                result = self.worker_adapter.run_step(task=live_task, step="plan_refine", attempt=1)
+                if result.status != "ok":
+                    raise ValueError(result.summary or "plan_refine failed")
+                revised_plan = str(result.summary or "").strip()
+                if not revised_plan:
+                    raise ValueError("Worker returned empty refined plan")
+                if _looks_like_partial_refine_output(revised_plan):
+                    raise ValueError("Worker returned summary-style output; full rewritten plan is required")
+                provider, model = self._resolve_worker_lineage(live_task, "plan_refine")
+                revision = self.create_plan_revision(
+                    task_id=job.task_id,
+                    content=revised_plan,
+                    source="worker_refine",
+                    parent_revision_id=base_revision.id,
+                    step="plan_refine",
+                    feedback_note=job.feedback,
+                    provider=provider,
+                    model=model,
+                )
+            except Exception as exc:
+                job.status = "failed"
+                job.finished_at = now_iso()
+                job.error = str(exc)
+                self.container.plan_refine_jobs.upsert(job)
+                try:
+                    self.bus.emit(
+                        channel="tasks",
+                        event_type="plan.refine.failed",
+                        entity_id=job.task_id,
+                        payload={"job_id": job.id, "error": job.error},
+                    )
+                except Exception:
+                    logger.exception("Failed to emit plan.refine.failed for job %s", job.id)
+                return job
+
             refreshed = self.container.tasks.get(live_task.id)
             if refreshed and isinstance(refreshed.metadata, dict):
                 live_task.metadata = dict(refreshed.metadata)
@@ -528,24 +598,15 @@ class OrchestratorService:
             job.result_revision_id = revision.id
             job.error = None
             self.container.plan_refine_jobs.upsert(job)
-            self.bus.emit(
-                channel="tasks",
-                event_type="plan.refine.completed",
-                entity_id=job.task_id,
-                payload={"job_id": job.id, "result_revision_id": revision.id},
-            )
-            return job
-        except Exception as exc:
-            job.status = "failed"
-            job.finished_at = now_iso()
-            job.error = str(exc)
-            self.container.plan_refine_jobs.upsert(job)
-            self.bus.emit(
-                channel="tasks",
-                event_type="plan.refine.failed",
-                entity_id=job.task_id,
-                payload={"job_id": job.id, "error": job.error},
-            )
+            try:
+                self.bus.emit(
+                    channel="tasks",
+                    event_type="plan.refine.completed",
+                    entity_id=job.task_id,
+                    payload={"job_id": job.id, "result_revision_id": revision.id},
+                )
+            except Exception:
+                logger.exception("Failed to emit plan.refine.completed for job %s", job.id)
             return job
         finally:
             cleanup_task = self.container.tasks.get(job.task_id)
@@ -997,7 +1058,14 @@ class OrchestratorService:
             if result.status != "ok":
                 raise ValueError(f"generate_tasks step failed: {result.summary or result.status}")
             task_defs = list(result.generated_tasks or [])
+            if not task_defs:
+                detail = str(result.summary or "").strip()
+                if detail:
+                    raise ValueError(f"Worker returned no generated tasks: {detail}")
+                raise ValueError("Worker returned no generated tasks for the selected plan source")
             created_ids = self._create_child_tasks(task, task_defs, apply_deps=infer_deps)
+            if not created_ids:
+                raise ValueError("Worker returned generated tasks, but none were valid task objects")
         finally:
             # Clean up the injected plan context
             task.metadata.pop("plan_for_generation", None)
@@ -1119,7 +1187,7 @@ class OrchestratorService:
         all_tasks = self.container.tasks.list()
         candidates = [
             t for t in all_tasks
-            if t.status == "ready"
+            if t.status == "queued"
             and not (isinstance(t.metadata, dict) and t.metadata.get("deps_analyzed"))
             and t.source != "prd_import"
         ]

@@ -70,6 +70,7 @@ def test_findings_loop_until_zero_open_then_done(tmp_path: Path) -> None:
             '/api/tasks',
             json={
                 'title': 'Loop task',
+                'status': 'backlog',
                 'approval_mode': 'auto_approve',
                 'metadata': {
                     'scripted_findings': [
@@ -88,7 +89,7 @@ def test_findings_loop_until_zero_open_then_done(tmp_path: Path) -> None:
 def test_request_changes_reopens_task_with_feedback(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        task = client.post('/api/tasks', json={'title': 'Needs feedback', 'metadata': {'scripted_findings': [[]]}}).json()['task']
+        task = client.post('/api/tasks', json={'title': 'Needs feedback', 'status': 'backlog', 'metadata': {'scripted_findings': [[]]}}).json()['task']
         client.post(f"/api/tasks/{task['id']}/run")
 
         changed = client.post(
@@ -97,7 +98,7 @@ def test_request_changes_reopens_task_with_feedback(tmp_path: Path) -> None:
         )
         assert changed.status_code == 200
         body = changed.json()['task']
-        assert body['status'] == 'ready'
+        assert body['status'] == 'queued'
         assert body['metadata']['requested_changes']['guidance'] == 'Please add integration tests'
 
 
