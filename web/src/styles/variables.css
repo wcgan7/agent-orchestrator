@@ -5,17 +5,17 @@
  */
 
 :root {
-  /* Colors - Primary (Blue) */
-  --color-primary-50: #eff6ff;
-  --color-primary-100: #dbeafe;
-  --color-primary-200: #bfdbfe;
-  --color-primary-300: #93c5fd;
-  --color-primary-400: #60a5fa;
-  --color-primary-500: #3b82f6;
-  --color-primary-600: #2563eb;
-  --color-primary-700: #1d4ed8;
-  --color-primary-800: #1e40af;
-  --color-primary-900: #1e3a8a;
+  /* Colors - Primary (Green) */
+  --color-primary-50:  #f0faf4;
+  --color-primary-100: #d9f2e3;
+  --color-primary-200: #b0e4c7;
+  --color-primary-300: #7ccfa5;
+  --color-primary-400: #4ab77f;
+  --color-primary-500: #27945e;
+  --color-primary-600: #1f7a4f;
+  --color-primary-700: #196340;
+  --color-primary-800: #144e33;
+  --color-primary-900: #0f3a26;
 
   /* Colors - Success (Green) */
   --color-success-50: #f0fdf4;
@@ -78,21 +78,21 @@
   --color-gray-900: #111827;
 
   /* Semantic Color Aliases */
-  --color-text-primary: var(--color-gray-900);
-  --color-text-secondary: var(--color-gray-600);
-  --color-text-muted: var(--color-gray-500);
-  --color-text-disabled: var(--color-gray-400);
+  --color-text-primary: #12231a;
+  --color-text-secondary: #385243;
+  --color-text-muted: #5a7265;
+  --color-text-disabled: #8a9f92;
   --color-text-inverse: #ffffff;
 
   --color-bg-primary: #ffffff;
   --color-bg-secondary: var(--color-gray-50);
-  --color-bg-tertiary: var(--color-gray-100);
+  --color-bg-tertiary: #eaf0eb;
   --color-bg-hover: var(--color-gray-100);
   --color-bg-selected: var(--color-primary-50);
 
-  --color-border-default: var(--color-gray-200);
-  --color-border-light: var(--color-gray-100);
-  --color-border-dark: var(--color-gray-300);
+  --color-border-default: #c9d8cd;
+  --color-border-light: #e2ebe5;
+  --color-border-dark: #9ab7a4;
   --color-border-focus: var(--color-primary-500);
 
   /* Spacing Scale */
@@ -147,7 +147,7 @@
   --shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.04);
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
   --shadow-md: 0 4px 6px rgba(0, 0, 0, 0.05), 0 2px 4px rgba(0, 0, 0, 0.04);
-  --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.08), 0 4px 6px rgba(0, 0, 0, 0.04);
+  --shadow-lg: 0 20px 40px rgba(18, 35, 26, 0.08);
   --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.1), 0 10px 10px rgba(0, 0, 0, 0.04);
   --shadow-2xl: 0 25px 50px rgba(0, 0, 0, 0.15);
 
@@ -182,19 +182,6 @@
   /* --breakpoint-lg: 1024px; */
   /* --breakpoint-xl: 1280px; */
 
-  /* Semantic aliases used by new components (Kanban, Command Palette, etc.) */
-  --text-primary: var(--color-text-primary);
-  --text-secondary: var(--color-text-secondary);
-  --text-tertiary: var(--color-gray-400);
-  --surface-bg: var(--color-bg-primary);
-  --surface-secondary: var(--color-bg-secondary);
-  --surface-hover: var(--color-bg-hover);
-  --card-bg: var(--color-bg-primary);
-  --input-bg: var(--color-bg-primary);
-  --border-color: var(--color-border-default);
-  --border-hover: var(--color-border-dark);
-  --accent-color: var(--color-primary-500);
-  --accent-hover: var(--color-primary-600);
 }
 
 /* ========================================================================
@@ -227,19 +214,7 @@
   --shadow-lg: 0 10px 15px rgba(0, 0, 0, 0.3), 0 4px 6px rgba(0, 0, 0, 0.2);
   --shadow-xl: 0 20px 25px rgba(0, 0, 0, 0.35), 0 10px 10px rgba(0, 0, 0, 0.2);
 
-  /* Semantic aliases for new components */
-  --text-primary: #f9fafb;
-  --text-secondary: #d1d5db;
-  --text-tertiary: #6b7280;
-  --surface-bg: #111827;
-  --surface-secondary: #1f2937;
-  --surface-hover: #374151;
-  --card-bg: #1f2937;
-  --input-bg: #1f2937;
-  --border-color: #374151;
-  --border-hover: #4b5563;
-  --accent-color: #60a5fa;
-  --accent-hover: #3b82f6;
+  /* TODO: green-tinted dark neutrals when dark mode is actively used */
 }
 
 /* Respect system preference when no explicit theme is set */
@@ -256,17 +231,6 @@
     --color-border-light: #1f2937;
     --color-border-dark: #4b5563;
 
-    --text-primary: #f9fafb;
-    --text-secondary: #d1d5db;
-    --text-tertiary: #6b7280;
-    --surface-bg: #111827;
-    --surface-secondary: #1f2937;
-    --surface-hover: #374151;
-    --card-bg: #1f2937;
-    --input-bg: #1f2937;
-    --border-color: #374151;
-    --border-hover: #4b5563;
-    --accent-color: #60a5fa;
-    --accent-hover: #3b82f6;
+    /* TODO: green-tinted dark neutrals when dark mode is actively used */
   }
 }
