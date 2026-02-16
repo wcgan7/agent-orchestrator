@@ -1304,6 +1304,12 @@ export default function App() {
   const [planActionError, setPlanActionError] = useState('')
   const [taskDetailTab, setTaskDetailTab] = useState<TaskDetailTab>('overview')
   const [boardCompact, setBoardCompact] = useState(false)
+  const [pipelineHighlightStatus, setPipelineHighlightStatus] = useState('')
+  useEffect(() => {
+    if (!pipelineHighlightStatus) return
+    const timer = window.setTimeout(() => setPipelineHighlightStatus(''), 2500)
+    return () => window.clearTimeout(timer)
+  }, [pipelineHighlightStatus])
   // taskEditMode removed — configLocked (status-based) controls editability
   const [taskActionPending, setTaskActionPending] = useState<TaskActionKey | null>(null)
   const [taskActionMessage, setTaskActionMessage] = useState('')
@@ -1569,17 +1575,17 @@ export default function App() {
 
   useEffect(() => {
     if (route !== 'planning') return
-    const allTasks: TaskRecord[] = Object.values(board.columns).flat()
-    if (allTasks.length === 0) {
+    const planTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => t.task_type === 'plan' || t.task_type === 'plan_only')
+    if (planTasks.length === 0) {
       if (planningTaskId) setPlanningTaskId('')
       return
     }
 
-    const hasPlanningTask = !!(planningTaskId && allTasks.some((task) => task.id === planningTaskId))
-    const hasSelectedTask = !!(selectedTaskId && allTasks.some((task) => task.id === selectedTaskId))
+    const hasPlanningTask = !!(planningTaskId && planTasks.some((task) => task.id === planningTaskId))
+    const hasSelectedTask = !!(selectedTaskId && planTasks.some((task) => task.id === selectedTaskId))
     const nextTaskId = hasPlanningTask
       ? planningTaskId
-      : (hasSelectedTask ? selectedTaskId : allTasks[0].id)
+      : (hasSelectedTask ? selectedTaskId : planTasks[0].id)
 
     if (planningTaskId !== nextTaskId) {
       setPlanningTaskId(nextTaskId)
@@ -3834,31 +3840,27 @@ export default function App() {
     return (
       <section className="panel">
         <header className="panel-head">
-          <h2>Execution</h2>
+          <h2>Execution <span className={`status-pill status-pill-inline ${orchestrator?.status === 'running' ? (orchestrator?.draining ? 'status-blocked' : 'status-running') : orchestrator?.status === 'paused' ? 'status-paused' : 'status-failed'}`} style={{ verticalAlign: 'middle' }}>{humanizeLabel(orchestrator?.status === 'running' && orchestrator?.draining ? 'draining' : orchestrator?.status ?? 'unknown')}</span></h2>
           <div className="inline-actions">
-            {orchestrator?.status === 'running' ? <button className="button" onClick={() => void controlOrchestrator('pause')}>Pause</button> : null}
-            {orchestrator?.status === 'paused' || orchestrator?.status === 'stopped' ? <button className="button" onClick={() => void controlOrchestrator('resume')}>Resume</button> : null}
-            {orchestrator?.status === 'running' && !orchestrator?.draining ? <button className="button" onClick={() => void controlOrchestrator('drain')}>Drain</button> : null}
-            {orchestrator?.status !== 'stopped' ? <button className="button button-danger" onClick={() => void controlOrchestrator('stop')}>Stop</button> : null}
+            {orchestrator?.status === 'running' ? <button className="button" onClick={() => void controlOrchestrator('pause')}>Pause Queue</button> : null}
+            {orchestrator?.status === 'paused' || orchestrator?.status === 'stopped' ? <button className="button" onClick={() => void controlOrchestrator('resume')}>Start Queue</button> : null}
+            {orchestrator?.status === 'running' && !orchestrator?.draining ? <button className="button" onClick={() => void controlOrchestrator('drain')}>Finish &amp; Stop</button> : null}
+            {orchestrator?.status !== 'stopped' ? <button className="button button-danger" onClick={() => void controlOrchestrator('stop')}>Stop Queue</button> : null}
           </div>
         </header>
         <div className="status-grid">
-          <div className="status-card">
-            <span>State</span>
-            <strong>{humanizeLabel(orchestrator?.status ?? 'unknown')}</strong>
-          </div>
-          <div className="status-card">
+          <button className={`status-card status-card-clickable${pipelineHighlightStatus === 'queued' ? ' status-card-active' : ''}`} onClick={() => setPipelineHighlightStatus((prev) => prev === 'queued' ? '' : 'queued')}>
             <span>Queue</span>
             <strong>{orchestrator?.queue_depth ?? 0}</strong>
-          </div>
-          <div className="status-card">
+          </button>
+          <button className={`status-card status-card-clickable${pipelineHighlightStatus === 'in_progress' ? ' status-card-active' : ''}`} onClick={() => setPipelineHighlightStatus((prev) => prev === 'in_progress' ? '' : 'in_progress')}>
             <span>In Progress</span>
             <strong>{orchestrator?.in_progress ?? 0}</strong>
-          </div>
-          <div className="status-card">
+          </button>
+          <button className={`status-card status-card-clickable${pipelineHighlightStatus === 'blocked' ? ' status-card-active' : ''}`} onClick={() => setPipelineHighlightStatus((prev) => prev === 'blocked' ? '' : 'blocked')}>
             <span>Blocked</span>
             <strong>{blockedCount}</strong>
-          </div>
+          </button>
         </div>
         <div className="list-stack">
           <p className="field-label section-heading">Execution pipeline</p>
@@ -3876,8 +3878,10 @@ export default function App() {
                   return (
                     <span key={`batch-${index}-${taskId}`} className="wave-task-item">
                       {i > 0 ? <span className="wave-sep">|</span> : null}
-                      <button className="link-button" onClick={() => handleTaskSelect(taskId, 'logs')}>{label}</button>
-                      {status ? <span className={`status-pill status-pill-inline ${statusPillClass(status)}`}>{humanizeLabel(status)}</span> : null}
+                      <span className={pipelineHighlightStatus && status === pipelineHighlightStatus ? 'wave-task-highlight' : undefined}>
+                        <button className="link-button" onClick={() => handleTaskSelect(taskId, 'logs')}>{label}</button>
+                        {status ? <span className={`status-pill status-pill-inline ${statusPillClass(status)}`}>{humanizeLabel(status)}</span> : null}
+                      </span>
                     </span>
                   )
                 })}
@@ -4540,7 +4544,7 @@ export default function App() {
   }
 
   function renderPlanning(): JSX.Element {
-    const allTasks: TaskRecord[] = Object.values(board.columns).flat()
+    const allTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => t.task_type === 'plan' || t.task_type === 'plan_only')
     const planningTask = allTasks.find((t) => t.id === planningTaskId) || null
     const planRevisions = selectedTaskPlan?.revisions || []
     const selectedPlanRevision = selectedPlanRevisionId
@@ -4586,7 +4590,7 @@ export default function App() {
         </header>
         <div className="planning-layout">
           <aside className="planning-task-list">
-            <p className="field-label">Select a task</p>
+            <p className="field-label">Select a planning task</p>
             <div className="list-stack">
               {allTasks.map((task) => (
                 <button
@@ -4598,7 +4602,7 @@ export default function App() {
                   <p className="task-meta">{task.priority} · {humanizeLabel(task.status)} · {humanizeLabel(task.task_type || 'feature')}</p>
                 </button>
               ))}
-              {allTasks.length === 0 ? <p className="empty">No tasks yet.</p> : null}
+              {allTasks.length === 0 ? <p className="empty">No planning tasks yet. Create one with "Create Plan".</p> : null}
             </div>
           </aside>
           <div className="planning-content">

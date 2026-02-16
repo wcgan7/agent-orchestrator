@@ -470,7 +470,7 @@ a:focus-visible {
 .settings-grid {
   display: grid;
   gap: 0.7rem;
-  grid-template-columns: repeat(4, minmax(130px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
 }
 
 .settings-grid {
@@ -514,6 +514,23 @@ a:focus-visible {
 
 .status-card strong {
   font-size: 1rem;
+}
+
+.status-card-clickable {
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.status-card-clickable:hover {
+  border-color: var(--color-primary-600);
+  background: rgba(31, 122, 79, 0.04);
+}
+
+.status-card-active {
+  border-color: var(--color-primary-600);
+  background: rgba(31, 122, 79, 0.06);
 }
 
 .list-stack,
@@ -1639,6 +1656,12 @@ textarea {
 
 .wave-task-item {
   white-space: nowrap;
+}
+
+.wave-task-highlight {
+  background: rgba(31, 122, 79, 0.1);
+  padding: 0.1rem 0.35rem;
+  border-radius: 6px;
 }
 
 .wave-sep {
