@@ -2,7 +2,6 @@ import { FormEvent, useEffect, useRef, useState } from 'react'
 import { buildApiUrl, buildAuthHeaders } from './api'
 import { ImportJobPanel } from './components/AppPanels/ImportJobPanel'
 import { QuickActionDetailPanel } from './components/AppPanels/QuickActionDetailPanel'
-import { TaskExplorerPanel } from './components/AppPanels/TaskExplorerPanel'
 import HITLModeSelector from './components/HITLModeSelector/HITLModeSelector'
 import Markdown from 'react-markdown'
 import { humanizeLabel } from './ui/labels'
@@ -129,12 +128,33 @@ type TaskLogsSnapshot = {
   stderr: string
   stdout_offset?: number
   stderr_offset?: number
+  stdout_chunk_start?: number
+  stderr_chunk_start?: number
   stdout_tail_start?: number
   stderr_tail_start?: number
   started_at?: string | null
   finished_at?: string | null
+  log_id?: string
   progress?: Record<string, unknown>
 }
+
+type LogAccumPhase = 'init' | 'backfill' | 'forward'
+
+type LogAccumState = {
+  taskId: string
+  logId: string
+  stdoutOffset: number
+  stderrOffset: number
+  stdoutBackfillOffset: number
+  stderrBackfillOffset: number
+  stdout: string
+  stderr: string
+  phase: LogAccumPhase
+  stdoutTailStart: number
+  stderrTailStart: number
+}
+
+type LogPaneKey = 'stdout' | 'stderr'
 
 type ImportJobRecord = {
   id: string
@@ -319,6 +339,25 @@ const STORAGE_ROUTE = 'agent-orchestrator-route'
 const ADD_REPO_VALUE = '__add_new_repo__'
 const MOBILE_BOARD_BREAKPOINT = 640
 const WS_RELOAD_CHANNELS = new Set(['tasks', 'queue', 'agents', 'review', 'quick_actions', 'notifications'])
+const LOG_CHUNK_CHARS = 200_000
+const LOG_HISTORY_MAX_CHARS = 5_000_000
+const LOG_NEAR_BOTTOM_PX = 120
+
+function createEmptyLogAccum(taskId = ''): LogAccumState {
+  return {
+    taskId,
+    logId: '',
+    stdoutOffset: 0,
+    stderrOffset: 0,
+    stdoutBackfillOffset: 0,
+    stderrBackfillOffset: 0,
+    stdout: '',
+    stderr: '',
+    phase: 'init',
+    stdoutTailStart: 0,
+    stderrTailStart: 0,
+  }
+}
 
 const ROUTES: Array<{ key: RouteKey; label: string }> = [
   { key: 'board', label: 'Board' },
@@ -1338,11 +1377,17 @@ export default function App() {
   const planManualSeedRef = useRef<{ taskId: string; workerText: string }>({ taskId: '', workerText: '' })
   const planRefineOutputRef = useRef<{ taskId: string; jobKey: string; text: string }>({ taskId: '', jobKey: '', text: '' })
   const planGenerateOutputRef = useRef<{ taskId: string; jobKey: string; text: string }>({ taskId: '', jobKey: '', text: '' })
-  const logAccumRef = useRef<{ taskId: string; stdoutOffset: number; stderrOffset: number; stdout: string; stderr: string; phase: 'init' | 'backfill' | 'forward'; stdoutTailStart: number; stderrTailStart: number }>({ taskId: '', stdoutOffset: 0, stderrOffset: 0, stdout: '', stderr: '', phase: 'init', stdoutTailStart: 0, stderrTailStart: 0 })
+  const logAccumRef = useRef<LogAccumState>(createEmptyLogAccum())
   const [stdoutHistory, setStdoutHistory] = useState('')
   const [stderrHistory, setStderrHistory] = useState('')
   const stdoutPreRef = useRef<HTMLPreElement>(null)
   const stderrPreRef = useRef<HTMLPreElement>(null)
+  const taskLogsRequestSeqRef = useRef(0)
+  const logAutoPinRef = useRef<Record<LogPaneKey, boolean>>({ stdout: true, stderr: true })
+  const logScrollSnapshotRef = useRef<Record<LogPaneKey, { top: number; height: number; op: 'none' | 'prepend' | 'append' | 'reset' }>>({
+    stdout: { top: 0, height: 0, op: 'none' },
+    stderr: { top: 0, height: 0, op: 'none' },
+  })
 
   const [importText, setImportText] = useState('')
   const [importJobId, setImportJobId] = useState('')
@@ -1874,77 +1919,200 @@ export default function App() {
     }
   }
 
+  function getLogPaneElement(pane: LogPaneKey): HTMLPreElement | null {
+    return pane === 'stdout' ? stdoutPreRef.current : stderrPreRef.current
+  }
+
+  function updateLogAutoPin(pane: LogPaneKey): void {
+    const el = getLogPaneElement(pane)
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    logAutoPinRef.current[pane] = distanceFromBottom < LOG_NEAR_BOTTOM_PX
+  }
+
+  function handleLogPaneScroll(pane: LogPaneKey): void {
+    updateLogAutoPin(pane)
+  }
+
+  function snapshotLogScrollOps(stdoutOp: 'none' | 'prepend' | 'append' | 'reset', stderrOp: 'none' | 'prepend' | 'append' | 'reset'): void {
+    const stdoutEl = stdoutPreRef.current
+    const stderrEl = stderrPreRef.current
+    logScrollSnapshotRef.current.stdout = {
+      top: stdoutEl ? stdoutEl.scrollTop : 0,
+      height: stdoutEl ? stdoutEl.scrollHeight : 0,
+      op: stdoutOp,
+    }
+    logScrollSnapshotRef.current.stderr = {
+      top: stderrEl ? stderrEl.scrollTop : 0,
+      height: stderrEl ? stderrEl.scrollHeight : 0,
+      op: stderrOp,
+    }
+  }
+
   async function loadTaskLogs(taskId: string, quiet = false): Promise<void> {
     if (!taskId) {
       setSelectedTaskLogs(null)
       setSelectedTaskLogsError('')
       return
     }
+    const requestSeq = taskLogsRequestSeqRef.current + 1
+    taskLogsRequestSeqRef.current = requestSeq
     if (!quiet) setSelectedTaskLogsLoading(true)
+    let continueBackfill = false
     try {
+      if (logAccumRef.current.taskId !== taskId) {
+        logAccumRef.current = createEmptyLogAccum(taskId)
+      }
       const accum = logAccumRef.current
-      if (accum.taskId !== taskId) {
-        accum.taskId = taskId; accum.stdoutOffset = 0; accum.stderrOffset = 0
-        accum.stdout = ''; accum.stderr = ''; accum.phase = 'init'
-        accum.stdoutTailStart = 0; accum.stderrTailStart = 0
-      }
+      const backfillStdoutBefore = accum.stdoutBackfillOffset
+      const backfillStderrBefore = accum.stderrBackfillOffset
       const params = new URLSearchParams()
+      params.set('max_chars', String(LOG_CHUNK_CHARS))
       if (accum.phase === 'backfill') {
-        // Read from byte 0 up to where the tail starts (no overlap)
-        params.set('stdout_offset', '0')
-        params.set('stderr_offset', '0')
         params.set('backfill', 'true')
-        params.set('max_chars', '200000')
-        if (accum.stdoutTailStart > 0) params.set('stdout_read_to', String(accum.stdoutTailStart))
-        if (accum.stderrTailStart > 0) params.set('stderr_read_to', String(accum.stderrTailStart))
+        const stdoutNeedsBackfill = accum.stdoutTailStart > 0 && accum.stdoutBackfillOffset > 0
+        const stderrNeedsBackfill = accum.stderrTailStart > 0 && accum.stderrBackfillOffset > 0
+
+        const stdoutReadTo = stdoutNeedsBackfill ? accum.stdoutBackfillOffset : accum.stdoutOffset
+        const stderrReadTo = stderrNeedsBackfill ? accum.stderrBackfillOffset : accum.stderrOffset
+        const stdoutOffset = stdoutNeedsBackfill
+          ? Math.max(0, accum.stdoutBackfillOffset - LOG_CHUNK_CHARS)
+          : accum.stdoutOffset
+        const stderrOffset = stderrNeedsBackfill
+          ? Math.max(0, accum.stderrBackfillOffset - LOG_CHUNK_CHARS)
+          : accum.stderrOffset
+
+        params.set('stdout_offset', String(stdoutOffset))
+        params.set('stderr_offset', String(stderrOffset))
+        params.set('stdout_read_to', String(stdoutReadTo))
+        params.set('stderr_read_to', String(stderrReadTo))
       } else if (accum.phase === 'forward') {
-        // Incremental: read from where we left off
-        if (accum.stdoutOffset > 0) params.set('stdout_offset', String(accum.stdoutOffset))
-        if (accum.stderrOffset > 0) params.set('stderr_offset', String(accum.stderrOffset))
+        // Incremental: read from where we left off.
+        params.set('stdout_offset', String(Math.max(0, accum.stdoutOffset)))
+        params.set('stderr_offset', String(Math.max(0, accum.stderrOffset)))
       }
-      // phase === 'init': no offset params → tail read
       const qs = params.toString()
       const url = buildApiUrl(`/api/tasks/${taskId}/logs${qs ? `?${qs}` : ''}`, projectDir)
       const payload = await requestJson<TaskLogsSnapshot>(url)
-      if (selectedTaskIdRef.current !== taskId) return
+      if (requestSeq !== taskLogsRequestSeqRef.current || selectedTaskIdRef.current !== taskId) return
+
+      const payloadLogId = String(payload.log_id || payload.started_at || '').trim()
+      if (accum.logId && payloadLogId && accum.logId !== payloadLogId) {
+        const reset = createEmptyLogAccum(taskId)
+        reset.logId = payloadLogId
+        logAccumRef.current = reset
+        snapshotLogScrollOps('reset', 'reset')
+        setStdoutHistory('')
+        setStderrHistory('')
+        void loadTaskLogs(taskId, true)
+        return
+      }
+      if (!accum.logId && payloadLogId) {
+        accum.logId = payloadLogId
+      }
+
       setSelectedTaskLogs(payload)
       setSelectedTaskLogsError('')
-      const MAX_HISTORY_CHARS = 500_000
+
+      const prevStdout = accum.stdout
+      const prevStderr = accum.stderr
+      let stdoutOp: 'none' | 'prepend' | 'append' | 'reset' = 'none'
+      let stderrOp: 'none' | 'prepend' | 'append' | 'reset' = 'none'
+
+      const stdoutBackfillRequested = accum.phase === 'backfill' && accum.stdoutTailStart > 0 && accum.stdoutBackfillOffset > 0
+      const stderrBackfillRequested = accum.phase === 'backfill' && accum.stderrTailStart > 0 && accum.stderrBackfillOffset > 0
+      const nextStdoutBackfillOffset = stdoutBackfillRequested
+        ? Math.max(0, accum.stdoutBackfillOffset - LOG_CHUNK_CHARS)
+        : accum.stdoutBackfillOffset
+      const nextStderrBackfillOffset = stderrBackfillRequested
+        ? Math.max(0, accum.stderrBackfillOffset - LOG_CHUNK_CHARS)
+        : accum.stderrBackfillOffset
+
       if (accum.phase === 'init') {
-        // Initial tail read — show latest immediately
-        accum.stdout = payload.stdout || ''
-        accum.stderr = payload.stderr || ''
+        const incomingStdout = payload.stdout || ''
+        const incomingStderr = payload.stderr || ''
+        accum.stdout = incomingStdout
+        accum.stderr = incomingStderr
+        if (incomingStdout !== prevStdout) stdoutOp = 'reset'
+        if (incomingStderr !== prevStderr) stderrOp = 'reset'
         if (payload.stdout_offset != null) accum.stdoutOffset = payload.stdout_offset
         if (payload.stderr_offset != null) accum.stderrOffset = payload.stderr_offset
         accum.stdoutTailStart = payload.stdout_tail_start || 0
         accum.stderrTailStart = payload.stderr_tail_start || 0
+        accum.stdoutBackfillOffset = accum.stdoutTailStart
+        accum.stderrBackfillOffset = accum.stderrTailStart
         accum.phase = (accum.stdoutTailStart > 0 || accum.stderrTailStart > 0) ? 'backfill' : 'forward'
       } else if (accum.phase === 'backfill') {
-        // Prepend older content only for streams that had a partial tail read
-        if (payload.stdout && accum.stdoutTailStart > 0) accum.stdout = payload.stdout + accum.stdout
-        if (payload.stderr && accum.stderrTailStart > 0) accum.stderr = payload.stderr + accum.stderr
-        accum.phase = 'forward'
+        const stdoutNeedsBackfill = stdoutBackfillRequested
+        const stderrNeedsBackfill = stderrBackfillRequested
+
+        if (stdoutNeedsBackfill) {
+          if (payload.stdout) {
+            accum.stdout = payload.stdout + accum.stdout
+            stdoutOp = 'prepend'
+          }
+          const reportedStart = typeof payload.stdout_chunk_start === 'number'
+            ? payload.stdout_chunk_start
+            : nextStdoutBackfillOffset
+          accum.stdoutBackfillOffset = Math.max(0, Math.min(reportedStart, accum.stdoutBackfillOffset))
+        }
+        if (stderrNeedsBackfill) {
+          if (payload.stderr) {
+            accum.stderr = payload.stderr + accum.stderr
+            stderrOp = 'prepend'
+          }
+          const reportedStart = typeof payload.stderr_chunk_start === 'number'
+            ? payload.stderr_chunk_start
+            : nextStderrBackfillOffset
+          accum.stderrBackfillOffset = Math.max(0, Math.min(reportedStart, accum.stderrBackfillOffset))
+        }
+
+        const stdoutBackfillDone = accum.stdoutTailStart <= 0 || accum.stdoutBackfillOffset <= 0
+        const stderrBackfillDone = accum.stderrTailStart <= 0 || accum.stderrBackfillOffset <= 0
+        if (stdoutBackfillDone && stderrBackfillDone) {
+          accum.phase = 'forward'
+        }
       } else {
-        // Forward incremental — append new content
-        if (payload.stdout) accum.stdout += payload.stdout
-        if (payload.stderr) accum.stderr += payload.stderr
+        if (payload.stdout) {
+          accum.stdout += payload.stdout
+          stdoutOp = 'append'
+        }
+        if (payload.stderr) {
+          accum.stderr += payload.stderr
+          stderrOp = 'append'
+        }
         if (payload.stdout_offset != null) accum.stdoutOffset = payload.stdout_offset
         if (payload.stderr_offset != null) accum.stderrOffset = payload.stderr_offset
       }
-      // Trim if too large (keep tail)
-      if (accum.stdout.length > MAX_HISTORY_CHARS) accum.stdout = accum.stdout.slice(accum.stdout.length - MAX_HISTORY_CHARS)
-      if (accum.stderr.length > MAX_HISTORY_CHARS) accum.stderr = accum.stderr.slice(accum.stderr.length - MAX_HISTORY_CHARS)
+
+      if (accum.stdout.length > LOG_HISTORY_MAX_CHARS) {
+        accum.stdout = accum.stdout.slice(accum.stdout.length - LOG_HISTORY_MAX_CHARS)
+        stdoutOp = 'reset'
+      }
+      if (accum.stderr.length > LOG_HISTORY_MAX_CHARS) {
+        accum.stderr = accum.stderr.slice(accum.stderr.length - LOG_HISTORY_MAX_CHARS)
+        stderrOp = 'reset'
+      }
+
+      snapshotLogScrollOps(stdoutOp, stderrOp)
       setStdoutHistory(accum.stdout)
       setStderrHistory(accum.stderr)
+      const stdoutProgressed = accum.stdoutBackfillOffset < backfillStdoutBefore
+      const stderrProgressed = accum.stderrBackfillOffset < backfillStderrBefore
+      continueBackfill = accum.phase === 'backfill' && (stdoutProgressed || stderrProgressed)
     } catch (err) {
-      if (selectedTaskIdRef.current !== taskId) return
+      if (requestSeq !== taskLogsRequestSeqRef.current || selectedTaskIdRef.current !== taskId) return
       setSelectedTaskLogs(null)
       if (!quiet) {
         const detail = err instanceof Error ? err.message : 'unknown error'
         setSelectedTaskLogsError(`Failed to load logs (${detail})`)
       }
     } finally {
-      if (!quiet) setSelectedTaskLogsLoading(false)
+      if (requestSeq === taskLogsRequestSeqRef.current && !quiet) setSelectedTaskLogsLoading(false)
+    }
+    if (continueBackfill && requestSeq === taskLogsRequestSeqRef.current && selectedTaskIdRef.current === taskId) {
+      // Drain historical backfill quickly so rendered text stabilizes sooner.
+      void loadTaskLogs(taskId, true)
     }
   }
 
@@ -1954,10 +2122,21 @@ export default function App() {
       setCollaborationError('')
       setSelectedTaskLogs(null)
       setSelectedTaskLogsError('')
-      logAccumRef.current = { taskId: '', stdoutOffset: 0, stderrOffset: 0, stdout: '', stderr: '', phase: 'init', stdoutTailStart: 0, stderrTailStart: 0 }
+      logAccumRef.current = createEmptyLogAccum()
+      taskLogsRequestSeqRef.current += 1
+      logAutoPinRef.current = { stdout: true, stderr: true }
+      logScrollSnapshotRef.current = {
+        stdout: { top: 0, height: 0, op: 'none' },
+        stderr: { top: 0, height: 0, op: 'none' },
+      }
       setStdoutHistory('')
       setStderrHistory('')
       return
+    }
+    logAutoPinRef.current = { stdout: true, stderr: true }
+    logScrollSnapshotRef.current = {
+      stdout: { top: 0, height: 0, op: 'reset' },
+      stderr: { top: 0, height: 0, op: 'reset' },
     }
     void loadCollaboration(selectedTaskId)
     void loadTaskLogs(selectedTaskId)
@@ -1971,20 +2150,28 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [selectedTaskId, projectDir])
 
-  // Auto-scroll log panes to bottom when content changes (forward/init only)
+  // Keep log panes pinned to bottom unless user scrolled up.
   useEffect(() => {
-    const phase = logAccumRef.current.phase
-    // On init or forward, scroll to bottom if user is near bottom already
-    if (phase === 'init' || phase === 'forward') {
-      for (const ref of [stdoutPreRef, stderrPreRef]) {
-        const el = ref.current
-        if (!el) continue
-        const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120
-        if (atBottom) el.scrollTop = el.scrollHeight
+    const panes: LogPaneKey[] = ['stdout', 'stderr']
+    for (const pane of panes) {
+      const el = getLogPaneElement(pane)
+      if (!el) continue
+      const snap = logScrollSnapshotRef.current[pane]
+      const shouldPin = logAutoPinRef.current[pane]
+      if (shouldPin) {
+        el.scrollTop = el.scrollHeight
+      } else if (snap.op === 'prepend') {
+        const delta = el.scrollHeight - snap.height
+        if (delta !== 0) {
+          el.scrollTop = Math.max(0, snap.top + delta)
+        }
+      }
+      logScrollSnapshotRef.current[pane] = {
+        top: el.scrollTop,
+        height: el.scrollHeight,
+        op: 'none',
       }
     }
-    // On backfill (prepend), preserve scroll position — no action needed since
-    // new content is prepended above the current viewport.
   }, [stdoutHistory, stderrHistory])
 
   async function loadTaskExplorer(): Promise<void> {
@@ -3582,7 +3769,7 @@ export default function App() {
               {selectedTaskLogsLoading ? <p className="field-label">Loading logs...</p> : null}
               {selectedTaskLogsError ? <p className="error-banner">{selectedTaskLogsError}</p> : null}
               {progressEntries.length > 0 ? (
-                <div className="preview-box task-run-snapshot">
+                <div className="preview-box">
                   <p className="field-label">Run snapshot</p>
                   {progressEntries.map((item) => (
                     <p className="task-meta" key={`detail-log-progress-${item.key}`}>
@@ -3598,11 +3785,11 @@ export default function App() {
                     {renderedStdout.structured ? (
                       <p className="task-meta">Parsed {renderedStdout.parsedLines} JSON lines · {renderedStdout.streamEvents} stream events</p>
                     ) : null}
-                    <pre className="task-log-output" ref={stdoutPreRef}>{renderedStdout.text || '(empty)'}</pre>
+                    <pre className="task-log-output" ref={stdoutPreRef} onScroll={() => handleLogPaneScroll('stdout')}>{renderedStdout.text || '(empty)'}</pre>
                   </div>
                   <div className="task-log-pane">
                     <p className="field-label">Stderr</p>
-                    <pre className="task-log-output" ref={stderrPreRef}>{stderrHistory || '(empty)'}</pre>
+                    <pre className="task-log-output" ref={stderrPreRef} onScroll={() => handleLogPaneScroll('stderr')}>{stderrHistory || '(empty)'}</pre>
                   </div>
                 </div>
               ) : (
