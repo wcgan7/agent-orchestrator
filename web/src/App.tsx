@@ -267,33 +267,6 @@ type HumanBlockingIssue = {
   severity?: string
 }
 
-type CollaborationFeedbackItem = {
-  id: string
-  task_id: string
-  feedback_type: string
-  priority: string
-  status: string
-  summary: string
-  details: string
-  target_file?: string | null
-  created_by?: string | null
-  created_at?: string | null
-  agent_response?: string | null
-}
-
-type CollaborationCommentItem = {
-  id: string
-  task_id: string
-  file_path: string
-  line_number: number
-  line_type?: string | null
-  body: string
-  author?: string | null
-  created_at?: string | null
-  resolved: boolean
-  parent_id?: string | null
-}
-
 type PlanRevisionRecord = {
   id: string
   task_id: string
@@ -337,7 +310,6 @@ type TaskPlanDocument = {
 const STORAGE_PROJECT = 'agent-orchestrator-project'
 const STORAGE_ROUTE = 'agent-orchestrator-route'
 const ADD_REPO_VALUE = '__add_new_repo__'
-const MOBILE_BOARD_BREAKPOINT = 640
 const WS_RELOAD_CHANNELS = new Set(['tasks', 'queue', 'agents', 'review', 'quick_actions', 'notifications'])
 const LOG_CHUNK_CHARS = 200_000
 const LOG_HISTORY_MAX_CHARS = 5_000_000
@@ -380,7 +352,6 @@ const TASK_TYPE_OPTIONS = [
   'performance',
 ]
 
-const TASK_STATUS_OPTIONS = ['backlog', 'queued', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled']
 const DEFAULT_COLLABORATION_MODES: CollaborationMode[] = [
   { mode: 'autopilot', display_name: 'Autopilot', description: 'Agents run freely.' },
   { mode: 'supervised', display_name: 'Supervised', description: 'Approve each step.' },
@@ -486,10 +457,6 @@ function routeFromHash(hash: string): RouteKey {
 
 function toHash(route: RouteKey): string {
   return `#/${route}`
-}
-
-function isMobileBoardViewport(): boolean {
-  return window.innerWidth <= MOBILE_BOARD_BREAKPOINT
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -893,49 +860,6 @@ function normalizeTimelineEvents(payload: unknown): CollaborationTimelineEvent[]
     .filter((item) => !!item.id)
 }
 
-function normalizeFeedbackItems(payload: unknown): CollaborationFeedbackItem[] {
-  const feedbackRaw = payload && typeof payload === 'object' && !Array.isArray(payload) && Array.isArray((payload as { feedback?: unknown[] }).feedback)
-    ? (payload as { feedback: unknown[] }).feedback
-    : []
-  return feedbackRaw
-    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
-    .map((item) => ({
-      id: String(item.id || '').trim(),
-      task_id: String(item.task_id || '').trim(),
-      feedback_type: String(item.feedback_type || 'general').trim(),
-      priority: String(item.priority || 'should').trim(),
-      status: String(item.status || 'active').trim(),
-      summary: String(item.summary || '').trim(),
-      details: String(item.details || '').trim(),
-      target_file: item.target_file ? String(item.target_file) : null,
-      created_by: item.created_by ? String(item.created_by) : null,
-      created_at: item.created_at ? String(item.created_at) : null,
-      agent_response: item.agent_response ? String(item.agent_response) : null,
-    }))
-    .filter((item) => !!item.id)
-}
-
-function normalizeComments(payload: unknown): CollaborationCommentItem[] {
-  const commentsRaw = payload && typeof payload === 'object' && !Array.isArray(payload) && Array.isArray((payload as { comments?: unknown[] }).comments)
-    ? (payload as { comments: unknown[] }).comments
-    : []
-  return commentsRaw
-    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
-    .map((item) => ({
-      id: String(item.id || '').trim(),
-      task_id: String(item.task_id || '').trim(),
-      file_path: String(item.file_path || '').trim(),
-      line_number: Number.isFinite(Number(item.line_number)) ? Math.max(0, Math.floor(Number(item.line_number))) : 0,
-      line_type: item.line_type ? String(item.line_type) : null,
-      body: String(item.body || '').trim(),
-      author: item.author ? String(item.author) : null,
-      created_at: item.created_at ? String(item.created_at) : null,
-      resolved: Boolean(item.resolved),
-      parent_id: item.parent_id ? String(item.parent_id) : null,
-    }))
-    .filter((item) => !!item.id)
-}
-
 function normalizePlanRevision(item: unknown): PlanRevisionRecord | null {
   if (!item || typeof item !== 'object' || Array.isArray(item)) return null
   const raw = item as Record<string, unknown>
@@ -1294,7 +1218,6 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectRef[]>([])
   const [pinnedProjects, setPinnedProjects] = useState<PinnedProjectRef[]>([])
   const [quickActions, setQuickActions] = useState<QuickActionRecord[]>([])
-  const [taskExplorerItems, setTaskExplorerItems] = useState<TaskRecord[]>([])
   const [executionBatches, setExecutionBatches] = useState<string[][]>([])
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null)
   const [activeProjectId, setActiveProjectId] = useState('')
@@ -1359,15 +1282,16 @@ export default function App() {
   const [newDependencyId, setNewDependencyId] = useState('')
   const [dependencyActionLoading, setDependencyActionLoading] = useState(false)
   const [dependencyActionMessage, setDependencyActionMessage] = useState('')
-  const [taskExplorerQuery, setTaskExplorerQuery] = useState('')
-  const [taskExplorerStatus, setTaskExplorerStatus] = useState('')
-  const [taskExplorerType, setTaskExplorerType] = useState('')
-  const [taskExplorerPriority, setTaskExplorerPriority] = useState('')
-  const [taskExplorerOnlyBlocked, setTaskExplorerOnlyBlocked] = useState(false)
-  const [taskExplorerLoading, setTaskExplorerLoading] = useState(false)
-  const [taskExplorerError, setTaskExplorerError] = useState('')
+  const [taskExplorerQuery, _setTaskExplorerQuery] = useState('')
+  const [taskExplorerStatus, _setTaskExplorerStatus] = useState('')
+  const [taskExplorerType, _setTaskExplorerType] = useState('')
+  const [taskExplorerPriority, _setTaskExplorerPriority] = useState('')
+  const [taskExplorerOnlyBlocked, _setTaskExplorerOnlyBlocked] = useState(false)
+  const [_taskExplorerLoading, setTaskExplorerLoading] = useState(false)
+  const [_taskExplorerError, setTaskExplorerError] = useState('')
   const [taskExplorerPage, setTaskExplorerPage] = useState(1)
-  const [taskExplorerPageSize, setTaskExplorerPageSize] = useState(6)
+  const [taskExplorerPageSize, _setTaskExplorerPageSize] = useState(6)
+  const [taskExplorerItems, setTaskExplorerItems] = useState<TaskRecord[]>([])
   const [collaborationTimeline, setCollaborationTimeline] = useState<CollaborationTimelineEvent[]>([])
   const [collaborationLoading, setCollaborationLoading] = useState(false)
   const [collaborationError, setCollaborationError] = useState('')
@@ -2797,38 +2721,6 @@ export default function App() {
     }
   }
 
-  async function taskAction(taskId: string, action: 'run' | 'retry' | 'cancel'): Promise<void> {
-    const actionPrefix = action === 'run'
-      ? 'Failed to run task'
-      : action === 'retry'
-        ? 'Failed to retry task'
-        : 'Failed to cancel task'
-    const startMessage = action === 'run' ? 'Starting task run...' : undefined
-    const successMessage = action === 'run'
-      ? 'Run request completed.'
-      : action === 'retry'
-        ? 'Task queued for retry.'
-        : 'Task cancelled.'
-    await runTaskMutation(
-      action,
-      async () => {
-        await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/${action}`, projectDir), {
-          method: 'POST',
-        })
-        await reloadAll()
-        if (selectedTaskIdRef.current === taskId) {
-          await loadTaskDetail(taskId)
-          await loadTaskLogs(taskId, true)
-        }
-      },
-      {
-        startMessage,
-        successMessage,
-        errorPrefix: actionPrefix,
-      },
-    )
-  }
-
   async function transitionTask(taskId: string, targetStatus: string): Promise<void> {
     const status = targetStatus
     await runTaskMutation(
@@ -3447,13 +3339,9 @@ export default function App() {
   }
   const selectedTask = allBoardTasks.find((task) => task.id === selectedTaskId) ?? (selectedTaskId ? undefined : allBoardTasks[0])
   const selectedTaskView = selectedTaskDetail && selectedTaskDetail.id === selectedTaskId ? selectedTaskDetail : selectedTask
-  const planRevisions = selectedTaskPlan?.revisions || []
   const blockerIds = selectedTaskView?.blocked_by || []
   const blockedIds = selectedTaskView?.blocks || []
   const isPlanTask = selectedTaskView?.task_type === 'plan' || selectedTaskView?.task_type === 'plan_only'
-  const hasPlanContent = planRevisions.length > 0 || selectedTaskPlanJobs.length > 0 || !!selectedTaskPlan?.active_refine_job
-  const isTaskInExecution = selectedTaskView?.status === 'in_progress' || selectedTaskLogs?.mode === 'active'
-  const isTaskTerminal = selectedTaskView?.status === 'done' || selectedTaskView?.status === 'cancelled'
   const isTaskActionBusy = taskActionPending !== null
   const configLocked = !new Set(['backlog', 'blocked', 'cancelled']).has(selectedTaskView?.status || '')
   const taskStatus = selectedTaskView?.status || ''
