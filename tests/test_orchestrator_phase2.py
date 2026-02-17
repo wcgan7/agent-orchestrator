@@ -21,7 +21,7 @@ def test_review_loop_retries_until_findings_clear(tmp_path: Path) -> None:
 
     task = Task(
         title="Loop task",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         metadata={
             "scripted_findings": [
@@ -52,7 +52,7 @@ def test_review_loop_cap_moves_task_to_blocked(tmp_path: Path) -> None:
 
     task = Task(
         title="Cap task",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         metadata={
             "scripted_findings": [
@@ -86,7 +86,7 @@ def test_agent_role_routing_and_provider_override(tmp_path: Path) -> None:
     container.agents.upsert(impl)
     container.agents.upsert(other)
 
-    task = Task(title="Route task", status="ready", approval_mode="auto_approve")
+    task = Task(title="Route task", status="queued", approval_mode="auto_approve")
     container.tasks.upsert(task)
 
     result = service.run_task(task.id)
@@ -105,8 +105,8 @@ def test_single_run_branch_receives_per_task_commits(tmp_path: Path) -> None:
 
     container, service = _service(tmp_path)
 
-    first = Task(title="First task", status="ready", approval_mode="auto_approve")
-    second = Task(title="Second task", status="ready", approval_mode="auto_approve")
+    first = Task(title="First task", status="queued", approval_mode="auto_approve", metadata={"scripted_files": {"first.txt": "first"}})
+    second = Task(title="Second task", status="queued", approval_mode="auto_approve", metadata={"scripted_files": {"second.txt": "second"}})
     container.tasks.upsert(first)
     container.tasks.upsert(second)
 
@@ -128,10 +128,10 @@ def test_single_run_branch_receives_per_task_commits(tmp_path: Path) -> None:
 
 def test_scheduler_respects_priority_and_dependency(tmp_path: Path) -> None:
     container, _ = _service(tmp_path)
-    high = Task(title="High", status="ready", priority="P0")
-    mid = Task(title="Mid", status="ready", priority="P1")
-    low = Task(title="Low", status="ready", priority="P2")
-    blocked = Task(title="Blocked", status="ready", priority="P0", blocked_by=["missing-task"])
+    high = Task(title="High", status="queued", priority="P0")
+    mid = Task(title="Mid", status="queued", priority="P1")
+    low = Task(title="Low", status="queued", priority="P2")
+    blocked = Task(title="Blocked", status="queued", priority="P0", blocked_by=["missing-task"])
     container.tasks.upsert(high)
     container.tasks.upsert(mid)
     container.tasks.upsert(low)
@@ -149,7 +149,7 @@ def test_scheduler_respects_priority_and_dependency(tmp_path: Path) -> None:
 def test_scheduler_enforces_concurrency_cap(tmp_path: Path) -> None:
     container, _ = _service(tmp_path)
     running = Task(title="Running", status="in_progress")
-    queued = Task(title="Queued", status="ready")
+    queued = Task(title="Queued", status="queued")
     container.tasks.upsert(running)
     container.tasks.upsert(queued)
 
@@ -161,7 +161,7 @@ def test_human_blocking_step_sets_pending_gate_and_blocks_task(tmp_path: Path) -
     container, service = _service(tmp_path)
     task = Task(
         title="Needs decision",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         metadata={
             "scripted_steps": {

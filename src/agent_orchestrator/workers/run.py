@@ -39,14 +39,22 @@ class WorkerRunResult:
 
 def _build_codex_command(spec: WorkerProviderSpec) -> str:
     """Build a codex command string with optional model/reasoning flags."""
-    base = str(spec.command or "codex").strip() or "codex"
+    base = str(spec.command or "codex exec").strip() or "codex exec"
     parts = shlex.split(base)
     if not parts:
-        parts = ["codex"]
+        parts = ["codex", "exec"]
 
     # Avoid duplicating flags if user already encoded them in command.
     has_model_flag = "--model" in parts
     has_reasoning_flag = "--reasoning-effort" in parts
+
+    # Ensure full-auto mode so the worker can write files without approval
+    # prompts (there is no TTY to answer them).  Skip if the user already
+    # specified a sandbox or approval flag in their custom command.
+    has_sandbox_flag = any(f in parts for f in ("--full-auto", "--sandbox", "--danger-full-access", "--yolo", "--dangerously-bypass-approvals-and-sandbox"))
+    has_approval_flag = any(f in parts for f in ("--ask-for-approval", "-a"))
+    if not has_sandbox_flag and not has_approval_flag:
+        parts.insert(1, "--full-auto")
 
     if spec.model and not has_model_flag:
         parts.extend(["--model", str(spec.model)])
@@ -66,6 +74,8 @@ def _build_claude_command(spec: WorkerProviderSpec) -> str:
         parts = ["claude", "-p"]
     if "-p" not in parts and "--print" not in parts:
         parts.append("-p")
+    if "--dangerously-skip-permissions" not in parts:
+        parts.append("--dangerously-skip-permissions")
 
     has_model_flag = "--model" in parts
     has_effort_flag = "--effort" in parts
@@ -77,7 +87,91 @@ def _build_claude_command(spec: WorkerProviderSpec) -> str:
         supports_effort = _claude_supports_effort("claude")
     if spec.reasoning_effort and not has_effort_flag and supports_effort:
         parts.extend(["--effort", str(spec.reasoning_effort)])
+    output_format = _extract_option_value(parts, "--output-format")
+    if not output_format:
+        # Claude can stay silent in plain text mode for long intervals. Stream JSON
+        # with partial chunks gives the orchestrator a steady liveness signal.
+        if "--verbose" not in parts:
+            parts.append("--verbose")
+        parts.extend(["--output-format", "stream-json"])
+        if "--include-partial-messages" not in parts:
+            parts.append("--include-partial-messages")
+    elif output_format == "stream-json":
+        if "--verbose" not in parts:
+            parts.append("--verbose")
+        if "--include-partial-messages" not in parts:
+            parts.append("--include-partial-messages")
     return shlex.join(parts)
+
+
+def _extract_option_value(parts: list[str], option: str) -> str | None:
+    for idx, part in enumerate(parts):
+        if part == option and idx + 1 < len(parts):
+            return str(parts[idx + 1]).strip().lower()
+        if part.startswith(f"{option}="):
+            return str(part.split("=", 1)[1]).strip().lower()
+    return None
+
+
+def _read_text(path_text: str) -> str:
+    if not path_text:
+        return ""
+    try:
+        return Path(path_text).read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _extract_claude_stream_json_text(stdout_text: str) -> str:
+    if not stdout_text.strip():
+        return ""
+    latest_assistant = ""
+    result_text = ""
+    delta_parts: list[str] = []
+    for raw_line in stdout_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        typ = str(obj.get("type") or "")
+        if typ == "assistant":
+            message = obj.get("message")
+            if isinstance(message, dict):
+                content = message.get("content")
+                if isinstance(content, list):
+                    texts: list[str] = []
+                    for item in content:
+                        if isinstance(item, dict) and str(item.get("type") or "") == "text":
+                            text = item.get("text")
+                            if isinstance(text, str):
+                                texts.append(text)
+                    merged = "".join(texts).strip()
+                    if merged:
+                        latest_assistant = merged
+        elif typ == "result":
+            maybe = obj.get("result")
+            if isinstance(maybe, str) and maybe.strip():
+                result_text = maybe.strip()
+        elif typ == "stream_event":
+            event = obj.get("event")
+            if isinstance(event, dict) and str(event.get("type") or "") == "content_block_delta":
+                delta = event.get("delta")
+                if isinstance(delta, dict) and str(delta.get("type") or "") == "text_delta":
+                    text = delta.get("text")
+                    if isinstance(text, str) and text:
+                        delta_parts.append(text)
+    if latest_assistant:
+        return latest_assistant
+    if result_text:
+        return result_text
+    if delta_parts:
+        return "".join(delta_parts).strip()
+    return ""
 
 
 @lru_cache(maxsize=16)
@@ -310,6 +404,12 @@ def run_worker(
             expected_run_id=expected_run_id,
             on_spawn=on_spawn,
         )
+        stdout_text = _read_text(str(run_result.get("stdout_path") or ""))
+        response_text = stdout_text
+        if spec.type == "claude" and _extract_option_value(shlex.split(command), "--output-format") == "stream-json":
+            parsed = _extract_claude_stream_json_text(stdout_text)
+            if parsed:
+                response_text = parsed
         human_blocking_issues = _extract_human_blocking_issues(progress_path)
         return WorkerRunResult(
             provider=spec.name,
@@ -322,7 +422,7 @@ def run_worker(
             exit_code=int(run_result.get("exit_code") or 0),
             timed_out=bool(run_result.get("timed_out")),
             no_heartbeat=bool(run_result.get("no_heartbeat")),
-            response_text="",
+            response_text=response_text,
             human_blocking_issues=human_blocking_issues,
         )
 

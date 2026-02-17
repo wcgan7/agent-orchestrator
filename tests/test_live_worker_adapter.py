@@ -12,6 +12,8 @@ from agent_orchestrator.runtime.domain.models import Task
 from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
     LiveWorkerAdapter,
     _extract_json,
+    _extract_json_value,
+    _normalize_planning_text,
     build_step_prompt,
     detect_project_languages,
 )
@@ -295,6 +297,63 @@ def test_timeout_defaults_from_pipeline_template(adapter: LiveWorkerAdapter) -> 
 
     assert result.status == "ok"
     assert run_worker_mock.call_args.kwargs["timeout_seconds"] == 300
+
+
+def test_heartbeat_defaults_are_forwarded(adapter: LiveWorkerAdapter) -> None:
+    run_result = _make_run_result(exit_code=0)
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ) as run_worker_mock,
+    ):
+        result = adapter.run_step(task=_make_task(), step="implement", attempt=1)
+
+    assert result.status == "ok"
+    assert run_worker_mock.call_args.kwargs["heartbeat_seconds"] == 60
+    assert run_worker_mock.call_args.kwargs["heartbeat_grace_seconds"] == 240
+
+
+def test_heartbeat_settings_from_workers_config(container: Container, adapter: LiveWorkerAdapter) -> None:
+    run_result = _make_run_result(exit_code=0)
+    cfg = container.config.load()
+    cfg["workers"] = {"heartbeat_seconds": 75, "heartbeat_grace_seconds": 190}
+    container.config.save(cfg)
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ) as run_worker_mock,
+    ):
+        result = adapter.run_step(task=_make_task(), step="implement", attempt=1)
+
+    assert result.status == "ok"
+    assert run_worker_mock.call_args.kwargs["heartbeat_seconds"] == 75
+    assert run_worker_mock.call_args.kwargs["heartbeat_grace_seconds"] == 190
 
 
 # ---------------------------------------------------------------------------
@@ -581,6 +640,28 @@ def test_extract_json_invalid_returns_none() -> None:
     assert _extract_json("no json here") is None
 
 
+def test_extract_json_value_array_from_markdown_fence() -> None:
+    text = "```json\n[{\"title\":\"A\"}]\n```"
+    parsed = _extract_json_value(text)
+    assert isinstance(parsed, list)
+    assert parsed[0]["title"] == "A"
+
+
+def test_normalize_planning_text_strips_wrapper_and_followup() -> None:
+    text = (
+        "The plan has been prepared. Here's a summary of the key refinement.\n\n"
+        "## Refined Plan\n"
+        "- Keep timers as absolute timestamps.\n"
+        "- Recompute on visibility change.\n\n"
+        "---\n\n"
+        "Should I write the full PLAN.md to the repo?"
+    )
+    cleaned = _normalize_planning_text(text)
+    assert cleaned.startswith("## Refined Plan")
+    assert "The plan has been prepared" not in cleaned
+    assert "Should I write the full PLAN.md" not in cleaned
+
+
 # ---------------------------------------------------------------------------
 # Prompt adds JSON schema suffix for ollama but not codex
 # ---------------------------------------------------------------------------
@@ -597,6 +678,14 @@ def test_prompt_codex_no_json_schema() -> None:
     task = _make_task()
     prompt = build_step_prompt(task=task, step="review", attempt=1, is_codex=True)
     assert "Respond with valid JSON" not in prompt
+
+
+def test_prompt_planning_has_output_requirements() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(task=task, step="plan_refine", attempt=1, is_codex=True)
+    assert "Planning output requirements" in prompt
+    assert "Return only the final plan body" in prompt
+    assert "not just a change summary" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -686,6 +775,34 @@ def test_ollama_verify_fail(adapter: LiveWorkerAdapter) -> None:
 
     assert result.status == "error"
     assert result.summary == "3 tests failed"
+
+
+def test_task_generation_parses_top_level_array(adapter: LiveWorkerAdapter) -> None:
+    response = "```json\n[{\"title\":\"Task A\",\"task_type\":\"feature\",\"priority\":\"P1\"}]\n```"
+    run_result = _make_run_result(exit_code=0, response_text=response)
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ),
+    ):
+        result = adapter.run_step(task=_make_task(), step="generate_tasks", attempt=1)
+
+    assert result.status == "ok"
+    assert isinstance(result.generated_tasks, list)
+    assert result.generated_tasks[0]["title"] == "Task A"
 
 
 # ---------------------------------------------------------------------------

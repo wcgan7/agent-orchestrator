@@ -67,7 +67,6 @@ FEATURE_PIPELINE = PipelineTemplate(
     task_types=("feature",),
     steps=(
         StepDef(name="plan", display_name="Plan"),
-        StepDef(name="plan_impl", display_name="Plan Implementation"),
         StepDef(name="implement", display_name="Implement"),
         StepDef(name="verify", display_name="Verify"),
         StepDef(name="review", display_name="Review"),

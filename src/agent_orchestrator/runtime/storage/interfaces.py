@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
-from ..domain.models import AgentRecord, QuickActionRun, ReviewCycle, RunRecord, Task
+from ..domain.models import AgentRecord, PlanRefineJob, PlanRevision, QuickActionRun, ReviewCycle, RunRecord, Task
 
 
 class TaskRepository(ABC):
@@ -51,6 +51,10 @@ class AgentRepository(ABC):
     def upsert(self, agent: AgentRecord) -> AgentRecord:
         raise NotImplementedError
 
+    @abstractmethod
+    def delete(self, agent_id: str) -> bool:
+        raise NotImplementedError
+
 
 class QuickActionRepository(ABC):
     @abstractmethod
@@ -87,4 +91,40 @@ class EventRepository(ABC):
 
     @abstractmethod
     def list_recent(self, limit: int = 100) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+
+class PlanRevisionRepository(ABC):
+    @abstractmethod
+    def list(self) -> list[PlanRevision]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def for_task(self, task_id: str) -> list[PlanRevision]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get(self, revision_id: str) -> Optional[PlanRevision]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def upsert(self, revision: PlanRevision) -> PlanRevision:
+        raise NotImplementedError
+
+
+class PlanRefineJobRepository(ABC):
+    @abstractmethod
+    def list(self) -> list[PlanRefineJob]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def for_task(self, task_id: str) -> list[PlanRefineJob]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get(self, job_id: str) -> Optional[PlanRefineJob]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def upsert(self, job: PlanRefineJob) -> PlanRefineJob:
         raise NotImplementedError

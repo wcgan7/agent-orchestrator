@@ -68,13 +68,15 @@ def test_worktree_created_for_task(tmp_path: Path) -> None:
             wt = task.metadata.get("worktree_dir")
             if wt:
                 worktree_paths.append(Path(wt))
+                if step == "implement":
+                    (Path(wt) / "change.txt").write_text("impl\n")
             return StepResult(status="ok")
 
     container, service, _ = _service(tmp_path, adapter=SpyAdapter())
     task = Task(
         title="WT task",
         task_type="chore",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -110,15 +112,18 @@ def test_concurrent_same_repo_tasks(tmp_path: Path) -> None:
 
     class BarrierAdapter:
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
-            barrier.wait()
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / f"{task.id}.txt").write_text("impl\n")
+                barrier.wait()  # Proves both tasks reach implement concurrently
             return StepResult(status="ok")
 
     container, service, _ = _service(tmp_path, adapter=BarrierAdapter(), concurrency=4)
 
-    t1 = Task(title="Task A", task_type="chore", status="ready",
+    t1 = Task(title="Task A", task_type="chore", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot",
               metadata={"repo_path": str(tmp_path)})
-    t2 = Task(title="Task B", task_type="chore", status="ready",
+    t2 = Task(title="Task B", task_type="chore", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot",
               metadata={"repo_path": str(tmp_path)})
     container.tasks.upsert(t1)
@@ -157,7 +162,7 @@ def test_task_branch_merged_to_run_branch(tmp_path: Path) -> None:
     task = Task(
         title="Merge test",
         task_type="feature",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -200,9 +205,9 @@ def test_merge_conflict_resolved_by_worker(tmp_path: Path) -> None:
 
     container, service, _ = _service(tmp_path, adapter=ConflictAdapter(), concurrency=2)
 
-    t1 = Task(title="Alpha", task_type="feature", status="ready",
+    t1 = Task(title="Alpha", task_type="feature", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot")
-    t2 = Task(title="Beta", task_type="feature", status="ready",
+    t2 = Task(title="Beta", task_type="feature", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
@@ -247,9 +252,9 @@ def test_merge_conflict_fallback_on_worker_failure(tmp_path: Path) -> None:
 
     container, service, _ = _service(tmp_path, adapter=FailingResolveAdapter(), concurrency=2)
 
-    t1 = Task(title="Alpha", task_type="feature", status="ready",
+    t1 = Task(title="Alpha", task_type="feature", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot")
-    t2 = Task(title="Beta", task_type="feature", status="ready",
+    t2 = Task(title="Beta", task_type="feature", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
@@ -297,7 +302,7 @@ def test_worktree_cleanup_on_failure(tmp_path: Path) -> None:
             raise RuntimeError("boom")
 
     container, service, _ = _service(tmp_path, adapter=CrashAdapter())
-    task = Task(title="Crash WT", task_type="chore", status="ready",
+    task = Task(title="Crash WT", task_type="chore", status="queued",
                 approval_mode="auto_approve", hitl_mode="autopilot")
     container.tasks.upsert(task)
 
@@ -328,7 +333,7 @@ def test_no_worktree_without_git(tmp_path: Path) -> None:
             return StepResult(status="ok")
 
     container, service, _ = _service(tmp_path, adapter=SpyAdapter(), git=False)
-    task = Task(title="No git", task_type="chore", status="ready",
+    task = Task(title="No git", task_type="chore", status="queued",
                 approval_mode="auto_approve", hitl_mode="autopilot")
     container.tasks.upsert(task)
 
@@ -400,7 +405,7 @@ def test_non_commit_pipeline_cleans_worktree(tmp_path: Path) -> None:
     task = Task(
         title="Research task",
         task_type="research",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -446,7 +451,7 @@ def test_blocked_task_metadata_cleaned(tmp_path: Path) -> None:
     task = Task(
         title="Block test",
         task_type="feature",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -486,7 +491,7 @@ def test_worktree_creation_failure_falls_back(tmp_path: Path) -> None:
     task = Task(
         title="Fallback test",
         task_type="chore",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -548,9 +553,9 @@ def test_resolve_merge_receives_metadata_and_runs_in_project_dir(tmp_path: Path)
 
     container, service, _ = _service(tmp_path, adapter=InspectingAdapter(), concurrency=2)
 
-    t1 = Task(title="Alpha", task_type="feature", status="ready",
+    t1 = Task(title="Alpha", task_type="feature", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot")
-    t2 = Task(title="Beta", task_type="feature", status="ready",
+    t2 = Task(title="Beta", task_type="feature", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
@@ -607,9 +612,9 @@ def test_resolve_merge_worker_exception_handled(tmp_path: Path) -> None:
 
     container, service, _ = _service(tmp_path, adapter=ExplodingResolveAdapter(), concurrency=2)
 
-    t1 = Task(title="Alpha", task_type="feature", status="ready",
+    t1 = Task(title="Alpha", task_type="feature", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot")
-    t2 = Task(title="Beta", task_type="feature", status="ready",
+    t2 = Task(title="Beta", task_type="feature", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
@@ -674,3 +679,31 @@ def test_build_step_prompt_resolve_merge() -> None:
     # For ollama, should also include JSON schema
     prompt_ollama = build_step_prompt(task=task, step="resolve_merge", attempt=1, is_codex=False)
     assert "JSON" in prompt_ollama
+
+
+# ---------------------------------------------------------------------------
+# 15. No-changes guard blocks task when implementation produces no file changes
+# ---------------------------------------------------------------------------
+
+
+def test_no_changes_blocks_task(tmp_path: Path) -> None:
+    """Task blocks when implementation produces no file changes (e.g. worker
+    invoked without write permissions)."""
+
+    class NoOpAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            return StepResult(status="ok")  # Does NOT write any files
+
+    container, service, _ = _service(tmp_path, adapter=NoOpAdapter())
+    task = Task(
+        title="No-op task",
+        task_type="chore",  # chore pipeline: implement, verify, commit
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert "No file changes" in (result.error or "")

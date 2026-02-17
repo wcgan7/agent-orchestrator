@@ -71,9 +71,9 @@ describe('App navigation and settings flows', () => {
       expect(screen.getByRole('heading', { name: /execution/i })).toBeInTheDocument()
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /Agents/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Workers/i }))
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /agents/i })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: /workers/i })).toBeInTheDocument()
     })
   })
 

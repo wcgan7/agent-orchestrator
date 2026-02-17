@@ -52,9 +52,9 @@ def test_tick_dispatches_to_thread_pool(tmp_path: Path) -> None:
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus, worker_adapter=SlowAdapter())
 
-    t1 = Task(title="Task A", task_type="chore", status="ready",
+    t1 = Task(title="Task A", task_type="chore", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot")
-    t2 = Task(title="Task B", task_type="chore", status="ready",
+    t2 = Task(title="Task B", task_type="chore", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
@@ -107,7 +107,7 @@ def test_concurrency_cap_respected(tmp_path: Path) -> None:
     service = OrchestratorService(container, bus, worker_adapter=BlockingAdapter())
 
     for i in range(3):
-        t = Task(title=f"Task {i}", task_type="chore", status="ready",
+        t = Task(title=f"Task {i}", task_type="chore", status="queued",
                  approval_mode="auto_approve", hitl_mode="autopilot")
         container.tasks.upsert(t)
 
@@ -172,10 +172,10 @@ def test_same_repo_tasks_run_in_parallel(tmp_path: Path) -> None:
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus, worker_adapter=BarrierAdapter())
 
-    t1 = Task(title="Task A", task_type="chore", status="ready",
+    t1 = Task(title="Task A", task_type="chore", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot",
               metadata={"repo_path": "/shared/repo"})
-    t2 = Task(title="Task B", task_type="chore", status="ready",
+    t2 = Task(title="Task B", task_type="chore", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot",
               metadata={"repo_path": "/shared/repo"})
     container.tasks.upsert(t1)
@@ -221,10 +221,10 @@ def test_different_repos_run_in_parallel(tmp_path: Path) -> None:
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus, worker_adapter=BarrierAdapter())
 
-    t1 = Task(title="Task A", task_type="chore", status="ready",
+    t1 = Task(title="Task A", task_type="chore", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot",
               metadata={"repo_path": "/repo/alpha"})
-    t2 = Task(title="Task B", task_type="chore", status="ready",
+    t2 = Task(title="Task B", task_type="chore", status="queued",
               approval_mode="auto_approve", hitl_mode="autopilot",
               metadata={"repo_path": "/repo/beta"})
     container.tasks.upsert(t1)
@@ -269,7 +269,7 @@ def test_drain_waits_for_inflight(tmp_path: Path) -> None:
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus, worker_adapter=BlockingAdapter())
 
-    t = Task(title="Slow task", task_type="chore", status="ready",
+    t = Task(title="Slow task", task_type="chore", status="queued",
              approval_mode="auto_approve", hitl_mode="autopilot")
     container.tasks.upsert(t)
 
@@ -310,7 +310,7 @@ def test_run_task_still_synchronous(tmp_path: Path) -> None:
     task = Task(
         title="Sync task",
         task_type="chore",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -336,7 +336,7 @@ def test_future_exception_sets_task_blocked(tmp_path: Path) -> None:
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus, worker_adapter=CrashingAdapter())
 
-    task = Task(title="Crash task", task_type="chore", status="ready",
+    task = Task(title="Crash task", task_type="chore", status="queued",
                 approval_mode="auto_approve", hitl_mode="autopilot")
     container.tasks.upsert(task)
 
@@ -376,7 +376,7 @@ def test_status_reports_active_workers(tmp_path: Path) -> None:
     bus = EventBus(container.events, container.project_id)
     service = OrchestratorService(container, bus, worker_adapter=BlockingAdapter())
 
-    t = Task(title="Active task", task_type="chore", status="ready",
+    t = Task(title="Active task", task_type="chore", status="queued",
              approval_mode="auto_approve", hitl_mode="autopilot")
     container.tasks.upsert(t)
 

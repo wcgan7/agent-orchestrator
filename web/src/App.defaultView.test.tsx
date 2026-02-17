@@ -39,7 +39,7 @@ describe('App default route', () => {
     global.fetch = vi.fn().mockImplementation((url) => {
       const u = String(url)
       if (u.includes('/api/tasks/board')) {
-        return Promise.resolve({ ok: true, json: async () => ({ columns: { backlog: [], ready: [], in_progress: [], in_review: [], blocked: [], done: [] } }) })
+        return Promise.resolve({ ok: true, json: async () => ({ columns: { backlog: [], queued: [], in_progress: [], in_review: [], blocked: [], done: [] } }) })
       }
       if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
         return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
@@ -84,13 +84,14 @@ describe('App default route', () => {
     })
   })
 
-  it('requests metrics and agent type compatibility endpoints during reload', async () => {
+  it('requests metrics and worker compatibility endpoints during reload', async () => {
     const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
     render(<App />)
 
     await waitFor(() => {
       expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/metrics'))).toBe(true)
-      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/agents/types'))).toBe(true)
+      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/workers/health'))).toBe(true)
+      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/workers/routing'))).toBe(true)
     })
   })
 
@@ -131,88 +132,17 @@ describe('App default route', () => {
     expect(body.metadata).toEqual({ area: 'payments' })
   })
 
-  it('task explorer supports only blocked filter via GET /tasks', async () => {
-    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
-    render(<App />)
-
-    await waitFor(() => {
-      expect(screen.getByText(/Task Explorer/i)).toBeInTheDocument()
-    })
-
-    fireEvent.click(screen.getByLabelText(/Only blocked/i))
-
-    await waitFor(() => {
-      const blockedTasksCall = mockedFetch.mock.calls.find(([url, init]) => {
-        return String(url).includes('/api/tasks') &&
-          !String(url).includes('/api/tasks/') &&
-          String(url).includes('status=blocked') &&
-          ((init as RequestInit | undefined)?.method || 'GET') === 'GET'
-      })
-      expect(blockedTasksCall).toBeTruthy()
-    })
-  })
-
-  it('task explorer paginates results', async () => {
+  it('opens task detail modal when clicking a kanban card', async () => {
     const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
     mockedFetch.mockImplementation((url) => {
-      const u = String(url)
-      if (u.includes('/api/tasks/board')) {
-        return Promise.resolve({ ok: true, json: async () => ({ columns: { backlog: [], ready: [], in_progress: [], in_review: [], blocked: [], done: [] } }) })
-      }
-      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
-        return Promise.resolve({
-          ok: true,
-          json: async () => ({
-            tasks: Array.from({ length: 7 }).map((_, index) => ({
-              id: `task-${index + 1}`,
-              title: `Task ${index + 1}`,
-              priority: 'P2',
-              status: 'ready',
-            })),
-          }),
-        })
-      }
-      if (u.includes('/api/orchestrator/status')) {
-        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
-      }
-      if (u.includes('/api/review-queue')) {
-        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
-      }
-      if (u.includes('/api/agents')) {
-        return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
-      }
-      if (u.includes('/api/projects')) {
-        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
-      }
-      return Promise.resolve({ ok: true, json: async () => ({}) })
-    })
-
-    render(<App />)
-
-    await waitFor(() => {
-      expect(screen.getByText(/Page 1 of 2/i)).toBeInTheDocument()
-    })
-    expect(screen.queryByText('Task 7')).not.toBeInTheDocument()
-
-    fireEvent.click(screen.getByRole('button', { name: /^Next$/i }))
-
-    await waitFor(() => {
-      expect(screen.getByText(/Page 2 of 2/i)).toBeInTheDocument()
-      expect(screen.getByText('Task 7')).toBeInTheDocument()
-    })
-  })
-
-  it('loads collaboration endpoints for selected task and submits feedback/comments', async () => {
-    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
-    mockedFetch.mockImplementation((url, init) => {
       const u = String(url)
       if (u.includes('/api/tasks/board')) {
         return Promise.resolve({
           ok: true,
           json: async () => ({
             columns: {
-              backlog: [{ id: 'task-1', title: 'Task 1', priority: 'P2', status: 'ready', task_type: 'feature' }],
-              ready: [],
+              backlog: [{ id: 'task-1', title: 'Task 1', priority: 'P2', status: 'backlog', task_type: 'feature' }],
+              queued: [],
               in_progress: [],
               in_review: [],
               blocked: [],
@@ -225,31 +155,12 @@ describe('App default route', () => {
         return Promise.resolve({
           ok: true,
           json: async () => ({
-            task: { id: 'task-1', title: 'Task 1', priority: 'P2', status: 'ready', task_type: 'feature', blocked_by: [], blocks: [] },
+            task: { id: 'task-1', title: 'Task 1', priority: 'P2', status: 'backlog', task_type: 'feature', blocked_by: [], blocks: [] },
           }),
         })
       }
       if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
         return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
-      }
-      if (u.includes('/api/collaboration/timeline/task-1')) {
-        return Promise.resolve({ ok: true, json: async () => ({ events: [] }) })
-      }
-      if (u.includes('/api/collaboration/feedback/task-1')) {
-        return Promise.resolve({ ok: true, json: async () => ({ feedback: [] }) })
-      }
-      if (u.includes('/api/collaboration/comments/task-1')) {
-        return Promise.resolve({ ok: true, json: async () => ({ comments: [] }) })
-      }
-      if (u.includes('/api/collaboration/feedback') && (init as RequestInit | undefined)?.method === 'POST') {
-        return Promise.resolve({ ok: true, json: async () => ({ feedback: { id: 'fb-1' } }) })
-      }
-      if (
-        u.includes('/api/collaboration/comments') &&
-        !u.includes('/resolve') &&
-        (init as RequestInit | undefined)?.method === 'POST'
-      ) {
-        return Promise.resolve({ ok: true, json: async () => ({ comment: { id: 'cm-1' } }) })
       }
       if (u.includes('/api/orchestrator/status')) {
         return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
@@ -268,34 +179,146 @@ describe('App default route', () => {
 
     render(<App />)
 
+    // Click a task card to open the detail modal
+    await waitFor(() => {
+      expect(screen.getByText('Task 1')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Task 1'))
+    await waitFor(() => {
+      expect(screen.getByRole('dialog', { name: /Task detail/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /^Queue$/i })).toBeInTheDocument()
+    })
+  })
+
+  it('board summary strip shows queue depth and worker count', async () => {
+    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
+    mockedFetch.mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            columns: {
+              backlog: [],
+              queued: [{ id: 'task-1', title: 'Task 1', priority: 'P2', status: 'queued', task_type: 'feature' }],
+              in_progress: [],
+              in_review: [],
+              blocked: [],
+              done: [],
+            },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 3, in_progress: 1, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/agents')) {
+        return Promise.resolve({ ok: true, json: async () => ({ agents: [{ id: 'agent-1', role: 'general', status: 'running' }] }) })
+      }
+      if (u.includes('/api/projects')) {
+        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText(/Queue: 3/i)).toBeInTheDocument()
+      expect(screen.getByText(/In progress: 1/i)).toBeInTheDocument()
+      expect(screen.getByText(/Workers: 1/i)).toBeInTheDocument()
+    })
+  })
+
+  it('loads activity timeline for selected task via modal', async () => {
+    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
+    mockedFetch.mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            columns: {
+              backlog: [{ id: 'task-1', title: 'Task 1', priority: 'P2', status: 'queued', task_type: 'feature' }],
+              queued: [],
+              in_progress: [],
+              in_review: [],
+              blocked: [],
+              done: [],
+            },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks/task-1')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            task: { id: 'task-1', title: 'Task 1', priority: 'P2', status: 'queued', task_type: 'feature', blocked_by: [], blocks: [] },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/collaboration/timeline/task-1')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            events: [
+              {
+                id: 'evt-1',
+                type: 'task.created',
+                timestamp: '2026-02-13T00:00:00Z',
+                actor: 'system',
+                actor_type: 'system',
+                summary: 'Task created',
+                details: null,
+              },
+            ],
+          }),
+        })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/agents')) {
+        return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      }
+      if (u.includes('/api/projects')) {
+        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+
+    render(<App />)
+
+    // Click a task card to open the detail modal, then switch to Activity tab
+    await waitFor(() => {
+      expect(screen.getByText('Task 1')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Task 1'))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Activity$/i })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Activity$/i }))
+
+    // Verify timeline endpoint was called
     await waitFor(() => {
       expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/collaboration/timeline/task-1'))).toBe(true)
-      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/collaboration/feedback/task-1'))).toBe(true)
-      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/collaboration/comments/task-1'))).toBe(true)
     })
 
-    fireEvent.change(screen.getByLabelText(/Summary/i), { target: { value: 'Please tighten validation.' } })
-    fireEvent.click(screen.getByRole('button', { name: /Add feedback/i }))
-
+    // Verify timeline event is displayed
     await waitFor(() => {
-      const feedbackCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/collaboration/feedback') &&
-        (init as RequestInit | undefined)?.method === 'POST'
-      )
-      expect(feedbackCall).toBeTruthy()
-    })
-
-    fireEvent.change(screen.getByLabelText(/File path/i), { target: { value: 'src/App.tsx' } })
-    fireEvent.change(screen.getByLabelText(/Comment/i), { target: { value: 'Looks good, but add tests.' } })
-    fireEvent.click(screen.getByRole('button', { name: /Add comment/i }))
-
-    await waitFor(() => {
-      const commentCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/collaboration/comments') &&
-        !String(url).includes('/resolve') &&
-        (init as RequestInit | undefined)?.method === 'POST'
-      )
-      expect(commentCall).toBeTruthy()
+      expect(screen.getByText('Task created')).toBeInTheDocument()
     })
   })
 

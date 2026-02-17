@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from ...collaboration.modes import should_gate
 from ...pipelines.registry import PipelineRegistry
-from ..domain.models import ReviewCycle, ReviewFinding, RunRecord, Task, now_iso
+from ...workers.config import get_workers_runtime_config, resolve_worker_for_step
+from ..domain.models import PlanRefineJob, PlanRevision, ReviewCycle, ReviewFinding, RunRecord, Task, now_iso
 from ..events.bus import EventBus
 from ..storage.container import Container
+from .live_worker_adapter import _VERIFY_STEPS
 from .worker_adapter import DefaultWorkerAdapter, StepResult, WorkerAdapter
 
 logger = logging.getLogger(__name__)
@@ -77,7 +80,7 @@ class OrchestratorService:
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         tasks = self.container.tasks.list()
-        queue_depth = len([task for task in tasks if task.status == "ready"])
+        queue_depth = len([task for task in tasks if task.status == "queued"])
         in_progress = len([task for task in tasks if task.status == "in_progress"])
         with self._futures_lock:
             active_workers = len(self._futures)
@@ -158,7 +161,7 @@ class OrchestratorService:
         for task in tasks:
             if task.id not in in_progress_ids:
                 continue
-            task.status = "ready"
+            task.status = "queued"
             task.current_step = None
             task.current_agent_id = None
             task.pending_gate = None
@@ -225,7 +228,7 @@ class OrchestratorService:
                     dep = self.container.tasks.get(dep_id)
                     if dep is None or dep.status not in terminal:
                         raise ValueError(f"Task {task_id} has unresolved blocker {dep_id}")
-                task.status = "ready"
+                task.status = "queued"
                 self.container.tasks.upsert(task)
 
         if wait_existing:
@@ -250,6 +253,401 @@ class OrchestratorService:
         if not updated:
             raise ValueError(f"Task disappeared during execution: {task_id}")
         return updated
+
+    def _resolve_worker_lineage(self, task: Task, step: str) -> tuple[str | None, str | None]:
+        try:
+            cfg = self.container.config.load()
+            runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
+            spec = resolve_worker_for_step(runtime, step)
+        except Exception:
+            return None, None
+        return spec.name, spec.model
+
+    def _migrate_legacy_plans(self, task: Task) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        if task.metadata.get("legacy_plans_migrated"):
+            return
+        legacy_plans = task.metadata.get("plans")
+        if not isinstance(legacy_plans, list) or not legacy_plans:
+            task.metadata["legacy_plans_migrated"] = True
+            self.container.tasks.upsert(task)
+            return
+        if self.container.plan_revisions.for_task(task.id):
+            task.metadata["legacy_plans_migrated"] = True
+            self.container.tasks.upsert(task)
+            return
+        parent_id: str | None = None
+        latest_id: str | None = None
+        for item in legacy_plans:
+            if not isinstance(item, dict):
+                continue
+            content = str(item.get("content") or "").strip()
+            if not content:
+                continue
+            revision = PlanRevision(
+                task_id=task.id,
+                created_at=str(item.get("ts") or now_iso()),
+                source="import",
+                parent_revision_id=parent_id,
+                step=(str(item.get("step")).strip() if item.get("step") else None),
+                content=content,
+                status="draft",
+            )
+            self.container.plan_revisions.upsert(revision)
+            parent_id = revision.id
+            latest_id = revision.id
+        if latest_id:
+            task.metadata["latest_plan_revision_id"] = latest_id
+        task.metadata["legacy_plans_migrated"] = True
+        self.container.tasks.upsert(task)
+
+    def _active_plan_refine_job(self, task_id: str) -> PlanRefineJob | None:
+        for job in self.container.plan_refine_jobs.for_task(task_id):
+            if job.status in {"queued", "running"}:
+                return job
+        return None
+
+    def get_plan_document(self, task_id: str) -> dict[str, Any]:
+        task = self.container.tasks.get(task_id)
+        if not task:
+            raise ValueError("Task not found")
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        self._migrate_legacy_plans(task)
+        revisions = self.container.plan_revisions.for_task(task_id)
+        revisions.sort(key=lambda item: item.created_at)
+        latest_revision_id = revisions[-1].id if revisions else None
+        committed_revision_id = task.metadata.get("committed_plan_revision_id")
+        if committed_revision_id and not any(item.id == committed_revision_id for item in revisions):
+            committed_revision_id = None
+        active_job = self._active_plan_refine_job(task_id)
+        legacy_plans = [
+            {"step": item.step, "ts": item.created_at, "content": item.content}
+            for item in revisions
+        ]
+        latest = legacy_plans[-1] if legacy_plans else None
+        return {
+            "task_id": task_id,
+            "latest_revision_id": latest_revision_id,
+            "committed_revision_id": committed_revision_id,
+            "revisions": [item.to_dict() for item in revisions],
+            "active_refine_job": active_job.to_dict() if active_job else None,
+            # Legacy compatibility fields.
+            "plans": legacy_plans,
+            "latest": latest,
+        }
+
+    def create_plan_revision(
+        self,
+        *,
+        task_id: str,
+        content: str,
+        source: Literal["worker_plan", "worker_refine", "human_edit", "import"],
+        parent_revision_id: str | None = None,
+        step: str | None = None,
+        feedback_note: str | None = None,
+        provider: str | None = None,
+        model: str | None = None,
+        status: Literal["draft", "committed"] = "draft",
+        created_at: str | None = None,
+    ) -> PlanRevision:
+        task = self.container.tasks.get(task_id)
+        if not task:
+            raise ValueError("Task not found")
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        self._migrate_legacy_plans(task)
+        body = str(content or "").strip()
+        if not body:
+            raise ValueError("Plan revision content cannot be empty")
+        revisions = self.container.plan_revisions.for_task(task_id)
+        revisions.sort(key=lambda item: item.created_at)
+        if parent_revision_id:
+            parent = self.container.plan_revisions.get(parent_revision_id)
+            if not parent or parent.task_id != task_id:
+                raise ValueError("parent_revision_id does not belong to task")
+        else:
+            parent_revision_id = revisions[-1].id if revisions else None
+        revision = PlanRevision(
+            task_id=task_id,
+            created_at=created_at or now_iso(),
+            source=source,
+            parent_revision_id=parent_revision_id,
+            step=step,
+            feedback_note=feedback_note,
+            provider=provider,
+            model=model,
+            content=body,
+            status=status,
+        )
+        self.container.plan_revisions.upsert(revision)
+        task.metadata["latest_plan_revision_id"] = revision.id
+        legacy_plans = task.metadata.get("plans")
+        if not isinstance(legacy_plans, list):
+            legacy_plans = []
+        legacy_plans.append({"step": revision.step, "ts": revision.created_at, "content": revision.content})
+        task.metadata["plans"] = legacy_plans
+        if status == "committed":
+            task.metadata["committed_plan_revision_id"] = revision.id
+        self.container.tasks.upsert(task)
+        self.bus.emit(
+            channel="tasks",
+            event_type="plan.revision.created",
+            entity_id=task_id,
+            payload={"revision_id": revision.id, "source": source},
+        )
+        return revision
+
+    def queue_plan_refine_job(
+        self,
+        *,
+        task_id: str,
+        feedback: str,
+        instructions: str | None = None,
+        base_revision_id: str | None = None,
+        priority: str = "normal",
+    ) -> PlanRefineJob:
+        with self._lock:
+            task = self.container.tasks.get(task_id)
+            if not task:
+                raise ValueError("Task not found")
+            if not isinstance(task.metadata, dict):
+                task.metadata = {}
+            self._migrate_legacy_plans(task)
+            if self._active_plan_refine_job(task_id):
+                raise RuntimeError("A plan refine job is already active for this task")
+            revisions = self.container.plan_revisions.for_task(task_id)
+            revisions.sort(key=lambda item: item.created_at)
+            if not revisions:
+                raise ValueError("No plan revision exists for this task")
+            normalized_feedback = str(feedback or "").strip()
+            if not normalized_feedback:
+                raise ValueError("feedback is required")
+            if base_revision_id:
+                base_revision = self.container.plan_revisions.get(base_revision_id)
+                if not base_revision or base_revision.task_id != task_id:
+                    raise ValueError("base_revision_id not found for task")
+            else:
+                base_revision = revisions[-1]
+            normalized_priority = str(priority or "normal").strip().lower()
+            if normalized_priority not in {"normal", "high"}:
+                normalized_priority = "normal"
+            job = PlanRefineJob(
+                task_id=task_id,
+                base_revision_id=base_revision.id,
+                status="queued",
+                feedback=normalized_feedback,
+                instructions=(str(instructions).strip() if instructions else None),
+                priority=normalized_priority,
+            )
+            self.container.plan_refine_jobs.upsert(job)
+            self.bus.emit(
+                channel="tasks",
+                event_type="plan.refine.queued",
+                entity_id=task_id,
+                payload={"job_id": job.id, "base_revision_id": job.base_revision_id},
+            )
+        future = self._get_pool().submit(self.process_plan_refine_job, job.id)
+        with self._futures_lock:
+            self._futures[job.id] = future
+        return job
+
+    def process_plan_refine_job(self, job_id: str) -> PlanRefineJob | None:
+        job = self.container.plan_refine_jobs.get(job_id)
+        if not job:
+            return None
+        if job.status not in {"queued", "running"}:
+            return job
+        job.status = "running"
+        job.started_at = now_iso()
+        self.container.plan_refine_jobs.upsert(job)
+        try:
+            self.bus.emit(
+                channel="tasks",
+                event_type="plan.refine.started",
+                entity_id=job.task_id,
+                payload={"job_id": job.id},
+            )
+        except Exception:
+            logger.exception("Failed to emit plan.refine.started for job %s", job.id)
+        task = self.container.tasks.get(job.task_id)
+        base_revision = self.container.plan_revisions.get(job.base_revision_id)
+        if not task or not base_revision or base_revision.task_id != job.task_id:
+            job.status = "failed"
+            job.finished_at = now_iso()
+            job.error = "Task or base revision not found"
+            self.container.plan_refine_jobs.upsert(job)
+            self.bus.emit(
+                channel="tasks",
+                event_type="plan.refine.failed",
+                entity_id=job.task_id,
+                payload={"job_id": job.id, "error": job.error},
+            )
+            return job
+
+        live_task = self.container.tasks.get(job.task_id)
+        if not live_task:
+            job.status = "failed"
+            job.finished_at = now_iso()
+            job.error = "Task not found"
+            self.container.plan_refine_jobs.upsert(job)
+            self.bus.emit(
+                channel="tasks",
+                event_type="plan.refine.failed",
+                entity_id=job.task_id,
+                payload={"job_id": job.id, "error": job.error},
+            )
+            return job
+        if not isinstance(live_task.metadata, dict):
+            live_task.metadata = {}
+        live_task.metadata["plan_refine_base"] = base_revision.content
+        live_task.metadata["plan_refine_feedback"] = job.feedback
+        if job.instructions:
+            live_task.metadata["plan_refine_instructions"] = job.instructions
+        self.container.tasks.upsert(live_task)
+
+        try:
+            try:
+                result = self.worker_adapter.run_step(task=live_task, step="plan_refine", attempt=1)
+                if result.status != "ok":
+                    raise ValueError(result.summary or "plan_refine failed")
+                revised_plan = str(result.summary or "").strip()
+                if not revised_plan:
+                    raise ValueError("Worker returned empty refined plan")
+                provider, model = self._resolve_worker_lineage(live_task, "plan_refine")
+                revision = self.create_plan_revision(
+                    task_id=job.task_id,
+                    content=revised_plan,
+                    source="worker_refine",
+                    parent_revision_id=base_revision.id,
+                    step="plan_refine",
+                    feedback_note=job.feedback,
+                    provider=provider,
+                    model=model,
+                )
+            except Exception as exc:
+                job.status = "failed"
+                job.finished_at = now_iso()
+                job.error = str(exc)
+                self.container.plan_refine_jobs.upsert(job)
+                try:
+                    self.bus.emit(
+                        channel="tasks",
+                        event_type="plan.refine.failed",
+                        entity_id=job.task_id,
+                        payload={"job_id": job.id, "error": job.error},
+                    )
+                except Exception:
+                    logger.exception("Failed to emit plan.refine.failed for job %s", job.id)
+                return job
+
+            refreshed = self.container.tasks.get(live_task.id)
+            if refreshed and isinstance(refreshed.metadata, dict):
+                live_task.metadata = dict(refreshed.metadata)
+            job.status = "completed"
+            job.finished_at = now_iso()
+            job.result_revision_id = revision.id
+            job.error = None
+            self.container.plan_refine_jobs.upsert(job)
+            try:
+                self.bus.emit(
+                    channel="tasks",
+                    event_type="plan.refine.completed",
+                    entity_id=job.task_id,
+                    payload={"job_id": job.id, "result_revision_id": revision.id},
+                )
+            except Exception:
+                logger.exception("Failed to emit plan.refine.completed for job %s", job.id)
+            return job
+        finally:
+            cleanup_task = self.container.tasks.get(job.task_id)
+            if cleanup_task and isinstance(cleanup_task.metadata, dict):
+                cleanup_task.metadata.pop("plan_refine_base", None)
+                cleanup_task.metadata.pop("plan_refine_feedback", None)
+                cleanup_task.metadata.pop("plan_refine_instructions", None)
+                self.container.tasks.upsert(cleanup_task)
+
+    def list_plan_refine_jobs(self, task_id: str) -> list[PlanRefineJob]:
+        task = self.container.tasks.get(task_id)
+        if not task:
+            raise ValueError("Task not found")
+        return self.container.plan_refine_jobs.for_task(task_id)
+
+    def get_plan_refine_job(self, task_id: str, job_id: str) -> PlanRefineJob:
+        task = self.container.tasks.get(task_id)
+        if not task:
+            raise ValueError("Task not found")
+        job = self.container.plan_refine_jobs.get(job_id)
+        if not job or job.task_id != task_id:
+            raise ValueError("Plan refine job not found")
+        return job
+
+    def commit_plan_revision(self, task_id: str, revision_id: str) -> str:
+        task = self.container.tasks.get(task_id)
+        if not task:
+            raise ValueError("Task not found")
+        self._migrate_legacy_plans(task)
+        target = self.container.plan_revisions.get(revision_id)
+        if not target or target.task_id != task_id:
+            raise ValueError("Revision not found for task")
+        for revision in self.container.plan_revisions.for_task(task_id):
+            next_status = "committed" if revision.id == revision_id else "draft"
+            if revision.status != next_status:
+                revision.status = next_status
+                self.container.plan_revisions.upsert(revision)
+        task.metadata["latest_plan_revision_id"] = revision_id
+        task.metadata["committed_plan_revision_id"] = revision_id
+        self.container.tasks.upsert(task)
+        self.bus.emit(
+            channel="tasks",
+            event_type="plan.revision.committed",
+            entity_id=task_id,
+            payload={"revision_id": revision_id},
+        )
+        return revision_id
+
+    def resolve_plan_text_for_generation(
+        self,
+        *,
+        task_id: str,
+        source: Literal["committed", "revision", "override", "latest"],
+        revision_id: str | None = None,
+        plan_override: str | None = None,
+    ) -> tuple[str, str | None]:
+        task = self.container.tasks.get(task_id)
+        if not task:
+            raise ValueError("Task not found")
+        self._migrate_legacy_plans(task)
+        revisions = self.container.plan_revisions.for_task(task_id)
+        revisions.sort(key=lambda item: item.created_at)
+
+        if source == "override":
+            body = str(plan_override or "").strip()
+            if not body:
+                raise ValueError("plan_override is required for source=override")
+            return body, None
+
+        if source == "revision":
+            if not revision_id:
+                raise ValueError("revision_id is required for source=revision")
+            revision = self.container.plan_revisions.get(revision_id)
+            if not revision or revision.task_id != task_id:
+                raise ValueError("Revision not found for task")
+            return revision.content, revision.id
+
+        if source == "committed":
+            committed_id = str(task.metadata.get("committed_plan_revision_id") or "").strip()
+            if not committed_id:
+                raise ValueError("No committed plan revision exists for this task")
+            revision = self.container.plan_revisions.get(committed_id)
+            if not revision or revision.task_id != task_id:
+                raise ValueError("Committed plan revision no longer exists")
+            return revision.content, revision.id
+
+        if not revisions:
+            raise ValueError("No plan revision exists for this task")
+        return revisions[-1].content, revisions[-1].id
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -462,7 +860,7 @@ class OrchestratorService:
         try:
             subprocess.run(["git", "add", "-A"], cwd=cwd, check=True, capture_output=True, text=True)
             subprocess.run(
-                ["git", "commit", "--allow-empty", "-m", f"task({task.id}): {task.title[:60]}"],
+                ["git", "commit", "-m", f"task({task.id}): {task.title[:60]}"],
                 cwd=cwd,
                 check=True,
                 capture_output=True,
@@ -472,6 +870,20 @@ class OrchestratorService:
             return sha
         except subprocess.CalledProcessError:
             return None
+
+    def _has_uncommitted_changes(self, cwd: Path) -> bool:
+        """Return True if the working tree has staged or unstaged changes.
+
+        Returns True on git failure (no repo, etc.) to avoid false blocking.
+        """
+        try:
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=cwd, capture_output=True, text=True, check=True,
+            )
+            return bool(result.stdout.strip())
+        except subprocess.CalledProcessError:
+            return True
 
     def _exceeds_quality_gate(self, task: Task, findings: list[ReviewFinding]) -> bool:
         gate = dict(task.quality_gate or {})
@@ -488,8 +900,14 @@ class OrchestratorService:
         step_log: dict[str, Any] = {"step": step, "status": result.status, "ts": now_iso(), "summary": result.summary}
         if result.human_blocking_issues:
             step_log["human_blocking_issues"] = result.human_blocking_issues
+        # Preserve log file paths so historical step logs can be retrieved.
+        last_logs = task.metadata.get("last_logs") if isinstance(task.metadata, dict) else None
+        if isinstance(last_logs, dict):
+            for key in ("stdout_path", "stderr_path", "progress_path"):
+                if last_logs.get(key):
+                    step_log[key] = last_logs[key]
         run.steps.append(step_log)
-        task.current_step = step
+        self.container.runs.upsert(run)
         self.container.tasks.upsert(task)
         if result.human_blocking_issues:
             self._block_for_human_issues(task, run, step, result.summary, result.human_blocking_issues)
@@ -509,13 +927,22 @@ class OrchestratorService:
 
         task.metadata.pop("human_blocking_issues", None)
 
-        # Store plan output in metadata for later retrieval
-        if step in ("plan", "plan_impl", "analyze") and result.summary:
-            if not isinstance(task.metadata, dict):
-                task.metadata = {}
-            plans = task.metadata.setdefault("plans", [])
-            plans.append({"step": step, "ts": now_iso(), "content": result.summary})
-            self.container.tasks.upsert(task)
+        # Store plan output as first-class immutable plan revisions.
+        if step == "plan" and result.summary:
+            provider, model = self._resolve_worker_lineage(task, step)
+            self.create_plan_revision(
+                task_id=task.id,
+                content=result.summary,
+                source="worker_plan",
+                step=step,
+                provider=provider,
+                model=model,
+            )
+            # Keep in-memory task metadata aligned so later upserts do not overwrite
+            # the stored revision pointers/history.
+            refreshed = self.container.tasks.get(task.id)
+            if refreshed and isinstance(refreshed.metadata, dict):
+                task.metadata = dict(refreshed.metadata)
 
         # Handle generate_tasks: create child tasks from step output
         if step == "generate_tasks" and result.generated_tasks:
@@ -603,7 +1030,14 @@ class OrchestratorService:
             if result.status != "ok":
                 raise ValueError(f"generate_tasks step failed: {result.summary or result.status}")
             task_defs = list(result.generated_tasks or [])
+            if not task_defs:
+                detail = str(result.summary or "").strip()
+                if detail:
+                    raise ValueError(f"Worker returned no generated tasks: {detail}")
+                raise ValueError("Worker returned no generated tasks for the selected plan source")
             created_ids = self._create_child_tasks(task, task_defs, apply_deps=infer_deps)
+            if not created_ids:
+                raise ValueError("Worker returned generated tasks, but none were valid task objects")
         finally:
             # Clean up the injected plan context
             task.metadata.pop("plan_for_generation", None)
@@ -725,7 +1159,7 @@ class OrchestratorService:
         all_tasks = self.container.tasks.list()
         candidates = [
             t for t in all_tasks
-            if t.status == "ready"
+            if t.status == "queued"
             and not (isinstance(t.metadata, dict) and t.metadata.get("deps_analyzed"))
             and t.source != "prd_import"
         ]
@@ -875,7 +1309,9 @@ class OrchestratorService:
             self.container.runs.upsert(run)
 
             cfg = self.container.config.load()
-            max_review_attempts = int(dict(cfg.get("orchestrator") or {}).get("max_review_attempts", 3) or 3)
+            orch_cfg = dict(cfg.get("orchestrator") or {})
+            max_review_attempts = int(orch_cfg.get("max_review_attempts", 10) or 10)
+            max_verify_fix_attempts = int(orch_cfg.get("max_verify_fix_attempts", 3) or 3)
 
             # Resolve pipeline template from registry
             registry = PipelineRegistry()
@@ -884,6 +1320,11 @@ class OrchestratorService:
             task.pipeline_template = steps
             has_review = "review" in steps
             has_commit = "commit" in steps
+
+            # Determine resume point for retries.
+            retry_from = ""
+            if isinstance(task.metadata, dict):
+                retry_from = str(task.metadata.pop("retry_from_step", "") or "").strip()
 
             task.run_ids.append(run.id)
             task.current_step = steps[0] if steps else None
@@ -900,19 +1341,83 @@ class OrchestratorService:
             mode = getattr(task, "hitl_mode", "autopilot") or "autopilot"
 
             # Phase 1: Run all pre-review/pre-commit steps
+            # When retry_from is set, skip steps before the resume point.
+            # If retry_from targets review or commit, skip all phase-1 steps.
+            skip_phase1 = retry_from in ("review", "commit")
+            reached_retry_step = not retry_from or skip_phase1
+            last_phase1_step: str | None = None
             for step in steps:
                 if step in ("review", "commit"):
                     continue
+                if not reached_retry_step:
+                    if step == retry_from:
+                        reached_retry_step = True
+                    else:
+                        last_phase1_step = step
+                        run.steps.append({"step": step, "status": "skipped", "ts": now_iso()})
+                        self.container.runs.upsert(run)
+                        continue
+                task.current_step = step
+                self.container.tasks.upsert(task)
                 gate_name = self._GATE_MAPPING.get(step)
                 if gate_name and should_gate(mode, gate_name):
                     if not self._wait_for_gate(task, gate_name):
                         self._abort_for_gate(task, run, gate_name)
                         return
                 if not self._run_non_review_step(task, run, step, attempt=1):
+                    # If a verify step failed, try implement_fix → verify loop.
+                    if step in _VERIFY_STEPS:
+                        fixed = False
+                        for fix_attempt in range(1, max_verify_fix_attempts + 1):
+                            # Stash the failure summary so implement_fix sees it.
+                            task.status = "in_progress"
+                            task.metadata["verify_failure"] = task.error
+                            task.error = None
+                            task.retry_count += 1
+                            self.container.tasks.upsert(task)
+                            run.status = "in_progress"
+                            run.finished_at = None
+                            run.summary = None
+                            self.container.runs.upsert(run)
+
+                            task.current_step = "implement_fix"
+                            self.container.tasks.upsert(task)
+                            if not self._run_non_review_step(task, run, "implement_fix", attempt=fix_attempt + 1):
+                                return
+                            task.metadata.pop("verify_failure", None)
+                            task.current_step = step
+                            self.container.tasks.upsert(task)
+                            if self._run_non_review_step(task, run, step, attempt=fix_attempt + 1):
+                                fixed = True
+                                break
+                            # verify failed again — loop continues
+                        if fixed:
+                            last_phase1_step = step
+                            continue
+                        # All fix attempts exhausted — task stays blocked from last verify fail.
+                    return
+                last_phase1_step = step
+
+            # Guard: block if implementation produced no file changes
+            if has_commit:
+                impl_dir = worktree_dir or self.container.project_dir
+                if not self._has_uncommitted_changes(impl_dir):
+                    task.status = "blocked"
+                    task.error = "No file changes detected after implementation"
+                    task.current_step = last_phase1_step or "implement"
+                    self.container.tasks.upsert(task)
+                    run.status = "blocked"
+                    run.finished_at = now_iso()
+                    run.summary = "Blocked: no changes produced by implementation steps"
+                    self.container.runs.upsert(run)
+                    self.bus.emit(
+                        channel="tasks", event_type="task.blocked",
+                        entity_id=task.id, payload={"error": task.error},
+                    )
                     return
 
             # Phase 2: Review loop (only if template has "review")
-            if has_review:
+            if has_review and retry_from != "commit":
                 gate_name = self._GATE_MAPPING.get("review")
                 if gate_name and should_gate(mode, gate_name):
                     if not self._wait_for_gate(task, gate_name):
@@ -960,7 +1465,14 @@ class OrchestratorService:
                         decision="changes_requested" if self._exceeds_quality_gate(task, findings) else "approved",
                     )
                     self.container.reviews.append(cycle)
-                    run.steps.append({"step": "review", "status": cycle.decision, "ts": now_iso(), "open_counts": open_counts})
+                    review_step_log: dict[str, Any] = {"step": "review", "status": cycle.decision, "ts": now_iso(), "open_counts": open_counts}
+                    review_last_logs = task.metadata.get("last_logs") if isinstance(task.metadata, dict) else None
+                    if isinstance(review_last_logs, dict):
+                        for key in ("stdout_path", "stderr_path", "progress_path"):
+                            if review_last_logs.get(key):
+                                review_step_log[key] = review_last_logs[key]
+                    run.steps.append(review_step_log)
+                    self.container.runs.upsert(run)
                     self.bus.emit(
                         channel="review",
                         event_type="task.reviewed",
@@ -978,11 +1490,43 @@ class OrchestratorService:
                     # Attach open findings so the worker knows what to fix
                     open_findings = [f.to_dict() for f in findings if f.status == "open"]
                     task.metadata["review_findings"] = open_findings
-                    for fix_step in ["implement_fix", "verify"]:
-                        task.retry_count += 1
-                        self.container.tasks.upsert(task)
-                        if not self._run_non_review_step(task, run, fix_step, attempt=review_attempt):
+
+                    # Run implement_fix
+                    task.retry_count += 1
+                    task.current_step = "implement_fix"
+                    self.container.tasks.upsert(task)
+                    if not self._run_non_review_step(task, run, "implement_fix", attempt=review_attempt):
+                        return
+
+                    # Run verify with retry loop (same as Phase 1)
+                    task.current_step = "verify"
+                    self.container.tasks.upsert(task)
+                    if not self._run_non_review_step(task, run, "verify", attempt=review_attempt):
+                        verify_fixed = False
+                        for vfix in range(1, max_verify_fix_attempts + 1):
+                            task.status = "in_progress"
+                            task.metadata["verify_failure"] = task.error
+                            task.error = None
+                            task.retry_count += 1
+                            self.container.tasks.upsert(task)
+                            run.status = "in_progress"
+                            run.finished_at = None
+                            run.summary = None
+                            self.container.runs.upsert(run)
+
+                            task.current_step = "implement_fix"
+                            self.container.tasks.upsert(task)
+                            if not self._run_non_review_step(task, run, "implement_fix", attempt=vfix + 1):
+                                return
+                            task.metadata.pop("verify_failure", None)
+                            task.current_step = "verify"
+                            self.container.tasks.upsert(task)
+                            if self._run_non_review_step(task, run, "verify", attempt=vfix + 1):
+                                verify_fixed = True
+                                break
+                        if not verify_fixed:
                             return
+
                     task.metadata.pop("review_findings", None)
 
                 if not review_passed:
@@ -999,13 +1543,33 @@ class OrchestratorService:
 
             # Phase 3: Commit (only if template has "commit")
             if has_commit:
+                task.current_step = "commit"
+                self.container.tasks.upsert(task)
                 if should_gate(mode, "before_commit"):
                     if not self._wait_for_gate(task, "before_commit"):
                         self._abort_for_gate(task, run, "before_commit")
                         return
 
                 commit_sha = self._commit_for_task(task, worktree_dir)
+                if not commit_sha:
+                    # Only block when git is present — otherwise commit is a no-op
+                    commit_cwd = worktree_dir or self.container.project_dir
+                    git_present = (commit_cwd / ".git").exists() or (self.container.project_dir / ".git").exists()
+                    if git_present:
+                        task.status = "blocked"
+                        task.error = "Commit failed (no changes to commit)"
+                        self.container.tasks.upsert(task)
+                        run.status = "blocked"
+                        run.finished_at = now_iso()
+                        run.summary = "Blocked: commit produced no changes"
+                        self.container.runs.upsert(run)
+                        self.bus.emit(
+                            channel="tasks", event_type="task.blocked",
+                            entity_id=task.id, payload={"error": task.error},
+                        )
+                        return
                 run.steps.append({"step": "commit", "status": "ok", "ts": now_iso(), "commit": commit_sha})
+                self.container.runs.upsert(run)
 
                 # Merge worktree branch back to run branch
                 if worktree_dir:

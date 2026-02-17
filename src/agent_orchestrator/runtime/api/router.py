@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import json
+import subprocess
+from hashlib import sha256
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ...collaboration.modes import MODE_CONFIGS
 from ...pipelines.registry import PipelineRegistry
+from ...workers.config import WorkerProviderSpec, get_workers_runtime_config
+from ...workers.diagnostics import test_worker
 from ..domain.models import AgentRecord, QuickActionRun, Task, now_iso
 from ..events.bus import EventBus
 from ..orchestrator.service import OrchestratorService
@@ -21,12 +26,14 @@ class CreateTaskRequest(BaseModel):
     description: str = ""
     task_type: str = "feature"
     priority: str = "P2"
+    status: Optional[str] = None
     labels: list[str] = Field(default_factory=list)
     blocked_by: list[str] = Field(default_factory=list)
     parent_id: Optional[str] = None
     pipeline_template: Optional[list[str]] = None
     approval_mode: str = "human_review"
     hitl_mode: str = "autopilot"
+    dependency_policy: str = ""
     source: str = "manual"
     worker_model: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -42,6 +49,7 @@ class UpdateTaskRequest(BaseModel):
     blocked_by: Optional[list[str]] = None
     approval_mode: Optional[str] = None
     hitl_mode: Optional[str] = None
+    dependency_policy: Optional[str] = None
     worker_model: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
 
@@ -73,7 +81,26 @@ class PromoteQuickActionRequest(BaseModel):
     priority: str = "P2"
 
 
+class PlanRefineRequest(BaseModel):
+    base_revision_id: Optional[str] = None
+    feedback: str
+    instructions: Optional[str] = None
+    priority: Literal["normal", "high"] = "normal"
+
+
+class CommitPlanRequest(BaseModel):
+    revision_id: str
+
+
+class CreatePlanRevisionRequest(BaseModel):
+    content: str
+    parent_revision_id: Optional[str] = None
+    feedback_note: Optional[str] = None
+
+
 class GenerateTasksRequest(BaseModel):
+    source: Optional[Literal["committed", "revision", "override", "latest"]] = None
+    revision_id: Optional[str] = None
     plan_override: Optional[str] = None
     infer_deps: bool = True
 
@@ -89,7 +116,7 @@ class OrchestratorControlRequest(BaseModel):
 class OrchestratorSettingsRequest(BaseModel):
     concurrency: int = Field(2, ge=1, le=128)
     auto_deps: bool = True
-    max_review_attempts: int = Field(3, ge=1, le=50)
+    max_review_attempts: int = Field(10, ge=1, le=50)
 
 
 class AgentRoutingSettingsRequest(BaseModel):
@@ -111,6 +138,8 @@ class WorkerProviderSettingsRequest(BaseModel):
 class WorkersSettingsRequest(BaseModel):
     default: str = "codex"
     default_model: Optional[str] = None
+    heartbeat_seconds: Optional[int] = Field(None, ge=1, le=3600)
+    heartbeat_grace_seconds: Optional[int] = Field(None, ge=1, le=7200)
     routing: dict[str, str] = Field(default_factory=dict)
     providers: dict[str, WorkerProviderSettingsRequest] = Field(default_factory=dict)
 
@@ -124,6 +153,7 @@ class QualityGateSettingsRequest(BaseModel):
 
 class DefaultsSettingsRequest(BaseModel):
     quality_gate: QualityGateSettingsRequest = Field(default_factory=QualityGateSettingsRequest)
+    dependency_policy: str = "prudent"
 
 
 class LanguageCommandsRequest(BaseModel):
@@ -155,6 +185,11 @@ class ReviewActionRequest(BaseModel):
     guidance: Optional[str] = None
 
 
+class RetryTaskRequest(BaseModel):
+    guidance: Optional[str] = None
+    start_from_step: Optional[str] = None
+
+
 class AddFeedbackRequest(BaseModel):
     task_id: str
     feedback_type: str = "general"
@@ -174,12 +209,12 @@ class AddCommentRequest(BaseModel):
 
 
 VALID_TRANSITIONS: dict[str, set[str]] = {
-    "backlog": {"ready", "cancelled"},
-    "ready": {"in_progress", "blocked", "backlog", "cancelled"},
-    "in_progress": {"in_review", "blocked", "ready", "cancelled"},
-    "in_review": {"done", "in_progress", "blocked", "cancelled"},
-    "blocked": {"ready", "cancelled", "backlog"},
-    "done": {"ready"},
+    "backlog": {"queued", "cancelled"},
+    "queued": {"backlog", "cancelled"},
+    "in_progress": {"cancelled"},
+    "in_review": {"done", "blocked", "cancelled"},
+    "blocked": {"queued", "in_review", "cancelled"},
+    "done": set(),
     "cancelled": {"backlog"},
 }
 
@@ -301,6 +336,137 @@ def _task_payload(task: Task) -> dict[str, Any]:
     return payload
 
 
+def _safe_state_path(raw_path: Any, state_root: Path) -> Optional[Path]:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    try:
+        path = Path(raw_path).expanduser().resolve()
+        root = state_root.resolve()
+    except Exception:
+        return None
+    if path == root or root in path.parents:
+        return path
+    return None
+
+
+def _read_tail(path: Optional[Path], max_chars: int) -> tuple[str, int]:
+    """Read the tail of a file.
+
+    Returns ``(text, tail_start_byte)`` where *tail_start_byte* is the byte
+    offset in the file where the returned text begins.  When the entire file
+    fits within *max_chars*, ``tail_start_byte`` is ``0``.
+    """
+    if not path or not path.exists() or not path.is_file() or max_chars <= 0:
+        return "", 0
+    try:
+        size = path.stat().st_size
+    except Exception:
+        return "", 0
+    if size <= 0:
+        return "", 0
+
+    # Read only a bounded tail window (overshoot bytes for multibyte chars).
+    max_bytes = min(size, max_chars * 4)
+    start_byte = max(0, size - max_bytes)
+    prev_byte = b"\n"
+    try:
+        with open(path, "rb") as fh:
+            if start_byte > 0:
+                fh.seek(start_byte - 1)
+                prev_byte = fh.read(1) or b"\n"
+            fh.seek(start_byte)
+            raw = fh.read(max_bytes)
+    except Exception:
+        return "", 0
+
+    text = raw.decode("utf-8", errors="replace")
+    if not text:
+        return "", size
+
+    cut_at = max(0, len(text) - max_chars)
+    slice_starts_mid_line = False
+    if cut_at > 0:
+        slice_starts_mid_line = text[cut_at - 1] != "\n"
+    elif start_byte > 0 and prev_byte != b"\n":
+        slice_starts_mid_line = True
+
+    # If the returned slice starts in the middle of a line, drop the orphaned
+    # prefix so NDJSON/text consumers only see full lines.
+    if slice_starts_mid_line:
+        first_newline = text.find("\n", cut_at)
+        if first_newline == -1:
+            return "", size
+        cut_at = first_newline + 1
+
+    tail = text[cut_at:]
+    tail_start_byte = start_byte + len(text[:cut_at].encode("utf-8"))
+    return tail, tail_start_byte
+
+
+def _read_from_offset(
+    path: Optional[Path],
+    offset: int,
+    max_bytes: int,
+    read_to: int = 0,
+    *,
+    align_start_to_line: bool = False,
+) -> tuple[str, int, int]:
+    """Read file content from *offset* bytes forward.
+
+    Returns ``(text, new_offset, chunk_start_offset)`` where *new_offset* is the
+    byte offset after the returned chunk and *chunk_start_offset* is the actual
+    byte offset where the returned chunk begins.
+
+    If *read_to* > 0, do not read past that byte position in the file.
+    """
+    if not path or not path.exists() or not path.is_file():
+        return "", 0, 0
+    try:
+        size = path.stat().st_size
+        end = min(size, read_to) if read_to > 0 else size
+        start = max(offset, 0)
+        if start >= end:
+            bounded = min(start, size)
+            return "", bounded, bounded
+
+        aligned_start = start
+        if align_start_to_line and start > 0:
+            lookback = min(start, max(max_bytes, 8192))
+            with open(path, "rb") as fh:
+                fh.seek(start - lookback)
+                prefix = fh.read(lookback)
+            newline_idx = prefix.rfind(b"\n")
+            if newline_idx >= 0:
+                aligned_start = (start - lookback) + newline_idx + 1
+
+        read_limit = end - aligned_start
+        if read_limit <= 0:
+            bounded = min(aligned_start, size)
+            return "", bounded, bounded
+        # Allow aligned reads to exceed ``max_bytes`` by at most one chunk size.
+        capped = min(read_limit, max_bytes * 2 if align_start_to_line else max_bytes)
+        with open(path, "rb") as fh:
+            fh.seek(aligned_start)
+            raw = fh.read(capped)
+        text = raw.decode("utf-8", errors="replace")
+        return text, aligned_start + len(raw), aligned_start
+    except Exception:
+        return "", 0, 0
+
+
+def _logs_snapshot_id(logs_meta: dict[str, Any]) -> str:
+    parts = [
+        str(logs_meta.get("run_dir") or ""),
+        str(logs_meta.get("stdout_path") or ""),
+        str(logs_meta.get("stderr_path") or ""),
+        str(logs_meta.get("started_at") or ""),
+    ]
+    material = "|".join(parts).strip("|")
+    if not material:
+        return ""
+    return sha256(material.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
 def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
     raw_providers = value if isinstance(value, dict) else {}
     providers: dict[str, dict[str, Any]] = {}
@@ -315,7 +481,7 @@ def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
             continue
 
         if provider_type in {"codex", "claude"}:
-            default_command = "codex" if provider_type == "codex" else "claude -p"
+            default_command = "codex exec" if provider_type == "codex" else "claude -p"
             command = str(raw_item.get("command") or default_command).strip() or default_command
             provider: dict[str, Any] = {"type": provider_type, "command": command}
             model = str(raw_item.get("model") or "").strip()
@@ -343,11 +509,11 @@ def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
         providers[name] = provider
 
     codex = providers.get("codex")
-    codex_command = "codex"
+    codex_command = "codex exec"
     codex_model = None
     codex_reasoning = None
     if isinstance(codex, dict):
-        codex_command = str(codex.get("command") or "codex").strip() or "codex"
+        codex_command = str(codex.get("command") or "codex exec").strip() or "codex exec"
         codex_model = str(codex.get("model") or "").strip() or None
         raw_reasoning = str(codex.get("reasoning_effort") or "").strip().lower()
         codex_reasoning = raw_reasoning if raw_reasoning in {"low", "medium", "high"} else None
@@ -368,13 +534,19 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     workers_providers = _normalize_workers_providers(workers_cfg.get("providers"))
     workers_default = str(workers_cfg.get("default") or "codex").strip() or "codex"
     workers_default_model = str(workers_cfg.get("default_model") or "").strip()
+    workers_heartbeat_seconds = _coerce_int(workers_cfg.get("heartbeat_seconds"), 60, minimum=1, maximum=3600)
+    workers_heartbeat_grace_seconds = _coerce_int(
+        workers_cfg.get("heartbeat_grace_seconds"), 240, minimum=1, maximum=7200
+    )
+    if workers_heartbeat_grace_seconds < workers_heartbeat_seconds:
+        workers_heartbeat_grace_seconds = workers_heartbeat_seconds
     if workers_default not in workers_providers:
         workers_default = "codex"
     return {
         "orchestrator": {
             "concurrency": _coerce_int(orchestrator.get("concurrency"), 2, minimum=1, maximum=128),
             "auto_deps": _coerce_bool(orchestrator.get("auto_deps"), True),
-            "max_review_attempts": _coerce_int(orchestrator.get("max_review_attempts"), 3, minimum=1, maximum=50),
+            "max_review_attempts": _coerce_int(orchestrator.get("max_review_attempts"), 10, minimum=1, maximum=50),
         },
         "agent_routing": {
             "default_role": str(routing.get("default_role") or "general"),
@@ -392,6 +564,8 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
         "workers": {
             "default": workers_default,
             "default_model": workers_default_model,
+            "heartbeat_seconds": workers_heartbeat_seconds,
+            "heartbeat_grace_seconds": workers_heartbeat_grace_seconds,
             "routing": _normalize_str_map(workers_cfg.get("routing")),
             "providers": workers_providers,
         },
@@ -399,6 +573,98 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             "commands": dict((cfg.get("project") or {}).get("commands") or {}),
         },
     }
+
+
+def _workers_health_payload(cfg: dict[str, Any]) -> dict[str, Any]:
+    runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
+    known_provider_names: list[str] = ["codex", "claude", "ollama"]
+    for name in sorted(runtime.providers.keys()):
+        if name not in known_provider_names:
+            known_provider_names.append(name)
+
+    providers: list[dict[str, Any]] = []
+    checked_at = now_iso()
+    for name in known_provider_names:
+        spec = runtime.providers.get(name)
+        if spec is None:
+            # Probe common CLI providers even when not configured, so users can
+            # see local availability before adding explicit settings.
+            probe_spec: Optional[WorkerProviderSpec] = None
+            if name == "codex":
+                probe_spec = WorkerProviderSpec(name="codex", type="codex", command="codex exec")
+            elif name == "claude":
+                probe_spec = WorkerProviderSpec(name="claude", type="claude", command="claude -p")
+
+            if probe_spec is not None:
+                healthy, detail = test_worker(probe_spec)
+                providers.append(
+                    {
+                        "name": name,
+                        "type": probe_spec.type,
+                        "configured": False,
+                        "healthy": healthy,
+                        "status": "connected" if healthy else "not_configured",
+                        "detail": detail if healthy else f"Provider not configured. {detail}",
+                        "checked_at": checked_at,
+                        "command": probe_spec.command,
+                    }
+                )
+                continue
+            providers.append(
+                {
+                    "name": name,
+                    "type": name if name in {"codex", "claude", "ollama"} else "unknown",
+                    "configured": False,
+                    "healthy": False,
+                    "status": "not_configured",
+                    "detail": "Provider is not configured.",
+                    "checked_at": checked_at,
+                }
+            )
+            continue
+
+        healthy, detail = test_worker(spec)
+        item: dict[str, Any] = {
+            "name": spec.name,
+            "type": spec.type,
+            "configured": True,
+            "healthy": healthy,
+            "status": "connected" if healthy else "unavailable",
+            "detail": detail,
+            "checked_at": checked_at,
+        }
+        if spec.command:
+            item["command"] = spec.command
+        if spec.endpoint:
+            item["endpoint"] = spec.endpoint
+        if spec.model:
+            item["model"] = spec.model
+        providers.append(item)
+
+    return {"providers": providers}
+
+
+def _workers_routing_payload(cfg: dict[str, Any]) -> dict[str, Any]:
+    runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
+    default_provider = runtime.default_worker if runtime.default_worker in runtime.providers else "codex"
+    canonical_steps = ["plan", "analyze", "generate_tasks", "implement", "verify", "review", "commit"]
+    ordered_steps = list(dict.fromkeys(canonical_steps + sorted(runtime.routing.keys())))
+
+    rows: list[dict[str, Any]] = []
+    for step in ordered_steps:
+        provider_name = runtime.routing.get(step) or default_provider
+        provider = runtime.providers.get(provider_name)
+        rows.append(
+            {
+                "step": step,
+                "provider": provider_name,
+                "provider_type": provider.type if provider else None,
+                "source": "explicit" if step in runtime.routing else "default",
+                "configured": provider is not None,
+            }
+        )
+
+    return {"default": default_provider, "rows": rows}
 
 
 def _execution_batches(tasks: list[Task]) -> list[list[str]]:
@@ -632,6 +898,12 @@ def create_router(
             registry = PipelineRegistry()
             template = registry.resolve_for_task_type(body.task_type)
             pipeline_steps = template.step_names()
+        dep_policy = body.dependency_policy.strip() if body.dependency_policy else ""
+        if dep_policy not in ("permissive", "prudent", "strict"):
+            cfg = container.config.load()
+            dep_policy = str((cfg.get("defaults") or {}).get("dependency_policy") or "prudent")
+            if dep_policy not in ("permissive", "prudent", "strict"):
+                dep_policy = "prudent"
         task = Task(
             title=body.title,
             description=body.description,
@@ -643,10 +915,13 @@ def create_router(
             pipeline_template=pipeline_steps,
             approval_mode=body.approval_mode,
             hitl_mode=body.hitl_mode,
+            dependency_policy=dep_policy,
             source=body.source,
             worker_model=(str(body.worker_model).strip() if body.worker_model else None),
             metadata=body.metadata,
         )
+        if body.status in ("backlog", "queued"):
+            task.status = body.status
         if task.parent_id:
             parent = container.tasks.get(task.parent_id)
             if parent and task.id not in parent.children_ids:
@@ -680,7 +955,7 @@ def create_router(
     @router.get("/tasks/board")
     async def board(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         container, _, _ = _ctx(project_dir)
-        columns = {name: [] for name in ["backlog", "ready", "in_progress", "in_review", "blocked", "done", "cancelled"]}
+        columns = {name: [] for name in ["backlog", "queued", "in_progress", "in_review", "blocked", "done", "cancelled"]}
         for task in container.tasks.list():
             columns.setdefault(task.status, []).append(_task_payload(task))
         for key, items in columns.items():
@@ -700,6 +975,191 @@ def create_router(
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         return {"task": _task_payload(task)}
+
+    @router.get("/tasks/{task_id}/diff")
+    async def get_task_diff(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return the git diff for a task's latest commit."""
+        container, _, _ = _ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        # Find the commit SHA from the latest run's steps.
+        commit_sha: str | None = None
+        for run_id in reversed(task.run_ids):
+            for run in container.runs.list():
+                if run.id == run_id:
+                    for step in reversed(run.steps or []):
+                        if isinstance(step, dict) and step.get("step") == "commit" and step.get("commit"):
+                            commit_sha = str(step["commit"])
+                            break
+                    if commit_sha:
+                        break
+            if commit_sha:
+                break
+
+        if not commit_sha:
+            return {"commit": None, "files": [], "diff": "", "stat": ""}
+
+        git_dir = container.project_dir
+        try:
+            stat_result = subprocess.run(
+                ["git", "show", "--stat", "--format=", commit_sha],
+                cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
+            )
+            diff_result = subprocess.run(
+                ["git", "diff", f"{commit_sha}~1..{commit_sha}"],
+                cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to read diff: {exc}") from exc
+
+        # Parse stat lines into structured file list.
+        files: list[dict[str, str]] = []
+        for line in stat_result.stdout.strip().splitlines():
+            line = line.strip()
+            if not line or line.startswith("Showing") or " | " not in line:
+                continue
+            parts = line.split(" | ", 1)
+            file_path = parts[0].strip()
+            change_info = parts[1].strip() if len(parts) > 1 else ""
+            files.append({"path": file_path, "changes": change_info})
+
+        return {
+            "commit": commit_sha,
+            "files": files,
+            "diff": diff_result.stdout,
+            "stat": stat_result.stdout,
+        }
+
+    @router.get("/tasks/{task_id}/logs")
+    async def get_task_logs(
+        task_id: str,
+        project_dir: Optional[str] = Query(None),
+        max_chars: int = Query(12000, ge=200, le=2000000),
+        stdout_offset: int = Query(0, ge=0),
+        stderr_offset: int = Query(0, ge=0),
+        backfill: bool = Query(False),
+        stdout_read_to: int = Query(0, ge=0),
+        stderr_read_to: int = Query(0, ge=0),
+        step: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+
+        # When a specific step is requested, look up its log paths from run.steps.
+        step_logs_meta: Optional[dict[str, Any]] = None
+        if step:
+            for run_id in reversed(task.run_ids):
+                for run in container.runs.list():
+                    if run.id == run_id:
+                        # Find the last matching step entry (latest attempt).
+                        for entry in reversed(run.steps or []):
+                            if isinstance(entry, dict) and entry.get("step") == step and entry.get("stdout_path"):
+                                step_logs_meta = entry
+                                break
+                        break
+                if step_logs_meta:
+                    break
+
+        if step_logs_meta:
+            logs_meta = step_logs_meta
+            mode = "history"
+        else:
+            active_meta = metadata.get("active_logs") if isinstance(metadata.get("active_logs"), dict) else None
+            last_meta = metadata.get("last_logs") if isinstance(metadata.get("last_logs"), dict) else None
+            logs_meta = active_meta or last_meta or {}
+            mode = "active" if active_meta else ("last" if last_meta else "none")
+
+        stdout_path = _safe_state_path(logs_meta.get("stdout_path"), container.state_root)
+        stderr_path = _safe_state_path(logs_meta.get("stderr_path"), container.state_root)
+        progress_path = _safe_state_path(logs_meta.get("progress_path"), container.state_root)
+
+        progress_payload: dict[str, Any] = {}
+        if progress_path and progress_path.exists():
+            try:
+                raw = json.loads(progress_path.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    progress_payload = raw
+            except Exception:
+                progress_payload = {}
+
+        use_incremental = backfill or stdout_offset > 0 or stderr_offset > 0
+        stdout_tail_start = 0
+        stderr_tail_start = 0
+        stdout_chunk_start = 0
+        stderr_chunk_start = 0
+        if use_incremental:
+            stdout_text, new_stdout_offset, stdout_chunk_start = _read_from_offset(
+                stdout_path,
+                stdout_offset,
+                max_chars,
+                read_to=stdout_read_to,
+                align_start_to_line=backfill,
+            )
+            stderr_text, new_stderr_offset, stderr_chunk_start = _read_from_offset(
+                stderr_path,
+                stderr_offset,
+                max_chars,
+                read_to=stderr_read_to,
+                align_start_to_line=backfill,
+            )
+        else:
+            stdout_text, stdout_tail_start = _read_tail(stdout_path, max_chars)
+            stderr_text, stderr_tail_start = _read_tail(stderr_path, max_chars)
+            new_stdout_offset = stdout_path.stat().st_size if stdout_path and stdout_path.exists() else 0
+            new_stderr_offset = stderr_path.stat().st_size if stderr_path and stderr_path.exists() else 0
+            stdout_chunk_start = stdout_tail_start
+            stderr_chunk_start = stderr_tail_start
+
+        # Collect which steps have stored logs and count executions.
+        available_steps: list[str] = []
+        step_execution_counts: dict[str, int] = {}
+        seen: set[str] = set()
+        for run_id in task.run_ids[-1:]:
+            for run in container.runs.list():
+                if run.id == run_id:
+                    for entry in (run.steps or []):
+                        if isinstance(entry, dict) and entry.get("stdout_path"):
+                            s = str(entry.get("step") or "")
+                            if s:
+                                step_execution_counts[s] = step_execution_counts.get(s, 0) + 1
+                                if s not in seen:
+                                    available_steps.append(s)
+                                    seen.add(s)
+                    break
+        # Include the currently running step so users can switch between
+        # earlier completed steps and the live step while a task is in progress.
+        active_step = (metadata.get("active_logs") or {}).get("step") if isinstance(metadata.get("active_logs"), dict) else None
+        if not active_step:
+            active_step = task.current_step
+        if active_step and active_step not in seen:
+            available_steps.append(str(active_step))
+
+        return {
+            "mode": mode,
+            "task_status": task.status,
+            "step": str(logs_meta.get("step") or task.current_step or ""),
+            "current_step": str(task.current_step or ""),
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "stdout_offset": new_stdout_offset,
+            "stderr_offset": new_stderr_offset,
+            "stdout_chunk_start": stdout_chunk_start,
+            "stderr_chunk_start": stderr_chunk_start,
+            "stdout_tail_start": stdout_tail_start,
+            "stderr_tail_start": stderr_tail_start,
+            "started_at": logs_meta.get("started_at"),
+            "finished_at": logs_meta.get("finished_at"),
+            "log_id": _logs_snapshot_id(logs_meta),
+            "progress": progress_payload,
+            "available_steps": available_steps,
+            "step_execution_counts": step_execution_counts,
+        }
 
     @router.patch("/tasks/{task_id}")
     async def patch_task(task_id: str, body: UpdateTaskRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -730,7 +1190,7 @@ def create_router(
         valid = VALID_TRANSITIONS.get(task.status, set())
         if target not in valid:
             raise HTTPException(status_code=400, detail=f"Invalid transition {task.status} -> {target}")
-        if target in {"ready", "in_progress"}:
+        if target == "queued":
             unresolved = _has_unresolved_blockers(container, task)
             if unresolved is not None:
                 raise HTTPException(status_code=400, detail=f"Unresolved blocker: {unresolved}")
@@ -752,7 +1212,7 @@ def create_router(
         return {"task": _task_payload(task)}
 
     @router.post("/tasks/{task_id}/retry")
-    async def retry_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+    async def retry_task(task_id: str, body: Optional[RetryTaskRequest] = None, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         container, bus, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -760,12 +1220,26 @@ def create_router(
         unresolved = _has_unresolved_blockers(container, task)
         if unresolved is not None:
             raise HTTPException(status_code=400, detail=f"Unresolved blocker: {unresolved}")
+        # Capture previous error before clearing it.
+        previous_error = task.error or ""
         task.retry_count += 1
-        task.status = "ready"
+        task.status = "queued"
         task.error = None
         task.pending_gate = None
-        if isinstance(task.metadata, dict):
-            task.metadata.pop("human_blocking_issues", None)
+        task.metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        task.metadata.pop("human_blocking_issues", None)
+        guidance = (body.guidance if body else None) or ""
+        if guidance.strip() or previous_error.strip():
+            task.metadata["retry_guidance"] = {
+                "ts": now_iso(),
+                "guidance": guidance.strip(),
+                "previous_error": previous_error.strip(),
+            }
+        start_from = (body.start_from_step if body else None) or ""
+        if start_from.strip():
+            task.metadata["retry_from_step"] = start_from.strip()
+        else:
+            task.metadata.pop("retry_from_step", None)
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.retry", entity_id=task.id, payload={"retry_count": task.retry_count})
@@ -874,11 +1348,102 @@ def create_router(
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        metadata = task.metadata if isinstance(task.metadata, dict) else {}
-        plans = metadata.get("plans")
-        if not isinstance(plans, list):
-            plans = []
-        return {"plans": plans, "latest": plans[-1] if plans else None}
+        orchestrator = resolve_orchestrator(project_dir)
+        try:
+            return orchestrator.get_plan_document(task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+    @router.post("/tasks/{task_id}/plan/refine")
+    async def refine_task_plan(
+        task_id: str,
+        body: PlanRefineRequest,
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        container, _, orchestrator = _ctx(project_dir)
+        if not container.tasks.get(task_id):
+            raise HTTPException(status_code=404, detail="Task not found")
+        if not str(body.feedback or "").strip():
+            raise HTTPException(status_code=400, detail="feedback is required")
+        try:
+            job = orchestrator.queue_plan_refine_job(
+                task_id=task_id,
+                base_revision_id=body.base_revision_id,
+                feedback=body.feedback,
+                instructions=body.instructions,
+                priority=body.priority,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"job": job.to_dict()}
+
+    @router.get("/tasks/{task_id}/plan/jobs")
+    async def list_plan_refine_jobs(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, orchestrator = _ctx(project_dir)
+        if not container.tasks.get(task_id):
+            raise HTTPException(status_code=404, detail="Task not found")
+        try:
+            jobs = orchestrator.list_plan_refine_jobs(task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"jobs": [job.to_dict() for job in jobs]}
+
+    @router.get("/tasks/{task_id}/plan/jobs/{job_id}")
+    async def get_plan_refine_job(task_id: str, job_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, orchestrator = _ctx(project_dir)
+        if not container.tasks.get(task_id):
+            raise HTTPException(status_code=404, detail="Task not found")
+        try:
+            job = orchestrator.get_plan_refine_job(task_id, job_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return {"job": job.to_dict()}
+
+    @router.post("/tasks/{task_id}/plan/commit")
+    async def commit_plan_revision(
+        task_id: str,
+        body: CommitPlanRequest,
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        container, _, orchestrator = _ctx(project_dir)
+        if not container.tasks.get(task_id):
+            raise HTTPException(status_code=404, detail="Task not found")
+        try:
+            committed_revision_id = orchestrator.commit_plan_revision(task_id, body.revision_id)
+            plan_doc = orchestrator.get_plan_document(task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {
+            "committed_revision_id": committed_revision_id,
+            "latest_revision_id": plan_doc.get("latest_revision_id"),
+            "committed_plan_revision_id": plan_doc.get("committed_revision_id"),
+        }
+
+    @router.post("/tasks/{task_id}/plan/revisions")
+    async def create_plan_revision(
+        task_id: str,
+        body: CreatePlanRevisionRequest,
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        container, _, orchestrator = _ctx(project_dir)
+        if not container.tasks.get(task_id):
+            raise HTTPException(status_code=404, detail="Task not found")
+        if not str(body.content or "").strip():
+            raise HTTPException(status_code=400, detail="content is required")
+        try:
+            revision = orchestrator.create_plan_revision(
+                task_id=task_id,
+                content=body.content,
+                source="human_edit",
+                parent_revision_id=body.parent_revision_id,
+                feedback_note=body.feedback_note,
+                step=None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return {"revision": revision.to_dict()}
 
     @router.post("/tasks/{task_id}/generate-tasks")
     async def generate_tasks_from_plan(
@@ -888,17 +1453,27 @@ def create_router(
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        metadata = task.metadata if isinstance(task.metadata, dict) else {}
-
-        # Determine plan text: explicit override or latest stored plan
-        plan_text = body.plan_override
-        if not plan_text:
-            plans = metadata.get("plans")
-            if not isinstance(plans, list) or not plans:
-                raise HTTPException(status_code=400, detail="No plan available. Run a plan step first or provide plan_override.")
-            plan_text = str(plans[-1].get("content") or "")
-            if not plan_text.strip():
-                raise HTTPException(status_code=400, detail="Latest plan has no content. Provide plan_override.")
+        source = body.source
+        if source is None:
+            # Backward compatibility: previous API accepted only optional plan_override.
+            source = "override" if str(body.plan_override or "").strip() else "latest"
+        if source == "revision" and not body.revision_id:
+            raise HTTPException(status_code=400, detail="revision_id is required when source=revision")
+        if source == "override" and not str(body.plan_override or "").strip():
+            raise HTTPException(status_code=400, detail="plan_override is required when source=override")
+        if source != "revision" and body.revision_id:
+            raise HTTPException(status_code=400, detail="revision_id is only valid when source=revision")
+        if source != "override" and str(body.plan_override or "").strip():
+            raise HTTPException(status_code=400, detail="plan_override is only valid when source=override")
+        try:
+            plan_text, resolved_revision_id = orchestrator.resolve_plan_text_for_generation(
+                task_id=task_id,
+                source=source,
+                revision_id=body.revision_id,
+                plan_override=body.plan_override,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
         try:
             created_ids = orchestrator.generate_tasks_from_plan(task_id, plan_text, infer_deps=body.infer_deps)
@@ -912,6 +1487,8 @@ def create_router(
             "task": _task_payload(updated_task) if updated_task else None,
             "created_task_ids": created_ids,
             "children": children,
+            "source": source,
+            "source_revision_id": resolved_revision_id,
         }
 
     @router.post("/import/prd/preview")
@@ -949,7 +1526,7 @@ def create_router(
             if not isinstance(item, dict):
                 continue
             task = Task(title=str(item.get("title") or "Imported task"), priority=str(item.get("priority") or "P2"), source="prd_import")
-            task.status = "ready"
+            task.status = "queued"
             if previous:
                 task.blocked_by.append(previous.id)
                 previous.blocks.append(task.id)
@@ -1028,11 +1605,11 @@ def create_router(
                 completed_steps = max(total_steps - 1, 1)
             elif task.status == "in_progress":
                 completed_steps = 2
-            elif task.status in {"ready", "blocked"}:
+            elif task.status in {"queued", "blocked"}:
                 completed_steps = 1
             progress = {
                 "backlog": 0.0,
-                "ready": 0.1,
+                "queued": 0.1,
                 "blocked": 0.1,
                 "in_progress": 0.6,
                 "in_review": 0.9,
@@ -1343,8 +1920,9 @@ def create_router(
             raise HTTPException(status_code=404, detail="Task not found")
         if task.status != "in_review":
             raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review")
-        task.status = "ready"
+        task.status = "queued"
         task.metadata["requested_changes"] = {"ts": now_iso(), "guidance": body.guidance}
+        task.metadata["retry_from_step"] = "implement"
         container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.changes_requested", entity_id=task.id, payload={"guidance": body.guidance})
         return {"task": _task_payload(task)}
@@ -1364,6 +1942,18 @@ def create_router(
         container, _, _ = _ctx(project_dir)
         cfg = container.config.load()
         return _settings_payload(cfg)
+
+    @router.get("/workers/health")
+    async def workers_health(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        cfg = container.config.load()
+        return _workers_health_payload(cfg)
+
+    @router.get("/workers/routing")
+    async def workers_routing(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        cfg = container.config.load()
+        return _workers_routing_payload(cfg)
 
     @router.patch("/settings")
     async def patch_settings(body: UpdateSettingsRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1405,6 +1995,10 @@ def create_router(
                     workers_cfg["default_model"] = default_model
                 else:
                     workers_cfg.pop("default_model", None)
+            if "heartbeat_seconds" in incoming_workers:
+                workers_cfg["heartbeat_seconds"] = incoming_workers.get("heartbeat_seconds")
+            if "heartbeat_grace_seconds" in incoming_workers:
+                workers_cfg["heartbeat_grace_seconds"] = incoming_workers.get("heartbeat_grace_seconds")
             if "routing" in incoming_workers:
                 workers_cfg["routing"] = dict(incoming_workers.get("routing") or {})
             if "providers" in incoming_workers:
@@ -1492,6 +2086,24 @@ def create_router(
         container.agents.upsert(agent)
         bus.emit(channel="agents", event_type="agent.terminated", entity_id=agent.id, payload={})
         return {"agent": agent.to_dict()}
+
+    @router.delete("/agents/{agent_id}")
+    async def remove_agent(agent_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, bus, _ = _ctx(project_dir)
+        removed = container.agents.delete(agent_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        bus.emit(channel="agents", event_type="agent.removed", entity_id=agent_id, payload={})
+        return {"removed": True}
+
+    @router.post("/agents/{agent_id}/remove")
+    async def remove_agent_post(agent_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, bus, _ = _ctx(project_dir)
+        removed = container.agents.delete(agent_id)
+        if not removed:
+            raise HTTPException(status_code=404, detail="Agent not found")
+        bus.emit(channel="agents", event_type="agent.removed", entity_id=agent_id, payload={})
+        return {"removed": True}
 
     return router
 
