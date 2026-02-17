@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from hashlib import sha256
 import uuid
 from datetime import datetime, timezone
@@ -181,6 +182,11 @@ class ReviewActionRequest(BaseModel):
     guidance: Optional[str] = None
 
 
+class RetryTaskRequest(BaseModel):
+    guidance: Optional[str] = None
+    start_from_step: Optional[str] = None
+
+
 class AddFeedbackRequest(BaseModel):
     task_id: str
     feedback_type: str = "general"
@@ -204,7 +210,7 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
     "queued": {"backlog", "cancelled"},
     "in_progress": {"cancelled"},
     "in_review": {"done", "blocked", "cancelled"},
-    "blocked": {"queued", "cancelled"},
+    "blocked": {"queued", "in_review", "cancelled"},
     "done": set(),
     "cancelled": {"backlog"},
 }
@@ -638,7 +644,7 @@ def _workers_health_payload(cfg: dict[str, Any]) -> dict[str, Any]:
 def _workers_routing_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
     default_provider = runtime.default_worker if runtime.default_worker in runtime.providers else "codex"
-    canonical_steps = ["plan", "analyze", "plan_impl", "generate_tasks", "implement", "verify", "review", "commit"]
+    canonical_steps = ["plan", "analyze", "generate_tasks", "implement", "verify", "review", "commit"]
     ordered_steps = list(dict.fromkeys(canonical_steps + sorted(runtime.routing.keys())))
 
     rows: list[dict[str, Any]] = []
@@ -960,6 +966,62 @@ def create_router(
             raise HTTPException(status_code=404, detail="Task not found")
         return {"task": _task_payload(task)}
 
+    @router.get("/tasks/{task_id}/diff")
+    async def get_task_diff(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return the git diff for a task's latest commit."""
+        container, _, _ = _ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        # Find the commit SHA from the latest run's steps.
+        commit_sha: str | None = None
+        for run_id in reversed(task.run_ids):
+            for run in container.runs.list():
+                if run.id == run_id:
+                    for step in reversed(run.steps or []):
+                        if isinstance(step, dict) and step.get("step") == "commit" and step.get("commit"):
+                            commit_sha = str(step["commit"])
+                            break
+                    if commit_sha:
+                        break
+            if commit_sha:
+                break
+
+        if not commit_sha:
+            return {"commit": None, "files": [], "diff": "", "stat": ""}
+
+        git_dir = container.project_dir
+        try:
+            stat_result = subprocess.run(
+                ["git", "show", "--stat", "--format=", commit_sha],
+                cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
+            )
+            diff_result = subprocess.run(
+                ["git", "diff", f"{commit_sha}~1..{commit_sha}"],
+                cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to read diff: {exc}") from exc
+
+        # Parse stat lines into structured file list.
+        files: list[dict[str, str]] = []
+        for line in stat_result.stdout.strip().splitlines():
+            line = line.strip()
+            if not line or line.startswith("Showing") or " | " not in line:
+                continue
+            parts = line.split(" | ", 1)
+            file_path = parts[0].strip()
+            change_info = parts[1].strip() if len(parts) > 1 else ""
+            files.append({"path": file_path, "changes": change_info})
+
+        return {
+            "commit": commit_sha,
+            "files": files,
+            "diff": diff_result.stdout,
+            "stat": stat_result.stdout,
+        }
+
     @router.get("/tasks/{task_id}/logs")
     async def get_task_logs(
         task_id: str,
@@ -970,6 +1032,7 @@ def create_router(
         backfill: bool = Query(False),
         stdout_read_to: int = Query(0, ge=0),
         stderr_read_to: int = Query(0, ge=0),
+        step: Optional[str] = Query(None),
     ) -> dict[str, Any]:
         container, _, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
@@ -977,10 +1040,30 @@ def create_router(
             raise HTTPException(status_code=404, detail="Task not found")
 
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
-        active_meta = metadata.get("active_logs") if isinstance(metadata.get("active_logs"), dict) else None
-        last_meta = metadata.get("last_logs") if isinstance(metadata.get("last_logs"), dict) else None
-        logs_meta = active_meta or last_meta or {}
-        mode = "active" if active_meta else ("last" if last_meta else "none")
+
+        # When a specific step is requested, look up its log paths from run.steps.
+        step_logs_meta: Optional[dict[str, Any]] = None
+        if step:
+            for run_id in reversed(task.run_ids):
+                for run in container.runs.list():
+                    if run.id == run_id:
+                        # Find the last matching step entry (latest attempt).
+                        for entry in reversed(run.steps or []):
+                            if isinstance(entry, dict) and entry.get("step") == step and entry.get("stdout_path"):
+                                step_logs_meta = entry
+                                break
+                        break
+                if step_logs_meta:
+                    break
+
+        if step_logs_meta:
+            logs_meta = step_logs_meta
+            mode = "history"
+        else:
+            active_meta = metadata.get("active_logs") if isinstance(metadata.get("active_logs"), dict) else None
+            last_meta = metadata.get("last_logs") if isinstance(metadata.get("last_logs"), dict) else None
+            logs_meta = active_meta or last_meta or {}
+            mode = "active" if active_meta else ("last" if last_meta else "none")
 
         stdout_path = _safe_state_path(logs_meta.get("stdout_path"), container.state_root)
         stderr_path = _safe_state_path(logs_meta.get("stderr_path"), container.state_root)
@@ -1023,10 +1106,35 @@ def create_router(
             stdout_chunk_start = stdout_tail_start
             stderr_chunk_start = stderr_tail_start
 
+        # Collect which steps have stored logs and count executions.
+        available_steps: list[str] = []
+        step_execution_counts: dict[str, int] = {}
+        seen: set[str] = set()
+        for run_id in reversed(task.run_ids[:1]):
+            for run in container.runs.list():
+                if run.id == run_id:
+                    for entry in (run.steps or []):
+                        if isinstance(entry, dict) and entry.get("stdout_path"):
+                            s = str(entry.get("step") or "")
+                            if s:
+                                step_execution_counts[s] = step_execution_counts.get(s, 0) + 1
+                                if s not in seen:
+                                    available_steps.append(s)
+                                    seen.add(s)
+                    break
+        # Include the currently running step so users can switch between
+        # earlier completed steps and the live step while a task is in progress.
+        active_step = (metadata.get("active_logs") or {}).get("step") if isinstance(metadata.get("active_logs"), dict) else None
+        if not active_step:
+            active_step = task.current_step
+        if active_step and active_step not in seen:
+            available_steps.append(str(active_step))
+
         return {
             "mode": mode,
             "task_status": task.status,
             "step": str(logs_meta.get("step") or task.current_step or ""),
+            "current_step": str(task.current_step or ""),
             "stdout": stdout_text,
             "stderr": stderr_text,
             "stdout_offset": new_stdout_offset,
@@ -1039,6 +1147,8 @@ def create_router(
             "finished_at": logs_meta.get("finished_at"),
             "log_id": _logs_snapshot_id(logs_meta),
             "progress": progress_payload,
+            "available_steps": available_steps,
+            "step_execution_counts": step_execution_counts,
         }
 
     @router.patch("/tasks/{task_id}")
@@ -1092,7 +1202,7 @@ def create_router(
         return {"task": _task_payload(task)}
 
     @router.post("/tasks/{task_id}/retry")
-    async def retry_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+    async def retry_task(task_id: str, body: Optional[RetryTaskRequest] = None, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         container, bus, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -1100,12 +1210,26 @@ def create_router(
         unresolved = _has_unresolved_blockers(container, task)
         if unresolved is not None:
             raise HTTPException(status_code=400, detail=f"Unresolved blocker: {unresolved}")
+        # Capture previous error before clearing it.
+        previous_error = task.error or ""
         task.retry_count += 1
         task.status = "queued"
         task.error = None
         task.pending_gate = None
-        if isinstance(task.metadata, dict):
-            task.metadata.pop("human_blocking_issues", None)
+        task.metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        task.metadata.pop("human_blocking_issues", None)
+        guidance = (body.guidance if body else None) or ""
+        if guidance.strip() or previous_error.strip():
+            task.metadata["retry_guidance"] = {
+                "ts": now_iso(),
+                "guidance": guidance.strip(),
+                "previous_error": previous_error.strip(),
+            }
+        start_from = (body.start_from_step if body else None) or ""
+        if start_from.strip():
+            task.metadata["retry_from_step"] = start_from.strip()
+        else:
+            task.metadata.pop("retry_from_step", None)
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.retry", entity_id=task.id, payload={"retry_count": task.retry_count})
@@ -1788,6 +1912,7 @@ def create_router(
             raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review")
         task.status = "queued"
         task.metadata["requested_changes"] = {"ts": now_iso(), "guidance": body.guidance}
+        task.metadata["retry_from_step"] = "implement"
         container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.changes_requested", entity_id=task.id, payload={"guidance": body.guidance})
         return {"task": _task_payload(task)}

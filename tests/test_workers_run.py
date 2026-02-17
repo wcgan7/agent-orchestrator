@@ -285,6 +285,7 @@ def test_run_worker_claude_adds_model_and_effort_flags(
     assert "sonnet" in captured["command"]
     assert "--effort" in captured["command"]
     assert "medium" in captured["command"]
+    assert "--dangerously-skip-permissions" in captured["command"]
 
 
 def test_run_worker_claude_skips_effort_when_unsupported(
@@ -340,6 +341,7 @@ def test_run_worker_claude_skips_effort_when_unsupported(
     assert "--model" in captured["command"]
     assert "sonnet" in captured["command"]
     assert "--effort" not in captured["command"]
+    assert "--dangerously-skip-permissions" in captured["command"]
 
 
 def test_run_worker_claude_defaults_to_stream_json_output(
@@ -394,6 +396,7 @@ def test_run_worker_claude_defaults_to_stream_json_output(
     assert "stream-json" in captured["command"]
     assert "--include-partial-messages" in captured["command"]
     assert "--verbose" in captured["command"]
+    assert "--dangerously-skip-permissions" in captured["command"]
 
 
 def test_run_worker_claude_stream_json_extracts_assistant_text(

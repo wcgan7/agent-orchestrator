@@ -68,6 +68,8 @@ def test_worktree_created_for_task(tmp_path: Path) -> None:
             wt = task.metadata.get("worktree_dir")
             if wt:
                 worktree_paths.append(Path(wt))
+                if step == "implement":
+                    (Path(wt) / "change.txt").write_text("impl\n")
             return StepResult(status="ok")
 
     container, service, _ = _service(tmp_path, adapter=SpyAdapter())
@@ -110,7 +112,10 @@ def test_concurrent_same_repo_tasks(tmp_path: Path) -> None:
 
     class BarrierAdapter:
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
-            barrier.wait()
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / f"{task.id}.txt").write_text("impl\n")
+                barrier.wait()  # Proves both tasks reach implement concurrently
             return StepResult(status="ok")
 
     container, service, _ = _service(tmp_path, adapter=BarrierAdapter(), concurrency=4)
@@ -674,3 +679,31 @@ def test_build_step_prompt_resolve_merge() -> None:
     # For ollama, should also include JSON schema
     prompt_ollama = build_step_prompt(task=task, step="resolve_merge", attempt=1, is_codex=False)
     assert "JSON" in prompt_ollama
+
+
+# ---------------------------------------------------------------------------
+# 15. No-changes guard blocks task when implementation produces no file changes
+# ---------------------------------------------------------------------------
+
+
+def test_no_changes_blocks_task(tmp_path: Path) -> None:
+    """Task blocks when implementation produces no file changes (e.g. worker
+    invoked without write permissions)."""
+
+    class NoOpAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            return StepResult(status="ok")  # Does NOT write any files
+
+    container, service, _ = _service(tmp_path, adapter=NoOpAdapter())
+    task = Task(
+        title="No-op task",
+        task_type="chore",  # chore pipeline: implement, verify, commit
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert "No file changes" in (result.error or "")

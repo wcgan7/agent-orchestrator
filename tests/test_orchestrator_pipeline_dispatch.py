@@ -45,7 +45,7 @@ def test_feature_runs_full_pipeline(tmp_path: Path) -> None:
 
     assert result.status == "done"
     steps = _step_names(container, task.id)
-    assert steps == ["plan", "plan_impl", "implement", "verify", "review", "commit"]
+    assert steps == ["plan", "implement", "verify", "review", "commit"]
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +214,7 @@ def test_unknown_type_falls_back_to_feature(tmp_path: Path) -> None:
     assert result.status == "done"
     steps = _step_names(container, task.id)
     # Falls back to feature pipeline
-    assert steps == ["plan", "plan_impl", "implement", "verify", "review", "commit"]
+    assert steps == ["plan", "implement", "verify", "review", "commit"]
 
 
 # ---------------------------------------------------------------------------
@@ -574,7 +574,7 @@ def test_plan_output_stored_in_metadata(tmp_path: Path) -> None:
     real_adapter = DefaultWorkerAdapter()
 
     def spy_run_step(*, task, step, attempt):
-        if step in ("plan", "plan_impl", "analyze"):
+        if step in ("plan", "analyze"):
             return StepResult(status="ok", summary=f"Plan output for {step}")
         return real_adapter.run_step(task=task, step=step, attempt=attempt)
 
@@ -599,11 +599,9 @@ def test_plan_output_stored_in_metadata(tmp_path: Path) -> None:
     assert result.status == "done"
     plans = result.metadata.get("plans")
     assert isinstance(plans, list)
-    assert len(plans) == 2  # plan + plan_impl (feature pipeline)
+    assert len(plans) == 1  # plan (feature pipeline)
     assert plans[0]["step"] == "plan"
     assert plans[0]["content"] == "Plan output for plan"
-    assert plans[1]["step"] == "plan_impl"
-    assert plans[1]["content"] == "Plan output for plan_impl"
     assert "ts" in plans[0]
 
 

@@ -7,9 +7,9 @@ import Markdown from 'react-markdown'
 import { humanizeLabel } from './ui/labels'
 import './styles/orchestrator.css'
 
-type RouteKey = 'board' | 'planning' | 'execution' | 'review' | 'agents' | 'settings'
+type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
 type CreateTab = 'task' | 'import' | 'quick'
-type TaskDetailTab = 'overview' | 'logs' | 'activity' | 'dependencies' | 'configuration'
+type TaskDetailTab = 'overview' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
 type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition'
 
 type TaskRecord = {
@@ -27,6 +27,8 @@ type TaskRecord = {
   blocked_by?: string[]
   blocks?: string[]
   parent_id?: string | null
+  children_ids?: string[]
+  source?: string
   pipeline_template?: string[]
   retry_count?: number
   hitl_mode?: string
@@ -121,7 +123,7 @@ type QuickActionRecord = {
 }
 
 type TaskLogsSnapshot = {
-  mode: 'active' | 'last' | 'none'
+  mode: 'active' | 'last' | 'history' | 'none'
   task_status?: string
   step?: string
   stdout: string
@@ -136,6 +138,9 @@ type TaskLogsSnapshot = {
   finished_at?: string | null
   log_id?: string
   progress?: Record<string, unknown>
+  available_steps?: string[]
+  step_execution_counts?: Record<string, number>
+  current_step?: string
 }
 
 type LogAccumPhase = 'init' | 'backfill' | 'forward'
@@ -351,7 +356,6 @@ const ROUTES: Array<{ key: RouteKey; label: string }> = [
   { key: 'board', label: 'Board' },
   { key: 'planning', label: 'Planning' },
   { key: 'execution', label: 'Execution' },
-  { key: 'review', label: 'Review Queue' },
   { key: 'agents', label: 'Workers' },
   { key: 'settings', label: 'Settings' },
 ]
@@ -1259,7 +1263,6 @@ export default function App() {
   const [projectDir, setProjectDir] = useState<string>(() => localStorage.getItem(STORAGE_PROJECT) || '')
   const [board, setBoard] = useState<BoardResponse>({ columns: {} })
   const [orchestrator, setOrchestrator] = useState<OrchestratorStatus | null>(null)
-  const [reviewQueue, setReviewQueue] = useState<TaskRecord[]>([])
   const [agents, setAgents] = useState<AgentRecord[]>([])
   const [workerHealth, setWorkerHealth] = useState<WorkerHealthRecord[]>([])
   const [workerRoutingRows, setWorkerRoutingRows] = useState<WorkerRoutingRow[]>([])
@@ -1303,6 +1306,8 @@ export default function App() {
   const [planActionMessage, setPlanActionMessage] = useState('')
   const [planActionError, setPlanActionError] = useState('')
   const [taskDetailTab, setTaskDetailTab] = useState<TaskDetailTab>('overview')
+  const [taskDiff, setTaskDiff] = useState<{ commit: string | null; files: { path: string; changes: string }[]; diff: string; stat: string } | null>(null)
+  const [taskDiffLoading, setTaskDiffLoading] = useState(false)
   const [boardCompact, setBoardCompact] = useState(false)
   const [pipelineHighlightStatus, setPipelineHighlightStatus] = useState('')
   useEffect(() => {
@@ -1394,6 +1399,9 @@ export default function App() {
   const [selectedQuickActionError, setSelectedQuickActionError] = useState('')
   const [selectedQuickActionErrorAt, setSelectedQuickActionErrorAt] = useState('')
   const [reviewGuidance, setReviewGuidance] = useState('')
+  const [retryFromStep, setRetryFromStep] = useState('')
+  const [logViewStep, setLogViewStep] = useState('')
+  const logViewStepRef = useRef('')
 
   const [manualPinPath, setManualPinPath] = useState('')
   const [allowNonGit, setAllowNonGit] = useState(false)
@@ -1468,6 +1476,10 @@ export default function App() {
     setPlanGenerateSource('latest')
     setPlanGenerateOverride('')
     setPlanGenerateInferDeps(true)
+    setTaskDiff(null)
+    setTaskDiffLoading(false)
+    setReviewGuidance('')
+    setRetryFromStep('')
   }, [selectedTaskId])
 
   useEffect(() => {
@@ -1735,6 +1747,9 @@ export default function App() {
       setEditTaskLabels((task.labels || []).join(', '))
       setEditTaskApprovalMode(task.approval_mode || 'human_review')
       setEditTaskHitlMode(task.hitl_mode || 'autopilot')
+      if (task.status === 'blocked' && task.current_step) {
+        setRetryFromStep(task.current_step)
+      }
     } catch {
       if (requestSeq !== taskDetailRequestSeqRef.current || selectedTaskIdRef.current !== taskId) {
         return
@@ -1950,7 +1965,7 @@ export default function App() {
     }
   }
 
-  async function loadTaskLogs(taskId: string, quiet = false): Promise<void> {
+  async function loadTaskLogs(taskId: string, quiet = false, stepOverride?: string): Promise<void> {
     if (!taskId) {
       setSelectedTaskLogs(null)
       setSelectedTaskLogsError('')
@@ -1969,6 +1984,10 @@ export default function App() {
       const backfillStderrBefore = accum.stderrBackfillOffset
       const params = new URLSearchParams()
       params.set('max_chars', String(LOG_CHUNK_CHARS))
+      const viewStep = stepOverride !== undefined ? stepOverride : logViewStep
+      if (viewStep) {
+        params.set('step', viewStep)
+      }
       if (accum.phase === 'backfill') {
         params.set('backfill', 'true')
         const stdoutNeedsBackfill = accum.stdoutTailStart > 0 && accum.stdoutBackfillOffset > 0
@@ -2005,11 +2024,8 @@ export default function App() {
         snapshotLogScrollOps('reset', 'reset')
         planRefineOutputRef.current = { taskId, logId: payloadLogId, jobKey: '', text: '' }
         planGenerateOutputRef.current = { taskId, logId: payloadLogId, jobKey: '', text: '' }
-        setStdoutHistory('')
-        setStderrHistory('')
-        setStdoutRawHistory('')
-        setStderrRawHistory('')
-        setStdoutRenderStats({ parsedLines: 0, streamEvents: 0, structured: false })
+        // Don't clear display state here — let the re-fetch replace it
+        // to avoid a blank flash between step transitions.
         setPlanRefineStdout('')
         setPlanGenerateStdout('')
         void loadTaskLogs(taskId, true)
@@ -2225,6 +2241,8 @@ export default function App() {
       stdout: { top: 0, height: 0, op: 'reset' },
       stderr: { top: 0, height: 0, op: 'reset' },
     }
+    setLogViewStep('')
+    logViewStepRef.current = ''
     void loadCollaboration(selectedTaskId)
     void loadTaskLogs(selectedTaskId)
   }, [selectedTaskId, projectDir])
@@ -2232,7 +2250,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedTaskId) return
     const timer = window.setInterval(() => {
-      void loadTaskLogs(selectedTaskId, true)
+      void loadTaskLogs(selectedTaskId, true, logViewStepRef.current || undefined)
     }, 2_000)
     return () => window.clearInterval(timer)
   }, [selectedTaskId, projectDir])
@@ -2416,10 +2434,9 @@ export default function App() {
   async function refreshTasksSurface(): Promise<void> {
     const refreshProjectDir = projectDirRef.current
     try {
-      const [boardData, orchestratorData, reviewData, executionOrderData, metricsData] = await Promise.all([
+      const [boardData, orchestratorData, executionOrderData, metricsData] = await Promise.all([
         requestJson<BoardResponse>(buildApiUrl('/api/tasks/board', refreshProjectDir)),
         requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/status', refreshProjectDir)),
-        requestJson<{ tasks: TaskRecord[] }>(buildApiUrl('/api/review-queue', refreshProjectDir)),
         requestJson<{ batches: string[][] }>(buildApiUrl('/api/tasks/execution-order', refreshProjectDir)),
         requestJson<unknown>(buildApiUrl('/api/metrics', refreshProjectDir)).catch(() => null),
       ])
@@ -2428,7 +2445,6 @@ export default function App() {
       }
       setBoard(boardData)
       setOrchestrator(orchestratorData)
-      setReviewQueue(reviewData.tasks || [])
       setExecutionBatches(executionOrderData.batches || [])
       setMetrics(normalizeMetrics(metricsData))
 
@@ -2499,7 +2515,6 @@ export default function App() {
       const [
         boardData,
         orchestratorData,
-        reviewData,
         agentData,
         projectData,
         pinnedData,
@@ -2511,7 +2526,6 @@ export default function App() {
       ] = await Promise.all([
         requestJson<BoardResponse>(buildApiUrl('/api/tasks/board', projectDir)),
         requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/status', projectDir)),
-        requestJson<{ tasks: TaskRecord[] }>(buildApiUrl('/api/review-queue', projectDir)),
         requestJson<{ agents: AgentRecord[] }>(buildApiUrl('/api/agents', projectDir)),
         requestJson<{ projects: ProjectRef[] }>(buildApiUrl('/api/projects', projectDir)),
         requestJson<{ items: PinnedProjectRef[] }>(buildApiUrl('/api/projects/pinned', projectDir)),
@@ -2526,7 +2540,6 @@ export default function App() {
       }
       setBoard(boardData)
       setOrchestrator(orchestratorData)
-      setReviewQueue(reviewData.tasks || [])
       setAgents(agentData.agents || [])
       setProjects(projectData.projects || [])
       setPinnedProjects(pinnedData.items || [])
@@ -2866,6 +2879,34 @@ export default function App() {
         errorPrefix: 'Failed to transition task',
       },
     )
+  }
+
+  function switchLogStep(step: string): void {
+    const effective = step || ''
+    setLogViewStep(effective)
+    logViewStepRef.current = effective
+    // Reset accumulator so we fetch the full log for the new step.
+    // Don't clear display state here — let loadTaskLogs replace it when
+    // the fetch completes, avoiding a blank flash between steps.
+    logAccumRef.current = createEmptyLogAccum(selectedTaskId)
+    snapshotLogScrollOps('reset', 'reset')
+    if (selectedTaskId) {
+      void loadTaskLogs(selectedTaskId, false, effective)
+    }
+  }
+
+  async function fetchTaskDiff(taskId: string): Promise<void> {
+    setTaskDiffLoading(true)
+    try {
+      const data = await requestJson<{ commit: string | null; files: { path: string; changes: string }[]; diff: string; stat: string }>(
+        buildApiUrl(`/api/tasks/${taskId}/diff`, projectDir),
+      )
+      setTaskDiff(data)
+    } catch {
+      setTaskDiff(null)
+    } finally {
+      setTaskDiffLoading(false)
+    }
   }
 
   async function addDependency(taskId: string): Promise<void> {
@@ -3342,19 +3383,52 @@ export default function App() {
     }
   }
 
-  async function reviewAction(taskId: string, action: 'approve' | 'request-changes'): Promise<void> {
-    try {
-      const endpoint = action === 'approve' ? `/api/review/${taskId}/approve` : `/api/review/${taskId}/request-changes`
-      await requestJson<{ task: TaskRecord }>(buildApiUrl(endpoint, projectDir), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ guidance: reviewGuidance.trim() || undefined }),
-      })
-      setReviewGuidance('')
-      await reloadAll()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to submit review')
-    }
+  async function retryTask(taskId: string, startFromStep?: string): Promise<void> {
+    await runTaskMutation(
+      'retry',
+      async () => {
+        await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/retry`, projectDir), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            guidance: reviewGuidance.trim() || undefined,
+            start_from_step: startFromStep || undefined,
+          }),
+        })
+        setReviewGuidance('')
+        setRetryFromStep('')
+        await reloadAll()
+        if (selectedTaskIdRef.current === taskId) {
+          await loadTaskDetail(taskId)
+        }
+      },
+      {
+        successMessage: startFromStep ? `Task re-queued from ${startFromStep}.` : 'Task re-queued.',
+        errorPrefix: 'Failed to retry task',
+      },
+    )
+  }
+
+  async function requestChanges(taskId: string): Promise<void> {
+    await runTaskMutation(
+      'transition',
+      async () => {
+        await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/review/${taskId}/request-changes`, projectDir), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ guidance: reviewGuidance.trim() || undefined }),
+        })
+        setReviewGuidance('')
+        await reloadAll()
+        if (selectedTaskIdRef.current === taskId) {
+          await loadTaskDetail(taskId)
+        }
+      },
+      {
+        successMessage: 'Changes requested. Task re-queued.',
+        errorPrefix: 'Failed to request changes',
+      },
+    )
   }
 
   async function pinProjectPath(path: string, allowNonGitValue: boolean): Promise<void> {
@@ -3499,6 +3573,15 @@ export default function App() {
           >
             Configuration
           </button>
+          {(selectedTaskView.status === 'in_review' || selectedTaskView.status === 'done' || selectedTaskView.status === 'blocked') && selectedTaskView.task_type !== 'plan' ? (
+            <button
+              className={`detail-tab ${taskDetailTab === 'changes' ? 'is-active' : ''}`}
+              aria-pressed={taskDetailTab === 'changes'}
+              onClick={() => { setTaskDetailTab('changes'); if (!taskDiff && !taskDiffLoading) { void fetchTaskDiff(selectedTaskView.id) } }}
+            >
+              Changes
+            </button>
+          ) : null}
         </div>
         {taskDetailTab === 'overview' ? (
           <div className="task-detail-section-body">
@@ -3519,10 +3602,27 @@ export default function App() {
                 })
               ) : 'None'}
             </p>
-            {showViewPlan ? (
-              <button className="button button-primary" onClick={() => { setPlanningTaskId(selectedTaskView.id); handleRouteChange('planning') }}>
-                View Plan
-              </button>
+            {selectedTaskView.parent_id ? (
+              <p className="field-label">
+                {'Generated from: '}
+                <button className="link-button" onClick={() => handleTaskSelect(selectedTaskView.parent_id!)}>{describeTask(selectedTaskView.parent_id, taskIndex).label}</button>
+              </p>
+            ) : null}
+            {(selectedTaskView.children_ids?.length ?? 0) > 0 ? (
+              <div className="generated-tasks-section">
+                <p className="field-label">Generated tasks ({selectedTaskView.children_ids!.length}):</p>
+                <div className="generated-tasks-list">
+                  {selectedTaskView.children_ids!.map((childId) => {
+                    const child = describeTask(childId, taskIndex)
+                    return (
+                      <button key={childId} className="generated-task-chip" onClick={() => handleTaskSelect(childId)}>
+                        <span className={`status-pill status-pill-inline ${child.status === 'done' ? 'status-done' : child.status === 'in_progress' ? 'status-running' : child.status === 'blocked' || child.status === 'cancelled' ? 'status-failed' : 'status-paused'}`}>{humanizeLabel(child.status)}</span>
+                        {child.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
             ) : null}
             {selectedTaskView.error?.trim() ? (() => {
               const stderrTail = (stderrHistory || '').trim()
@@ -3752,8 +3852,40 @@ export default function App() {
         {taskDetailTab === 'logs' ? (() => {
           const hasTaskLogs = !!(stdoutHistory || stderrHistory || stdoutRawHistory || stderrRawHistory) || (!!selectedTaskLogs && (selectedTaskLogs.mode !== 'none' || !!selectedTaskLogs.stdout || !!selectedTaskLogs.stderr))
           const progressEntries = formatProgressEntries(selectedTaskLogs?.progress)
+          const availableSteps = selectedTaskLogs?.available_steps || []
+          const stepCounts = selectedTaskLogs?.step_execution_counts || {}
+          const activeLogStep = logViewStep || selectedTaskLogs?.step || ''
+          const latestStep = selectedTaskLogs?.current_step || selectedTaskView.current_step || ''
+          const taskIsRunning = selectedTaskView.status === 'in_progress' || selectedTaskView.status === 'queued'
+          const totalExecutions = Object.values(stepCounts).reduce((a, b) => a + b, 0)
+          const extraSteps = totalExecutions - Object.keys(stepCounts).length
           return (
             <div className="task-detail-section-body">
+              {availableSteps.length > 1 ? (
+                <div className="log-step-selector">
+                  {availableSteps.map((s) => {
+                    const isViewed = s === activeLogStep
+                    const isLatest = s === latestStep
+                    const count = stepCounts[s] || 0
+                    const cls = `log-step-pill${isViewed ? ' is-active' : ''}${isLatest ? ' is-latest' : ''}`
+                    return (
+                      <button
+                        key={s}
+                        className={cls}
+                        onClick={() => switchLogStep(s === activeLogStep ? '' : s)}
+                      >
+                        {humanizeLabel(s)}{count > 1 ? <span className="log-step-count">{'\u00d7'}{count}</span> : null}{isLatest && taskIsRunning ? <span className="log-step-live-dot" /> : null}
+                      </button>
+                    )
+                  })}
+                  {logViewStep ? (
+                    <button className="log-step-pill" onClick={() => switchLogStep('')}>Latest</button>
+                  ) : null}
+                  {extraSteps > 0 ? (
+                    <span className="log-step-summary">{totalExecutions} steps run · {extraSteps} {extraSteps === 1 ? 'retry' : 'retries'}</span>
+                  ) : null}
+                </div>
+              ) : null}
               <p className="task-meta">
                 Source: {humanizeLabel(selectedTaskLogs?.mode || 'none')}
                 {selectedTaskLogs?.step ? ` · step: ${selectedTaskLogs.step}` : ''}
@@ -3792,6 +3924,64 @@ export default function App() {
             </div>
           )
         })() : null}
+        {taskDetailTab === 'changes' ? (
+          <div className="task-detail-section-body">
+            {taskDiffLoading ? <p className="field-label">Loading diff...</p> : null}
+            {!taskDiffLoading && taskDiff && !taskDiff.commit ? (
+              <p className="empty">No commit found for this task.</p>
+            ) : null}
+            {!taskDiffLoading && taskDiff && taskDiff.commit ? (() => {
+              // Split unified diff into per-file chunks
+              const fileChunks: { path: string; additions: number; deletions: number; lines: string[] }[] = []
+              if (taskDiff.diff) {
+                let current: { path: string; additions: number; deletions: number; lines: string[] } | null = null
+                for (const line of taskDiff.diff.split('\n')) {
+                  if (line.startsWith('diff --git ')) {
+                    if (current) fileChunks.push(current)
+                    const match = line.match(/diff --git a\/.+ b\/(.+)/)
+                    current = { path: match ? match[1] : '?', additions: 0, deletions: 0, lines: [line] }
+                  } else if (current) {
+                    current.lines.push(line)
+                    if (line.startsWith('+') && !line.startsWith('+++')) current.additions++
+                    else if (line.startsWith('-') && !line.startsWith('---')) current.deletions++
+                  }
+                }
+                if (current) fileChunks.push(current)
+              }
+              return (
+                <>
+                  <p className="task-meta">Commit: <code>{taskDiff.commit.slice(0, 12)}</code> · {taskDiff.files.length} file{taskDiff.files.length !== 1 ? 's' : ''} changed</p>
+                  {fileChunks.length > 0 ? (
+                    <div className="diff-file-sections">
+                      {fileChunks.map((chunk) => (
+                        <details key={chunk.path} className="diff-file-section" open>
+                          <summary className="diff-file-header">
+                            <code className="diff-file-name">{chunk.path}</code>
+                            <span className="diff-file-stats">
+                              {chunk.additions > 0 ? <span className="diff-stat-add">+{chunk.additions}</span> : null}
+                              {chunk.deletions > 0 ? <span className="diff-stat-del">-{chunk.deletions}</span> : null}
+                            </span>
+                          </summary>
+                          <pre className="diff-content">{chunk.lines.map((line, i) => {
+                            const cls = line.startsWith('+++') || line.startsWith('---') ? 'diff-line-meta'
+                              : line.startsWith('@@') ? 'diff-line-hunk'
+                              : line.startsWith('+') ? 'diff-line-add'
+                              : line.startsWith('-') ? 'diff-line-del'
+                              : line.startsWith('diff ') ? 'diff-line-meta'
+                              : ''
+                            return <span key={i} className={cls}>{line}{'\n'}</span>
+                          })}</pre>
+                        </details>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="empty">No diff content available.</p>
+                  )}
+                </>
+              )
+            })() : null}
+          </div>
+        ) : null}
       </div>
     ) : (
       <p className="empty">No tasks on board yet.</p>
@@ -3812,7 +4002,7 @@ export default function App() {
                 {(board.columns[column] || []).map((task) => (
                   <button className={`task-card task-card-button${boardCompact ? ' task-card-compact' : ''}`} key={task.id} onClick={() => handleTaskSelect(task.id)}>
                     <p className="task-title">{task.title}</p>
-                    {!boardCompact && <p className="task-meta">{task.priority} · {task.id.replace(/^task-/, '')}</p>}
+                    {!boardCompact && <p className="task-meta">{task.priority} · {task.id.replace(/^task-/, '')}{task.parent_id ? ' · from plan' : ''}</p>}
                     {!boardCompact && task.description ? <p className="task-desc">{task.description}</p> : null}
                   </button>
                 ))}
@@ -3909,38 +4099,6 @@ export default function App() {
     )
   }
 
-  function renderReviewQueue(): JSX.Element {
-    return (
-      <section className="panel">
-        <header className="panel-head">
-          <h2>Review Queue</h2>
-        </header>
-        <div className="list-stack">
-          <label className="field-label" htmlFor="review-guidance">Optional review guidance</label>
-          <input
-            id="review-guidance"
-            value={reviewGuidance}
-            onChange={(event) => setReviewGuidance(event.target.value)}
-            placeholder="What should be fixed or accepted?"
-          />
-          {reviewQueue.map((task) => (
-            <div className="row-card" key={task.id}>
-              <div>
-                <p className="task-title">{task.title}</p>
-                <p className="task-meta">{task.id}</p>
-              </div>
-              <div className="inline-actions">
-                <button className="button" onClick={() => void reviewAction(task.id, 'request-changes')}>Request changes</button>
-                <button className="button button-primary" onClick={() => void reviewAction(task.id, 'approve')}>Approve</button>
-              </div>
-            </div>
-          ))}
-          {reviewQueue.length === 0 ? <p className="empty">No tasks waiting for review.</p> : null}
-        </div>
-      </section>
-    )
-  }
-
   function renderAgents(): JSX.Element {
     const healthOrder = ['codex', 'claude', 'ollama']
     const providerHealth = [...workerHealth].sort((a, b) => {
@@ -3982,7 +4140,7 @@ export default function App() {
     const stepLabel = (step: string): string => {
       const normalized = String(step || '').trim().toLowerCase()
       if (normalized === 'plan') return 'Task Planning'
-      if (normalized === 'plan_impl') return 'Execution Plan'
+
       return humanizeLabel(normalized)
     }
 
@@ -4599,7 +4757,7 @@ export default function App() {
                   onClick={() => selectPlanningTask(task.id)}
                 >
                   <p className="task-title">{task.title}</p>
-                  <p className="task-meta">{task.priority} · {humanizeLabel(task.status)} · {humanizeLabel(task.task_type || 'feature')}</p>
+                  <p className="task-meta">{task.priority} · {humanizeLabel(task.status)} · {humanizeLabel(task.task_type || 'feature')}{(task.children_ids?.length ?? 0) > 0 ? ` · ${task.children_ids!.length} tasks generated` : ''}</p>
                 </button>
               ))}
               {allTasks.length === 0 ? <p className="empty">No planning tasks yet. Create one with "Create Plan".</p> : null}
@@ -4610,17 +4768,16 @@ export default function App() {
               <div className="list-stack">
                 <p className="task-title">{planningTask.title}</p>
                 <p className="task-meta">{planningTask.id} · {humanizeLabel(planningTask.status)}</p>
+                {isRefining ? (
+                  <div className="refine-banner">
+                    <span className="refine-banner-dot" />
+                    <span>Refining plan{selectedTaskPlan?.active_refine_job?.id ? ` · ${selectedTaskPlan.active_refine_job.id}` : ''}</span>
+                  </div>
+                ) : null}
                 <div className="row-card">
                   <p className="task-meta">
                     Latest: {selectedTaskPlan?.latest_revision_id || '-'} · Committed: {selectedTaskPlan?.committed_revision_id || '-'}
                   </p>
-                  {selectedTaskPlan?.active_refine_job ? (
-                    <p className="task-meta">
-                      Refine job: {selectedTaskPlan.active_refine_job.id} · {humanizeLabel(selectedTaskPlan.active_refine_job.status)}
-                    </p>
-                  ) : (
-                    <p className="task-meta">No active refine job.</p>
-                  )}
                 </div>
                 <label className="field-label" htmlFor="planning-revision-selector">Select revision</label>
                 <select
@@ -4789,16 +4946,14 @@ export default function App() {
                 <div className="list-stack planning-job-history">
                   <p className="field-label">Refine job history</p>
                   {selectedTaskPlanJobs.map((job) => (
-                    <div className="row-card" key={job.id}>
-                      <p className="task-meta">
-                        {job.id} · {humanizeLabel(job.status)} · base {job.base_revision_id}
-                      </p>
-                      <p className="task-meta">
-                        created: {toLocaleTimestamp(job.created_at) || job.created_at}
-                        {job.result_revision_id ? ` · result: ${job.result_revision_id}` : ''}
-                      </p>
-                      {job.feedback ? <p className="task-desc">{job.feedback}</p> : null}
-                      {job.error ? <p className="task-meta">error: {job.error}</p> : null}
+                    <div className="refine-job-card" key={job.id}>
+                      <div className="refine-job-head">
+                        <span className={`status-pill ${job.status === 'completed' ? 'status-done' : job.status === 'failed' ? 'status-failed' : job.status === 'running' || job.status === 'queued' ? 'status-running' : 'status-paused'}`}>{humanizeLabel(job.status)}</span>
+                        <span className="task-meta">{toLocaleTimestamp(job.created_at) || job.created_at}</span>
+                      </div>
+                      {job.feedback ? <p className="refine-job-feedback">{job.feedback}</p> : null}
+                      {job.error ? <p className="refine-job-error">{job.error}</p> : null}
+                      <p className="task-meta">{job.id}{job.result_revision_id ? ` · result: ${job.result_revision_id}` : ''}</p>
                     </div>
                   ))}
                   {selectedTaskPlanJobs.length === 0 ? <p className="empty">No refine jobs yet.</p> : null}
@@ -4818,7 +4973,6 @@ export default function App() {
   function renderRoute(): JSX.Element {
     if (route === 'planning') return renderPlanning()
     if (route === 'execution') return renderExecution()
-    if (route === 'review') return renderReviewQueue()
     if (route === 'agents') return renderAgents()
     if (route === 'settings') return renderSettings()
     return renderBoard()
@@ -4890,9 +5044,31 @@ export default function App() {
         <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Task detail" onClick={(event) => { if (event.target === event.currentTarget) { modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') } }} onKeyDown={(event) => { if (event.key === 'Escape') { modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') } }}>
           <div className="modal-card task-detail-modal">
             <header className="task-detail-modal-head">
-              <h2>{selectedTaskView.title}</h2>
-              <span className={`status-pill status-pill-prominent ${statusPillClass(taskStatus)}`}>{humanizeLabel(selectedTaskView.status)}</span>
-              <button className="button" onClick={() => { modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') }}>Close</button>
+              <div className="task-detail-modal-head-row">
+                <h2>{selectedTaskView.title}</h2>
+                <span className={`status-pill status-pill-prominent ${statusPillClass(taskStatus)}`}>{humanizeLabel(selectedTaskView.status)}</span>
+              </div>
+              {(selectedTaskView.pipeline_template || []).length > 0 ? (() => {
+                const pipelineSteps = selectedTaskView.pipeline_template!
+                const currentStep = selectedTaskView.current_step || null
+                const isDone = selectedTaskView.status === 'done' || selectedTaskView.status === 'in_review'
+                const currentIdx = currentStep ? pipelineSteps.indexOf(currentStep) : -1
+                return (
+                  <div className="pipeline-flow">
+                    {pipelineSteps.map((step, idx) => {
+                      const isCurrent = step === currentStep && !isDone
+                      const isCompleted = isDone || (currentIdx >= 0 && idx < currentIdx)
+                      const cls = isCurrent ? 'pipeline-step is-current' : isCompleted ? 'pipeline-step is-completed' : 'pipeline-step'
+                      return (
+                        <span key={step} className="pipeline-step-wrap">
+                          {idx > 0 ? <span className={`pipeline-arrow${isCompleted || isCurrent ? ' is-reached' : ''}`} /> : null}
+                          <span className={cls}>{humanizeLabel(step)}</span>
+                        </span>
+                      )
+                    })}
+                  </div>
+                )
+              })() : null}
             </header>
             <div className="task-detail-modal-body">
               {taskDetailContent}
@@ -4900,6 +5076,41 @@ export default function App() {
             <footer className="task-detail-modal-foot">
               {taskActionMessage ? <p className="field-label">{taskActionMessage}</p> : null}
               {taskActionError ? <p className="error-banner">{taskActionError}</p> : null}
+              {taskStatus === 'blocked' ? (
+                <>
+                  <div className="inline-actions blocked-retry-row">
+                    <input
+                      className="review-guidance-input"
+                      value={reviewGuidance}
+                      onChange={(event) => setReviewGuidance(event.target.value)}
+                      placeholder="Guidance for retry..."
+                      disabled={isTaskActionBusy || hasUnresolvedBlockers}
+                    />
+                    <select
+                      className="retry-step-select"
+                      value={retryFromStep}
+                      onChange={(event) => setRetryFromStep(event.target.value)}
+                      disabled={isTaskActionBusy || hasUnresolvedBlockers}
+                    >
+                      <option value="">From beginning</option>
+                      {(selectedTaskView.pipeline_template || []).map((step) => (
+                        <option key={step} value={step}>{humanizeLabel(step)}</option>
+                      ))}
+                    </select>
+                    <button
+                      className="button button-primary"
+                      onClick={() => void retryTask(selectedTaskView.id, retryFromStep || undefined)}
+                      disabled={isTaskActionBusy || hasUnresolvedBlockers}
+                      title={hasUnresolvedBlockers ? `Blocked by: ${unresolvedBlockers.map((id) => describeTask(id, taskIndex).label).join(', ')}` : undefined}
+                    >
+                      Retry{(selectedTaskView.retry_count || 0) > 0 ? ` (${selectedTaskView.retry_count})` : ''}
+                    </button>
+                  </div>
+                  {hasUnresolvedBlockers ? (
+                    <p className="field-label">Unresolved {unresolvedBlockers.length === 1 ? 'dependency' : 'dependencies'}: {unresolvedBlockers.map((id) => describeTask(id, taskIndex).label).join(', ')}</p>
+                  ) : null}
+                </>
+              ) : null}
               <div className="inline-actions">
                 {taskStatus === 'backlog' ? (
                   <>
@@ -4919,35 +5130,31 @@ export default function App() {
                 {taskStatus === 'in_review' ? (
                   <>
                     <button className="button button-primary" onClick={() => void transitionTask(selectedTaskView.id, 'done')} disabled={isTaskActionBusy}>Approve</button>
-                    <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'blocked')} disabled={isTaskActionBusy}>Reject</button>
+                    <input
+                      className="review-guidance-input"
+                      value={reviewGuidance}
+                      onChange={(event) => setReviewGuidance(event.target.value)}
+                      placeholder="Guidance for changes..."
+                      disabled={isTaskActionBusy}
+                    />
+                    <button className="button" onClick={() => void requestChanges(selectedTaskView.id)} disabled={isTaskActionBusy}>Request Changes</button>
                     <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>Cancel</button>
                   </>
                 ) : null}
                 {taskStatus === 'blocked' ? (
                   <>
-                    {(selectedTaskView.retry_count || 0) > 0 ? (
-                      <span className="field-label">Retried {selectedTaskView.retry_count} time{(selectedTaskView.retry_count || 0) > 1 ? 's' : ''}</span>
-                    ) : null}
-                    <button
-                      className="button button-primary"
-                      onClick={() => void transitionTask(selectedTaskView.id, 'queued')}
-                      disabled={isTaskActionBusy || hasUnresolvedBlockers}
-                      title={hasUnresolvedBlockers ? `Blocked by: ${unresolvedBlockers.map((id) => describeTask(id, taskIndex).label).join(', ')}` : undefined}
-                    >
-                      Retry
-                    </button>
-                    {hasUnresolvedBlockers ? (
-                      <span className="field-label">Cannot retry: {unresolvedBlockers.length} unresolved {unresolvedBlockers.length === 1 ? 'dependency' : 'dependencies'} ({unresolvedBlockers.map((id) => describeTask(id, taskIndex).label).join(', ')})</span>
-                    ) : null}
+                    <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'in_review')} disabled={isTaskActionBusy}>Move to Review</button>
                     <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>Cancel</button>
                   </>
                 ) : null}
                 {taskStatus === 'cancelled' ? (
                   <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'backlog')} disabled={isTaskActionBusy}>Move to Backlog</button>
                 ) : null}
-                {taskStatus === 'done' ? (
-                  <span className="field-label">Task complete</span>
+                {taskStatus === 'done' && showViewPlan ? (
+                  <button className="button button-primary" onClick={() => { setPlanningTaskId(selectedTaskView.id); handleRouteChange('planning'); modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') }}>View Plan</button>
                 ) : null}
+                <span className="foot-spacer" />
+                <button className="button" onClick={() => { modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') }}>Close</button>
               </div>
             </footer>
           </div>
