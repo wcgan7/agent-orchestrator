@@ -32,6 +32,7 @@ type TaskRecord = {
   pipeline_template?: string[]
   retry_count?: number
   hitl_mode?: string
+  dependency_policy?: 'permissive' | 'prudent' | 'strict'
   pending_gate?: string | null
   quality_gate?: Record<string, number>
   metadata?: Record<string, unknown>
@@ -229,6 +230,7 @@ type SystemSettings = {
       medium: number
       low: number
     }
+    dependency_policy: string
   }
   workers: {
     default: string
@@ -396,6 +398,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
       medium: 0,
       low: 0,
     },
+    dependency_policy: 'prudent',
   },
   workers: {
     default: 'codex',
@@ -741,6 +744,7 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
         medium: Number.isFinite(maybeMedium) ? Math.max(0, Math.floor(maybeMedium)) : DEFAULT_SETTINGS.defaults.quality_gate.medium,
         low: Number.isFinite(maybeLow) ? Math.max(0, Math.floor(maybeLow)) : DEFAULT_SETTINGS.defaults.quality_gate.low,
       },
+      dependency_policy: ['permissive', 'prudent', 'strict'].includes(String(defaults.dependency_policy || '')) ? String(defaults.dependency_policy) : DEFAULT_SETTINGS.defaults.dependency_policy,
     },
     workers,
     project: {
@@ -1317,6 +1321,7 @@ export default function App() {
   }, [pipelineHighlightStatus])
   // taskEditMode removed — configLocked (status-based) controls editability
   const [taskActionPending, setTaskActionPending] = useState<TaskActionKey | null>(null)
+  const [taskActionDetail, setTaskActionDetail] = useState('')
   const [taskActionMessage, setTaskActionMessage] = useState('')
   const [taskActionError, setTaskActionError] = useState('')
   const [editTaskTitle, setEditTaskTitle] = useState('')
@@ -1326,6 +1331,7 @@ export default function App() {
   const [editTaskLabels, setEditTaskLabels] = useState('')
   const [editTaskApprovalMode, setEditTaskApprovalMode] = useState<'human_review' | 'auto_approve'>('human_review')
   const [editTaskHitlMode, setEditTaskHitlMode] = useState('autopilot')
+  const [editTaskDependencyPolicy, setEditTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
 
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskDescription, setNewTaskDescription] = useState('')
@@ -1335,6 +1341,7 @@ export default function App() {
   const [newTaskBlockedBy, setNewTaskBlockedBy] = useState('')
   const [newTaskApprovalMode, setNewTaskApprovalMode] = useState<'human_review' | 'auto_approve'>('human_review')
   const [newTaskHitlMode, setNewTaskHitlMode] = useState('autopilot')
+  const [newTaskDependencyPolicy, setNewTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
   const [newTaskParentId, setNewTaskParentId] = useState('')
   const [newTaskPipelineTemplate, setNewTaskPipelineTemplate] = useState('')
   const [newTaskMetadata, setNewTaskMetadata] = useState('')
@@ -1445,6 +1452,7 @@ export default function App() {
   const [settingsGateHigh, setSettingsGateHigh] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.high))
   const [settingsGateMedium, setSettingsGateMedium] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.medium))
   const [settingsGateLow, setSettingsGateLow] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.low))
+  const [settingsDependencyPolicy, setSettingsDependencyPolicy] = useState(DEFAULT_SETTINGS.defaults.dependency_policy)
 
   const selectedTaskIdRef = useRef(selectedTaskId)
   const selectedQuickActionIdRef = useRef(selectedQuickActionId)
@@ -1682,6 +1690,7 @@ export default function App() {
     setSettingsGateHigh(String(payload.defaults.quality_gate.high))
     setSettingsGateMedium(String(payload.defaults.quality_gate.medium))
     setSettingsGateLow(String(payload.defaults.quality_gate.low))
+    setSettingsDependencyPolicy(payload.defaults.dependency_policy || 'prudent')
   }
 
   async function loadSettings(): Promise<void> {
@@ -1747,6 +1756,7 @@ export default function App() {
       setEditTaskLabels((task.labels || []).join(', '))
       setEditTaskApprovalMode(task.approval_mode || 'human_review')
       setEditTaskHitlMode(task.hitl_mode || 'autopilot')
+      setEditTaskDependencyPolicy(task.dependency_policy || 'prudent')
       if (task.status === 'blocked' && task.current_step) {
         setRetryFromStep(task.current_step)
       }
@@ -2711,9 +2721,11 @@ export default function App() {
       successMessage?: string
       errorPrefix?: string
       clearEditModeOnSuccess?: boolean
+      detail?: string
     },
   ): Promise<void> {
     setTaskActionPending(kind)
+    setTaskActionDetail(options?.detail || '')
     setTaskActionError('')
     if (options?.startMessage !== undefined) {
       setTaskActionMessage(options.startMessage)
@@ -2730,6 +2742,7 @@ export default function App() {
       setTaskActionError(toErrorMessage(options?.errorPrefix || `Failed to ${kind} task`, err))
     } finally {
       setTaskActionPending(null)
+      setTaskActionDetail('')
     }
   }
 
@@ -2768,6 +2781,7 @@ export default function App() {
           blocked_by: newTaskBlockedBy.split(',').map((item) => item.trim()).filter(Boolean),
           approval_mode: newTaskApprovalMode,
           hitl_mode: newTaskHitlMode,
+          dependency_policy: newTaskDependencyPolicy,
           worker_model: newTaskWorkerModel.trim() || undefined,
           parent_id: newTaskParentId.trim() || undefined,
           pipeline_template: parsedPipelineTemplate.length > 0 ? parsedPipelineTemplate : undefined,
@@ -2788,6 +2802,7 @@ export default function App() {
     setNewTaskBlockedBy('')
     setNewTaskApprovalMode('human_review')
     setNewTaskHitlMode('autopilot')
+    setNewTaskDependencyPolicy('prudent')
     setNewTaskParentId('')
     setNewTaskPipelineTemplate('')
     setNewTaskMetadata('')
@@ -2877,6 +2892,7 @@ export default function App() {
       {
         successMessage: `Task moved to ${humanizeLabel(status)}.`,
         errorPrefix: 'Failed to transition task',
+        detail: status,
       },
     )
   }
@@ -3145,6 +3161,7 @@ export default function App() {
             labels: editTaskLabels.split(',').map((item) => item.trim()).filter(Boolean),
             approval_mode: editTaskApprovalMode,
             hitl_mode: editTaskHitlMode,
+            dependency_policy: editTaskDependencyPolicy,
           }),
         })
         await reloadAll()
@@ -3253,6 +3270,7 @@ export default function App() {
             medium: parseNonNegativeInt(settingsGateMedium, 0),
             low: parseNonNegativeInt(settingsGateLow, 0),
           },
+          dependency_policy: settingsDependencyPolicy,
         },
         workers: {
           default: (settingsWorkerDefault === 'ollama' || settingsWorkerDefault === 'claude') ? settingsWorkerDefault : 'codex',
@@ -3427,6 +3445,7 @@ export default function App() {
       {
         successMessage: 'Changes requested. Task re-queued.',
         errorPrefix: 'Failed to request changes',
+        detail: 'request_changes',
       },
     )
   }
@@ -3524,7 +3543,7 @@ export default function App() {
   const blockedIds = selectedTaskView?.blocks || []
   const isPlanTask = selectedTaskView?.task_type === 'plan' || selectedTaskView?.task_type === 'plan_only'
   const isTaskActionBusy = taskActionPending !== null
-  const configLocked = !new Set(['backlog', 'blocked', 'cancelled']).has(selectedTaskView?.status || '')
+  const configLocked = !new Set(['backlog', 'queued', 'blocked', 'cancelled']).has(selectedTaskView?.status || '')
   const taskStatus = selectedTaskView?.status || ''
   const unresolvedBlockers = blockerIds.filter((depId) => {
     const dep = taskIndex.get(depId)
@@ -3709,6 +3728,25 @@ export default function App() {
                     onModeChange={setEditTaskHitlMode}
                     projectDir={projectDir}
                   />
+                )}
+                <label className="field-label">Dependency policy</label>
+                {configLocked ? (
+                  <p className="task-meta">{humanizeLabel(selectedTaskView.dependency_policy || 'prudent')}</p>
+                ) : (
+                  <div className="toggle-group" role="group" aria-label="Dependency policy">
+                    {(['permissive', 'prudent', 'strict'] as const).map((level) => (
+                      <button
+                        key={level}
+                        type="button"
+                        className={`toggle-button ${editTaskDependencyPolicy === level ? 'is-active' : ''}`}
+                        aria-pressed={editTaskDependencyPolicy === level}
+                        onClick={() => setEditTaskDependencyPolicy(level)}
+                        disabled={taskActionPending === 'save'}
+                      >
+                        {humanizeLabel(level)}
+                      </button>
+                    ))}
+                  </div>
                 )}
                 {!configLocked ? (
                   <div className="inline-actions">
@@ -4068,7 +4106,7 @@ export default function App() {
                   return (
                     <span key={`batch-${index}-${taskId}`} className="wave-task-item">
                       {i > 0 ? <span className="wave-sep">|</span> : null}
-                      <span className={pipelineHighlightStatus && status === pipelineHighlightStatus ? 'wave-task-highlight' : undefined}>
+                      <span className={`wave-task-content${pipelineHighlightStatus && status === pipelineHighlightStatus ? ' wave-task-highlight' : ''}`}>
                         <button className="link-button" onClick={() => handleTaskSelect(taskId, 'logs')}>{label}</button>
                         {status ? <span className={`status-pill status-pill-inline ${statusPillClass(status)}`}>{humanizeLabel(status)}</span> : null}
                       </span>
@@ -4684,6 +4722,23 @@ export default function App() {
                   </div>
                 </div>
               </div>
+              <p className="settings-subheading">Dependency Policy</p>
+              <p className="field-label">
+                Controls whether workers may install new dependencies. Applies as the default for newly created tasks.
+              </p>
+              <div className="toggle-group" role="group" aria-label="Default dependency policy">
+                {(['permissive', 'prudent', 'strict'] as const).map((level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    className={`toggle-button ${settingsDependencyPolicy === level ? 'is-active' : ''}`}
+                    aria-pressed={settingsDependencyPolicy === level}
+                    onClick={() => setSettingsDependencyPolicy(level)}
+                  >
+                    {humanizeLabel(level)}
+                  </button>
+                ))}
+              </div>
               <div className="inline-actions">
                 <button className="button button-primary" type="submit" disabled={settingsSaving}>
                   {settingsSaving ? 'Saving...' : 'Save settings'}
@@ -5103,7 +5158,7 @@ export default function App() {
                       disabled={isTaskActionBusy || hasUnresolvedBlockers}
                       title={hasUnresolvedBlockers ? `Blocked by: ${unresolvedBlockers.map((id) => describeTask(id, taskIndex).label).join(', ')}` : undefined}
                     >
-                      Retry{(selectedTaskView.retry_count || 0) > 0 ? ` (${selectedTaskView.retry_count})` : ''}
+                      {taskActionPending === 'retry' ? 'Retrying...' : 'Retry'}
                     </button>
                   </div>
                   {hasUnresolvedBlockers ? (
@@ -5114,22 +5169,22 @@ export default function App() {
               <div className="inline-actions">
                 {taskStatus === 'backlog' ? (
                   <>
-                    <button className="button button-primary" onClick={() => void transitionTask(selectedTaskView.id, 'queued')} disabled={isTaskActionBusy}>Queue</button>
-                    <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>Cancel</button>
+                    <button className="button button-primary" onClick={() => void transitionTask(selectedTaskView.id, 'queued')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'queued' ? 'Queuing...' : 'Queue'}</button>
+                    <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'cancelled' ? 'Cancelling...' : 'Cancel'}</button>
                   </>
                 ) : null}
                 {taskStatus === 'queued' ? (
                   <>
-                    <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'backlog')} disabled={isTaskActionBusy}>Move to Backlog</button>
-                    <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>Cancel</button>
+                    <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'backlog')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'backlog' ? 'Moving...' : 'Move to Backlog'}</button>
+                    <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'cancelled' ? 'Cancelling...' : 'Cancel'}</button>
                   </>
                 ) : null}
                 {taskStatus === 'in_progress' ? (
-                  <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>Cancel</button>
+                  <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'cancelled' ? 'Cancelling...' : 'Cancel'}</button>
                 ) : null}
                 {taskStatus === 'in_review' ? (
                   <>
-                    <button className="button button-primary" onClick={() => void transitionTask(selectedTaskView.id, 'done')} disabled={isTaskActionBusy}>Approve</button>
+                    <button className="button button-primary" onClick={() => void transitionTask(selectedTaskView.id, 'done')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'done' ? 'Approving...' : 'Approve'}</button>
                     <input
                       className="review-guidance-input"
                       value={reviewGuidance}
@@ -5137,18 +5192,18 @@ export default function App() {
                       placeholder="Guidance for changes..."
                       disabled={isTaskActionBusy}
                     />
-                    <button className="button" onClick={() => void requestChanges(selectedTaskView.id)} disabled={isTaskActionBusy}>Request Changes</button>
-                    <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>Cancel</button>
+                    <button className="button" onClick={() => void requestChanges(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'request_changes' ? 'Requesting...' : 'Request Changes'}</button>
+                    <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'cancelled' ? 'Cancelling...' : 'Cancel'}</button>
                   </>
                 ) : null}
                 {taskStatus === 'blocked' ? (
                   <>
-                    <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'in_review')} disabled={isTaskActionBusy}>Move to Review</button>
-                    <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>Cancel</button>
+                    <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'in_review')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'in_review' ? 'Moving...' : 'Move to Review'}</button>
+                    <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'cancelled' ? 'Cancelling...' : 'Cancel'}</button>
                   </>
                 ) : null}
                 {taskStatus === 'cancelled' ? (
-                  <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'backlog')} disabled={isTaskActionBusy}>Move to Backlog</button>
+                  <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'backlog')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'backlog' ? 'Moving...' : 'Move to Backlog'}</button>
                 ) : null}
                 {taskStatus === 'done' && showViewPlan ? (
                   <button className="button button-primary" onClick={() => { setPlanningTaskId(selectedTaskView.id); handleRouteChange('planning'); modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') }}>View Plan</button>
@@ -5240,6 +5295,20 @@ export default function App() {
                           </option>
                         ))}
                       </select>
+                      <label className="field-label">Dependency policy</label>
+                      <div className="toggle-group" role="group" aria-label="Dependency policy">
+                        {(['permissive', 'prudent', 'strict'] as const).map((level) => (
+                          <button
+                            key={level}
+                            type="button"
+                            className={`toggle-button ${newTaskDependencyPolicy === level ? 'is-active' : ''}`}
+                            aria-pressed={newTaskDependencyPolicy === level}
+                            onClick={() => setNewTaskDependencyPolicy(level)}
+                          >
+                            {humanizeLabel(level)}
+                          </button>
+                        ))}
+                      </div>
                       <label className="field-label" htmlFor="task-labels">Labels (comma-separated)</label>
                       <input
                         id="task-labels"

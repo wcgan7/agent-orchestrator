@@ -190,8 +190,11 @@ _CATEGORY_INSTRUCTIONS: dict[str, str] = {
     "implementation": (
         "Implement the changes described in the following task.\n"
         "Complete the entire step fully — partial work leaves the repository in\n"
-        "an inconsistent state. Update README or docs when observable behavior\n"
-        "changes."
+        "an inconsistent state.\n"
+        "IMPORTANT: If this change affects user-facing behavior, CLI usage,\n"
+        "configuration, setup instructions, or API surface, you MUST update\n"
+        "README.md and any relevant documentation files to reflect the changes.\n"
+        "This is an explicit instruction, not a suggestion."
     ),
     "verification": (
         "Run the project's test, lint, and type-check commands for the following\n"
@@ -204,7 +207,11 @@ _CATEGORY_INSTRUCTIONS: dict[str, str] = {
         "Each finding must include a severity (critical / high / medium / low).\n"
         "Evaluate every acceptance criterion explicitly. Provide concrete\n"
         "evidence tied to files and diffs — do not speculate. Do not down-rank\n"
-        "findings."
+        "findings.\n"
+        "If the change affects user-facing behavior, CLI usage, configuration,\n"
+        "or API surface, verify that README.md and relevant documentation were\n"
+        "updated. Raise a medium-severity finding if documentation is stale or\n"
+        "missing."
     ),
     "reporting": (
         "Produce a summary report for the following task.\n"
@@ -243,6 +250,64 @@ _CATEGORY_INSTRUCTIONS: dict[str, str] = {
         "If tasks can safely run in parallel, leave them independent."
     ),
     "general": "Follow the task description and report results clearly.",
+}
+
+_DEPENDENCY_POLICY_INSTRUCTIONS: dict[str, dict[str, str]] = {
+    "implementation": {
+        "permissive": (
+            "## Dependency policy — permissive\n"
+            "Prefer using well-maintained libraries over manual implementation.\n"
+            "Install what you need — favor proven packages for non-trivial functionality."
+        ),
+        "prudent": (
+            "## Dependency policy — prudent\n"
+            "Prefer using what is already available in the project.\n"
+            "Only install a new dependency if implementing it manually would be\n"
+            "unreliable or disproportionately complex. Justify any new addition."
+        ),
+        "strict": (
+            "## Dependency policy — strict\n"
+            "Do NOT install new dependencies or add entries to package.json,\n"
+            "requirements.txt, pyproject.toml, or any other manifest.\n"
+            "Work only with what is already installed in the project."
+        ),
+    },
+    "planning": {
+        "permissive": (
+            "## Dependency policy — permissive\n"
+            "The plan should recommend libraries where appropriate.\n"
+            "Prefer well-maintained packages for non-trivial functionality."
+        ),
+        "prudent": (
+            "## Dependency policy — prudent\n"
+            "The plan should prefer existing dependencies but may suggest new\n"
+            "ones with clear justification for why manual implementation is\n"
+            "unreliable or disproportionately complex."
+        ),
+        "strict": (
+            "## Dependency policy — strict\n"
+            "The plan must NOT include any new dependencies.\n"
+            "All solutions must use only what is already installed in the project."
+        ),
+    },
+    "review": {
+        "permissive": (
+            "## Dependency policy — permissive\n"
+            "Do not raise findings for adding new dependencies.\n"
+            "New well-maintained libraries are acceptable."
+        ),
+        "prudent": (
+            "## Dependency policy — prudent\n"
+            "Flag any newly added dependency as a low-severity finding for awareness.\n"
+            "Verify the addition is justified and not easily replaceable with existing code."
+        ),
+        "strict": (
+            "## Dependency policy — strict\n"
+            "Flag any change to dependency manifests (package.json, requirements.txt,\n"
+            "pyproject.toml, etc.) as a high-severity finding.\n"
+            "No new dependencies are allowed under this policy."
+        ),
+    },
 }
 
 _CATEGORY_JSON_SCHEMAS: dict[str, str] = {
@@ -505,6 +570,13 @@ def build_step_prompt(
         if cmds_block:
             parts.append("")
             parts.append(cmds_block)
+
+    # Inject dependency policy instruction
+    dep_policy = getattr(task, "dependency_policy", "prudent") or "prudent"
+    dep_instruction = _DEPENDENCY_POLICY_INSTRUCTIONS.get(category, {}).get(dep_policy)
+    if dep_instruction:
+        parts.append("")
+        parts.append(dep_instruction)
 
     parts.append("")
     parts.append(_GUARDRAILS)
@@ -843,7 +915,12 @@ class LiveWorkerAdapter:
             '"line": 0, '
             '"suggested_fix": "brief suggestion or empty string"}]}\n\n'
             "Rules:\n"
-            "- Return an empty findings array if the review found no issues.\n"
+            "- Only include findings that represent actual issues requiring code changes.\n"
+            "- EXCLUDE positive observations, praise, informational notes, and\n"
+            "  intentional/documented design decisions that need no action.\n"
+            "- If a finding is labeled 'positive', 'by design', or explicitly states\n"
+            "  no change is needed, drop it.\n"
+            "- Return an empty findings array if the review found no actionable issues.\n"
             "- Each finding must have at least severity, category, and summary.\n"
             "- Use the exact severity/category values listed above.\n\n"
             "Review output:\n"

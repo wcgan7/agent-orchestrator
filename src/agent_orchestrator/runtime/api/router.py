@@ -33,6 +33,7 @@ class CreateTaskRequest(BaseModel):
     pipeline_template: Optional[list[str]] = None
     approval_mode: str = "human_review"
     hitl_mode: str = "autopilot"
+    dependency_policy: str = ""
     source: str = "manual"
     worker_model: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -48,6 +49,7 @@ class UpdateTaskRequest(BaseModel):
     blocked_by: Optional[list[str]] = None
     approval_mode: Optional[str] = None
     hitl_mode: Optional[str] = None
+    dependency_policy: Optional[str] = None
     worker_model: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
 
@@ -151,6 +153,7 @@ class QualityGateSettingsRequest(BaseModel):
 
 class DefaultsSettingsRequest(BaseModel):
     quality_gate: QualityGateSettingsRequest = Field(default_factory=QualityGateSettingsRequest)
+    dependency_policy: str = "prudent"
 
 
 class LanguageCommandsRequest(BaseModel):
@@ -895,6 +898,12 @@ def create_router(
             registry = PipelineRegistry()
             template = registry.resolve_for_task_type(body.task_type)
             pipeline_steps = template.step_names()
+        dep_policy = body.dependency_policy.strip() if body.dependency_policy else ""
+        if dep_policy not in ("permissive", "prudent", "strict"):
+            cfg = container.config.load()
+            dep_policy = str((cfg.get("defaults") or {}).get("dependency_policy") or "prudent")
+            if dep_policy not in ("permissive", "prudent", "strict"):
+                dep_policy = "prudent"
         task = Task(
             title=body.title,
             description=body.description,
@@ -906,6 +915,7 @@ def create_router(
             pipeline_template=pipeline_steps,
             approval_mode=body.approval_mode,
             hitl_mode=body.hitl_mode,
+            dependency_policy=dep_policy,
             source=body.source,
             worker_model=(str(body.worker_model).strip() if body.worker_model else None),
             metadata=body.metadata,
