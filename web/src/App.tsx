@@ -3748,6 +3748,11 @@ export default function App() {
                     ))}
                   </div>
                 )}
+                <p className="field-label">
+                  {(configLocked ? (selectedTaskView.dependency_policy || 'prudent') : editTaskDependencyPolicy) === 'permissive' && 'Prefer libraries over manual implementation. Install what you need.'}
+                  {(configLocked ? (selectedTaskView.dependency_policy || 'prudent') : editTaskDependencyPolicy) === 'prudent' && 'Prefer existing deps. Only add new ones when manual implementation would be unreliable or complex.'}
+                  {(configLocked ? (selectedTaskView.dependency_policy || 'prudent') : editTaskDependencyPolicy) === 'strict' && 'No new dependencies allowed. Work only with what is already installed.'}
+                </p>
                 {!configLocked ? (
                   <div className="inline-actions">
                     <button
@@ -4422,7 +4427,7 @@ export default function App() {
 
           <article className="settings-card settings-card-routing">
             <h3>Execution & Routing</h3>
-            <form className="form-stack" onSubmit={(event) => void saveSettings(event)}>
+            <form id="settings-main-form" className="form-stack" onSubmit={(event) => void saveSettings(event)}>
               <label className="field-label" htmlFor="settings-concurrency">Orchestrator concurrency</label>
               <input
                 id="settings-concurrency"
@@ -4739,18 +4744,25 @@ export default function App() {
                   </button>
                 ))}
               </div>
-              <div className="inline-actions">
-                <button className="button button-primary" type="submit" disabled={settingsSaving}>
-                  {settingsSaving ? 'Saving...' : 'Save settings'}
-                </button>
-                <button className="button" type="button" onClick={() => void loadSettings()} disabled={settingsLoading}>
-                  {settingsLoading ? 'Loading...' : 'Reload settings'}
-                </button>
-              </div>
-              {settingsError ? <p className="error-banner">{settingsError}</p> : null}
-              {settingsSuccess ? <p className="field-label">{settingsSuccess}</p> : null}
+              <p className="field-label">
+                {settingsDependencyPolicy === 'permissive' && 'Workers will prefer well-maintained libraries over manual implementation and install what they need.'}
+                {settingsDependencyPolicy === 'prudent' && 'Workers will prefer existing dependencies but may install new ones when manual implementation would be unreliable or disproportionately complex.'}
+                {settingsDependencyPolicy === 'strict' && 'Workers must not install any new dependencies. All solutions must use only what is already in the project.'}
+              </p>
             </form>
           </article>
+        </div>
+        <div className="settings-sticky-footer">
+          <div className="inline-actions">
+            <button className="button button-primary" type="submit" form="settings-main-form" disabled={settingsSaving}>
+              {settingsSaving ? 'Saving...' : 'Save settings'}
+            </button>
+            <button className="button" type="button" onClick={() => void loadSettings()} disabled={settingsLoading}>
+              {settingsLoading ? 'Loading...' : 'Reload settings'}
+            </button>
+          </div>
+          {settingsError ? <p className="error-banner">{settingsError}</p> : null}
+          {settingsSuccess ? <p className="field-label">{settingsSuccess}</p> : null}
         </div>
       </section>
     )
@@ -5309,6 +5321,11 @@ export default function App() {
                           </button>
                         ))}
                       </div>
+                      <p className="field-label">
+                        {newTaskDependencyPolicy === 'permissive' && 'Prefer libraries over manual implementation. Install what you need.'}
+                        {newTaskDependencyPolicy === 'prudent' && 'Prefer existing deps. Only add new ones when manual implementation would be unreliable or complex.'}
+                        {newTaskDependencyPolicy === 'strict' && 'No new dependencies allowed. Work only with what is already installed.'}
+                      </p>
                       <label className="field-label" htmlFor="task-labels">Labels (comma-separated)</label>
                       <input
                         id="task-labels"
