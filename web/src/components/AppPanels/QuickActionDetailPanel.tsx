@@ -30,7 +30,7 @@ function StatusIndicator({ status }: { status: string }): JSX.Element {
     return <span className="badge" title={humanizeLabel(status)}>⟳ {humanizeLabel(status)}</span>
   }
   if (status === 'failed') {
-    return <span className="badge badge-danger" title="Failed">✗ Failed</span>
+    return <span className="badge badge-error" title="Failed">✗ Failed</span>
   }
   return <span className="badge">{humanizeLabel(status)}</span>
 }

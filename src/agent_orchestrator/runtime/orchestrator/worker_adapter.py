@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Protocol
 
 from ..domain.models import Task
@@ -64,5 +65,17 @@ class DefaultWorkerAdapter:
             if isinstance(scripted, list):
                 return StepResult(status="ok", dependency_edges=scripted)
             return StepResult(status="ok", dependency_edges=[])
+
+        # Write scripted files into the worktree so the "no changes" guard passes.
+        if isinstance(task.metadata, dict):
+            scripted_files = task.metadata.get("scripted_files")
+            if isinstance(scripted_files, dict):
+                wt = task.metadata.get("worktree_dir")
+                base = Path(wt) if wt else None
+                if base and base.is_dir():
+                    for rel_path, content in scripted_files.items():
+                        fp = base / rel_path
+                        fp.parent.mkdir(parents=True, exist_ok=True)
+                        fp.write_text(str(content), encoding="utf-8")
 
         return StepResult(status="ok")

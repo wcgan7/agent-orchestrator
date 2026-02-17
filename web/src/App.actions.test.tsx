@@ -36,12 +36,12 @@ function installFetchMock() {
       json: async () => payload,
     })
 
-  const task = {
+  let task = {
     id: 'task-1',
     title: 'Task 1',
     description: 'Ship task controls',
     priority: 'P2',
-    status: 'ready',
+    status: 'queued',
     task_type: 'feature',
     labels: ['ui'],
     blocked_by: ['task-0'],
@@ -103,14 +103,27 @@ function installFetchMock() {
     if (u.includes('/api/tasks/task-1/run') && method === 'POST') return jsonResponse({ task })
     if (u.includes('/api/tasks/task-1/retry') && method === 'POST') return jsonResponse({ task })
     if (u.includes('/api/tasks/task-1/cancel') && method === 'POST') return jsonResponse({ task })
-    if (u.includes('/api/tasks/task-1/transition') && method === 'POST') return jsonResponse({ task })
+    if (u.includes('/api/tasks/task-1/transition') && method === 'POST') {
+      const transitionBody = JSON.parse(String((init as RequestInit).body))
+      if (transitionBody.status) {
+        task = { ...task, status: transitionBody.status }
+      }
+      return jsonResponse({ task })
+    }
     if (u.includes('/api/tasks/task-1/dependencies/task-0') && method === 'DELETE') return jsonResponse({ task })
     if (u.includes('/api/tasks/task-1/dependencies') && method === 'POST') return jsonResponse({ task })
     if (u.includes('/api/tasks/analyze-dependencies') && method === 'POST') {
       return jsonResponse({ edges: [{ from: 'task-0', to: 'task-1' }] })
     }
     if (u.includes('/api/tasks/task-1/reset-dep-analysis') && method === 'POST') return jsonResponse({ task })
-    if (u.includes('/api/tasks/task-1/approve-gate') && method === 'POST') return jsonResponse({ task })
+    if (u.includes('/api/tasks/task-1/approve-gate') && method === 'POST') {
+      task = {
+        ...task,
+        pending_gate: undefined,
+        human_blocking_issues: [],
+      }
+      return jsonResponse({ task })
+    }
     if (u.includes('/api/tasks/task-1') && method === 'PATCH') return jsonResponse({ task })
     if (u.includes('/api/tasks') && !u.includes('/api/tasks/') && method === 'POST') return jsonResponse({ task })
 
@@ -205,7 +218,7 @@ function installFetchMock() {
       return jsonResponse({
         columns: {
           backlog: [task],
-          ready: [],
+          queued: [],
           in_progress: [],
           in_review: [],
           blocked: [],
@@ -277,39 +290,29 @@ describe('App action coverage', () => {
     const mockedFetch = installFetchMock()
     render(<App />)
 
+    // Click a task card to open the detail modal
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /^Run$/i })).toBeInTheDocument()
+      expect(screen.getByText('Task 1')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Task 1'))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Move to Backlog/i })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /Approve gate/i })).toBeInTheDocument()
       expect(screen.getByText('Need production API token')).toBeInTheDocument()
     })
-    // Collaboration timeline loads via a separate async request; give it its own waitFor window
-    await waitFor(() => {
-      expect(screen.getByText(/Required human input/i)).toBeInTheDocument()
-    })
 
-    fireEvent.click(screen.getByRole('button', { name: /^Run$/i }))
-    await waitFor(() => {
-      expect(
-        mockedFetch.mock.calls.some(([url, init]) =>
-          String(url).includes('/api/tasks/task-1/run') && (init as RequestInit | undefined)?.method === 'POST'
-        )
-      ).toBe(true)
-    })
-
-    const transitionButton = screen.getByRole('button', { name: /Transition/i })
-    const transitionSelect = transitionButton.closest('div')?.querySelector('select') as HTMLSelectElement | null
-    expect(transitionSelect).toBeTruthy()
-    fireEvent.change(transitionSelect as HTMLSelectElement, { target: { value: 'in_progress' } })
-    fireEvent.click(screen.getByRole('button', { name: /Transition/i }))
+    // Use the "Move to Backlog" status action button (task is queued, so this transitions to backlog)
+    fireEvent.click(screen.getByRole('button', { name: /Move to Backlog/i }))
     await waitFor(() => {
       const transitionCall = mockedFetch.mock.calls.find(([url, init]) =>
         String(url).includes('/api/tasks/task-1/transition') && (init as RequestInit | undefined)?.method === 'POST'
       )
       expect(transitionCall).toBeTruthy()
       const body = JSON.parse(String((transitionCall?.[1] as RequestInit).body))
-      expect(body.status).toBe('in_progress')
+      expect(body.status).toBe('backlog')
     })
 
+    fireEvent.click(screen.getByRole('button', { name: /Dependencies/i }))
     fireEvent.change(screen.getByLabelText(/Add dependency task ID/i), { target: { value: 'task-99' } })
     fireEvent.click(screen.getByRole('button', { name: /Add dependency/i }))
     await waitFor(() => {
@@ -348,6 +351,7 @@ describe('App action coverage', () => {
       ).toBe(true)
     })
 
+    fireEvent.click(screen.getByRole('button', { name: /^Overview$/i }))
     fireEvent.click(screen.getByRole('button', { name: /Approve gate/i }))
     await waitFor(() => {
       const gateCall = mockedFetch.mock.calls.find(([url, init]) =>
@@ -358,15 +362,23 @@ describe('App action coverage', () => {
       expect(body.gate).toBe('human_review')
     })
 
-    fireEvent.change(screen.getByLabelText(/Edit title/i), { target: { value: 'Task 1 revised' } })
-    fireEvent.click(screen.getByRole('button', { name: /Save edits/i }))
+    // Switch to Activity tab (formerly Collaboration)
+    fireEvent.click(screen.getByRole('button', { name: /^Activity$/i }))
+    // Activity timeline loads via a separate async request; give it its own waitFor window.
+    await waitFor(() => {
+      expect(screen.getByText(/Required human input/i)).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Configuration$/i }))
+    fireEvent.change(screen.getByLabelText(/Labels/i), { target: { value: 'ui,frontend' } })
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/i }))
     await waitFor(() => {
       const editCall = mockedFetch.mock.calls.find(([url, init]) =>
         String(url).includes('/api/tasks/task-1') && (init as RequestInit | undefined)?.method === 'PATCH'
       )
       expect(editCall).toBeTruthy()
       const body = JSON.parse(String((editCall?.[1] as RequestInit).body))
-      expect(body.title).toBe('Task 1 revised')
+      expect(body.labels).toEqual(['ui', 'frontend'])
     })
   }, 15000)
 
@@ -525,7 +537,7 @@ describe('App action coverage', () => {
     fireEvent.click(screen.getAllByRole('button', { name: /^Create Work$/i })[0])
     fireEvent.change(screen.getByLabelText(/^Title$/i), { target: { value: 'Implement checkout' } })
     fireEvent.change(screen.getByLabelText(/Worker model override/i), { target: { value: 'gpt-5-codex' } })
-    fireEvent.click(screen.getAllByRole('button', { name: /^Create Task$/i })[1])
+    fireEvent.click(screen.getByRole('button', { name: /Create & Queue/i }))
 
     await waitFor(() => {
       const taskCreateCall = mockedFetch.mock.calls.find(([url, init]) =>

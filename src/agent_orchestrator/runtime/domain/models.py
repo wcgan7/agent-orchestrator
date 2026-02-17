@@ -9,7 +9,7 @@ from typing import Any, Literal, Optional
 
 TaskStatus = Literal[
     "backlog",
-    "ready",
+    "queued",
     "in_progress",
     "in_review",
     "done",
@@ -19,6 +19,7 @@ TaskStatus = Literal[
 
 Priority = Literal["P0", "P1", "P2", "P3"]
 ApprovalMode = Literal["human_review", "auto_approve"]
+DependencyPolicy = Literal["permissive", "prudent", "strict"]
 PlanRevisionSource = Literal["worker_plan", "worker_refine", "human_edit", "import"]
 PlanRevisionStatus = Literal["draft", "committed"]
 PlanRefineJobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
@@ -92,7 +93,7 @@ class Task:
     description: str = ""
     task_type: str = "feature"
     priority: Priority = "P2"
-    status: TaskStatus = "backlog"
+    status: TaskStatus = "queued"
     labels: list[str] = field(default_factory=list)
 
     blocked_by: list[str] = field(default_factory=list)
@@ -110,6 +111,7 @@ class Task:
     quality_gate: dict[str, int] = field(default_factory=lambda: {"critical": 0, "high": 0, "medium": 0, "low": 0})
     approval_mode: ApprovalMode = "human_review"
     hitl_mode: str = "autopilot"
+    dependency_policy: DependencyPolicy = "prudent"
     pending_gate: Optional[str] = None
 
     source: str = "manual"
@@ -128,7 +130,8 @@ class Task:
         payload["id"] = str(data.get("id") or _id("task"))
         payload["title"] = str(data.get("title") or "")
         payload["priority"] = str(data.get("priority") or "P2")
-        payload["status"] = str(data.get("status") or "backlog")
+        raw_status = str(data.get("status") or "backlog")
+        payload["status"] = "queued" if raw_status == "ready" else raw_status
         payload["created_at"] = str(data.get("created_at") or now_iso())
         payload["updated_at"] = str(data.get("updated_at") or now_iso())
         payload["blocked_by"] = list(data.get("blocked_by") or [])
@@ -140,6 +143,8 @@ class Task:
         payload["quality_gate"] = dict(data.get("quality_gate") or {"critical": 0, "high": 0, "medium": 0, "low": 0})
         payload["metadata"] = dict(data.get("metadata") or {})
         payload["hitl_mode"] = str(data.get("hitl_mode") or "autopilot")
+        raw_dep_policy = str(data.get("dependency_policy") or "prudent")
+        payload["dependency_policy"] = raw_dep_policy if raw_dep_policy in ("permissive", "prudent", "strict") else "prudent"
         payload["pending_gate"] = data.get("pending_gate")
         if "hitl_mode" not in data:
             am = str(data.get("approval_mode") or "human_review")

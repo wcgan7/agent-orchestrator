@@ -143,7 +143,7 @@ class FileTaskRepository(TaskRepository):
                 by_id = {t.id: t for t in tasks}
 
                 def _is_runnable(task: Task) -> bool:
-                    if task.status != "ready":
+                    if task.status != "queued":
                         return False
                     if task.pending_gate:
                         return False
