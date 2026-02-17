@@ -1476,6 +1476,7 @@ export default function App() {
     setTaskDetailTab(taskSelectTabRef.current || 'overview')
     taskSelectTabRef.current = undefined
     setTaskActionPending(null)
+    setTaskActionDetail('')
     setTaskActionError('')
     setTaskActionMessage('')
     setNewDependencyId('')
@@ -2740,7 +2741,18 @@ export default function App() {
       // clearEditModeOnSuccess — no-op (config editability is status-driven)
     } catch (err) {
       setTaskActionError(toErrorMessage(options?.errorPrefix || `Failed to ${kind} task`, err))
-    } finally {
+      // Always clear on error so buttons become clickable again.
+      setTaskActionPending(null)
+      setTaskActionDetail('')
+      return
+    }
+    // For transitions the board reload changes which buttons render, so
+    // clearing the pending flag early causes a brief flash of the idle
+    // button label before the new status takes effect.  Keep the pending
+    // state for transitions — React will unmount the old buttons when the
+    // task status updates.  For other mutations (save, retry) clear
+    // immediately so the UI becomes interactive again.
+    if (kind !== 'transition') {
       setTaskActionPending(null)
       setTaskActionDetail('')
     }
