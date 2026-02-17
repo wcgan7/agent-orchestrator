@@ -2,14 +2,15 @@ import { FormEvent, useEffect, useRef, useState } from 'react'
 import { buildApiUrl, buildAuthHeaders } from './api'
 import { ImportJobPanel } from './components/AppPanels/ImportJobPanel'
 import { QuickActionDetailPanel } from './components/AppPanels/QuickActionDetailPanel'
-import { TaskExplorerPanel } from './components/AppPanels/TaskExplorerPanel'
 import HITLModeSelector from './components/HITLModeSelector/HITLModeSelector'
-import ParallelPlanView from './components/ParallelPlanView'
+import Markdown from 'react-markdown'
 import { humanizeLabel } from './ui/labels'
 import './styles/orchestrator.css'
 
-type RouteKey = 'board' | 'execution' | 'review' | 'agents' | 'settings'
+type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
 type CreateTab = 'task' | 'import' | 'quick'
+type TaskDetailTab = 'overview' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
+type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition'
 
 type TaskRecord = {
   id: string
@@ -26,13 +27,17 @@ type TaskRecord = {
   blocked_by?: string[]
   blocks?: string[]
   parent_id?: string | null
+  children_ids?: string[]
+  source?: string
   pipeline_template?: string[]
   retry_count?: number
   hitl_mode?: string
+  dependency_policy?: 'permissive' | 'prudent' | 'strict'
   pending_gate?: string | null
   quality_gate?: Record<string, number>
   metadata?: Record<string, unknown>
   human_blocking_issues?: HumanBlockingIssue[]
+  error?: string | null
 }
 
 type BoardResponse = {
@@ -118,6 +123,53 @@ type QuickActionRecord = {
   exit_code?: number | null
 }
 
+type TaskLogsSnapshot = {
+  mode: 'active' | 'last' | 'history' | 'none'
+  task_status?: string
+  step?: string
+  stdout: string
+  stderr: string
+  stdout_offset?: number
+  stderr_offset?: number
+  stdout_chunk_start?: number
+  stderr_chunk_start?: number
+  stdout_tail_start?: number
+  stderr_tail_start?: number
+  started_at?: string | null
+  finished_at?: string | null
+  log_id?: string
+  progress?: Record<string, unknown>
+  available_steps?: string[]
+  step_execution_counts?: Record<string, number>
+  current_step?: string
+}
+
+type LogAccumPhase = 'init' | 'backfill' | 'forward'
+
+type LogAccumState = {
+  taskId: string
+  logId: string
+  stdoutOffset: number
+  stderrOffset: number
+  stdoutBackfillOffset: number
+  stderrBackfillOffset: number
+  stdoutRaw: string
+  stderrRaw: string
+  stdoutRendered: string
+  stderrRendered: string
+  stdoutParsedLines: number
+  stderrParsedLines: number
+  stdoutStreamEvents: number
+  stderrStreamEvents: number
+  stdoutHasTextDelta: boolean
+  stderrHasTextDelta: boolean
+  phase: LogAccumPhase
+  stdoutTailStart: number
+  stderrTailStart: number
+}
+
+type LogPaneKey = 'stdout' | 'stderr'
+
 type ImportJobRecord = {
   id: string
   project_id?: string
@@ -178,6 +230,7 @@ type SystemSettings = {
       medium: number
       low: number
     }
+    dependency_policy: string
   }
   workers: {
     default: string
@@ -188,15 +241,6 @@ type SystemSettings = {
   project: {
     commands: Record<string, LanguageCommandSettings>
   }
-}
-
-type PhaseSnapshot = {
-  id: string
-  name: string
-  description?: string
-  status: string
-  deps: string[]
-  progress: number
 }
 
 type MetricsSnapshot = {
@@ -238,49 +282,89 @@ type HumanBlockingIssue = {
   severity?: string
 }
 
-type CollaborationFeedbackItem = {
+type PlanRevisionRecord = {
   id: string
   task_id: string
-  feedback_type: string
-  priority: string
-  status: string
-  summary: string
-  details: string
-  target_file?: string | null
-  created_by?: string | null
-  created_at?: string | null
-  agent_response?: string | null
+  created_at: string
+  source: 'worker_plan' | 'worker_refine' | 'human_edit' | 'import'
+  parent_revision_id?: string | null
+  step?: string | null
+  feedback_note?: string | null
+  provider?: string | null
+  model?: string | null
+  content: string
+  content_hash: string
+  status: 'draft' | 'committed'
 }
 
-type CollaborationCommentItem = {
+type PlanRefineJobRecord = {
   id: string
   task_id: string
-  file_path: string
-  line_number: number
-  line_type?: string | null
-  body: string
-  author?: string | null
-  created_at?: string | null
-  resolved: boolean
-  parent_id?: string | null
+  base_revision_id: string
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  created_at: string
+  started_at?: string | null
+  finished_at?: string | null
+  feedback: string
+  instructions?: string | null
+  priority?: 'normal' | 'high'
+  result_revision_id?: string | null
+  error?: string | null
+}
+
+type TaskPlanDocument = {
+  task_id: string
+  latest_revision_id?: string | null
+  committed_revision_id?: string | null
+  revisions: PlanRevisionRecord[]
+  active_refine_job?: PlanRefineJobRecord | null
+  plans: Array<{ step?: string | null; ts?: string | null; content?: string }>
+  latest?: { step?: string | null; ts?: string | null; content?: string } | null
 }
 
 const STORAGE_PROJECT = 'agent-orchestrator-project'
 const STORAGE_ROUTE = 'agent-orchestrator-route'
 const ADD_REPO_VALUE = '__add_new_repo__'
-const MOBILE_BOARD_BREAKPOINT = 640
 const WS_RELOAD_CHANNELS = new Set(['tasks', 'queue', 'agents', 'review', 'quick_actions', 'notifications'])
+const LOG_CHUNK_CHARS = 200_000
+const LOG_HISTORY_MAX_CHARS = 5_000_000
+const LOG_NEAR_BOTTOM_PX = 120
+
+function createEmptyLogAccum(taskId = ''): LogAccumState {
+  return {
+    taskId,
+    logId: '',
+    stdoutOffset: 0,
+    stderrOffset: 0,
+    stdoutBackfillOffset: 0,
+    stderrBackfillOffset: 0,
+    stdoutRaw: '',
+    stderrRaw: '',
+    stdoutRendered: '',
+    stderrRendered: '',
+    stdoutParsedLines: 0,
+    stderrParsedLines: 0,
+    stdoutStreamEvents: 0,
+    stderrStreamEvents: 0,
+    stdoutHasTextDelta: false,
+    stderrHasTextDelta: false,
+    phase: 'init',
+    stdoutTailStart: 0,
+    stderrTailStart: 0,
+  }
+}
 
 const ROUTES: Array<{ key: RouteKey; label: string }> = [
   { key: 'board', label: 'Board' },
+  { key: 'planning', label: 'Planning' },
   { key: 'execution', label: 'Execution' },
-  { key: 'review', label: 'Review Queue' },
   { key: 'agents', label: 'Workers' },
   { key: 'settings', label: 'Settings' },
 ]
 
 const TASK_TYPE_OPTIONS = [
   'feature',
+  'plan',
   'bug',
   'refactor',
   'research',
@@ -290,7 +374,6 @@ const TASK_TYPE_OPTIONS = [
   'performance',
 ]
 
-const TASK_STATUS_OPTIONS = ['backlog', 'ready', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled']
 const DEFAULT_COLLABORATION_MODES: CollaborationMode[] = [
   { mode: 'autopilot', display_name: 'Autopilot', description: 'Agents run freely.' },
   { mode: 'supervised', display_name: 'Supervised', description: 'Approve each step.' },
@@ -315,6 +398,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
       medium: 0,
       low: 0,
     },
+    dependency_policy: 'prudent',
   },
   workers: {
     default: 'codex',
@@ -369,6 +453,25 @@ const PROJECT_COMMANDS_EXAMPLE = `{
   }
 }`
 
+function RenderedMarkdown({ content, className }: { content: string; className?: string }): JSX.Element {
+  return (
+    <div className={`rendered-markdown ${className || ''}`}>
+      <Markdown>{content}</Markdown>
+    </div>
+  )
+}
+
+function statusPillClass(status: string): string {
+  switch (status) {
+    case 'in_progress': return 'status-running'
+    case 'in_review': return 'status-review'
+    case 'done': return 'status-done'
+    case 'blocked': return 'status-blocked'
+    case 'cancelled': return 'status-failed'
+    default: return 'status-paused'
+  }
+}
+
 function routeFromHash(hash: string): RouteKey {
   const cleaned = hash.replace(/^#\/?/, '').trim().toLowerCase()
   const found = ROUTES.find((route) => route.key === cleaned)
@@ -377,10 +480,6 @@ function routeFromHash(hash: string): RouteKey {
 
 function toHash(route: RouteKey): string {
   return `#/${route}`
-}
-
-function isMobileBoardViewport(): boolean {
-  return window.innerWidth <= MOBILE_BOARD_BREAKPOINT
 }
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -645,6 +744,7 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
         medium: Number.isFinite(maybeMedium) ? Math.max(0, Math.floor(maybeMedium)) : DEFAULT_SETTINGS.defaults.quality_gate.medium,
         low: Number.isFinite(maybeLow) ? Math.max(0, Math.floor(maybeLow)) : DEFAULT_SETTINGS.defaults.quality_gate.low,
       },
+      dependency_policy: ['permissive', 'prudent', 'strict'].includes(String(defaults.dependency_policy || '')) ? String(defaults.dependency_policy) : DEFAULT_SETTINGS.defaults.dependency_policy,
     },
     workers,
     project: {
@@ -686,30 +786,6 @@ function normalizeHumanBlockingIssues(value: unknown): HumanBlockingIssue[] {
       }
     })
     .filter((item) => !!item.summary)
-}
-
-function normalizePhases(payload: unknown): PhaseSnapshot[] {
-  if (!Array.isArray(payload)) return []
-  return payload
-    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
-    .map((phase) => {
-      const id = String(phase.id || '').trim()
-      const name = String(phase.name || id || 'Unnamed phase').trim()
-      const description = String(phase.description || '').trim()
-      const status = String(phase.status || 'unknown').trim()
-      const deps = Array.isArray(phase.deps) ? phase.deps.map((dep) => String(dep || '').trim()).filter(Boolean) : []
-      const maybeProgress = Number(phase.progress)
-      const progress = Number.isFinite(maybeProgress) ? Math.max(0, Math.min(1, maybeProgress)) : 0
-      return {
-        id,
-        name,
-        description,
-        status,
-        deps,
-        progress,
-      }
-    })
-    .filter((phase) => !!phase.id)
 }
 
 function normalizeMetrics(payload: unknown): MetricsSnapshot | null {
@@ -808,47 +884,96 @@ function normalizeTimelineEvents(payload: unknown): CollaborationTimelineEvent[]
     .filter((item) => !!item.id)
 }
 
-function normalizeFeedbackItems(payload: unknown): CollaborationFeedbackItem[] {
-  const feedbackRaw = payload && typeof payload === 'object' && !Array.isArray(payload) && Array.isArray((payload as { feedback?: unknown[] }).feedback)
-    ? (payload as { feedback: unknown[] }).feedback
-    : []
-  return feedbackRaw
-    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
-    .map((item) => ({
-      id: String(item.id || '').trim(),
-      task_id: String(item.task_id || '').trim(),
-      feedback_type: String(item.feedback_type || 'general').trim(),
-      priority: String(item.priority || 'should').trim(),
-      status: String(item.status || 'active').trim(),
-      summary: String(item.summary || '').trim(),
-      details: String(item.details || '').trim(),
-      target_file: item.target_file ? String(item.target_file) : null,
-      created_by: item.created_by ? String(item.created_by) : null,
-      created_at: item.created_at ? String(item.created_at) : null,
-      agent_response: item.agent_response ? String(item.agent_response) : null,
-    }))
-    .filter((item) => !!item.id)
+function normalizePlanRevision(item: unknown): PlanRevisionRecord | null {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+  const raw = item as Record<string, unknown>
+  const id = String(raw.id || '').trim()
+  const taskId = String(raw.task_id || '').trim()
+  const content = String(raw.content || '')
+  if (!id || !taskId) return null
+  const sourceRaw = String(raw.source || 'human_edit').trim()
+  const source: PlanRevisionRecord['source'] = (
+    sourceRaw === 'worker_plan' || sourceRaw === 'worker_refine' || sourceRaw === 'import'
+  ) ? sourceRaw : 'human_edit'
+  const statusRaw = String(raw.status || 'draft').trim()
+  const status: PlanRevisionRecord['status'] = statusRaw === 'committed' ? 'committed' : 'draft'
+  return {
+    id,
+    task_id: taskId,
+    created_at: String(raw.created_at || ''),
+    source,
+    parent_revision_id: raw.parent_revision_id ? String(raw.parent_revision_id) : null,
+    step: raw.step ? String(raw.step) : null,
+    feedback_note: raw.feedback_note ? String(raw.feedback_note) : null,
+    provider: raw.provider ? String(raw.provider) : null,
+    model: raw.model ? String(raw.model) : null,
+    content,
+    content_hash: String(raw.content_hash || ''),
+    status,
+  }
 }
 
-function normalizeComments(payload: unknown): CollaborationCommentItem[] {
-  const commentsRaw = payload && typeof payload === 'object' && !Array.isArray(payload) && Array.isArray((payload as { comments?: unknown[] }).comments)
-    ? (payload as { comments: unknown[] }).comments
-    : []
-  return commentsRaw
+function normalizePlanRefineJob(item: unknown): PlanRefineJobRecord | null {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+  const raw = item as Record<string, unknown>
+  const id = String(raw.id || '').trim()
+  const taskId = String(raw.task_id || '').trim()
+  const baseRevisionId = String(raw.base_revision_id || '').trim()
+  if (!id || !taskId || !baseRevisionId) return null
+  const statusRaw = String(raw.status || 'queued').trim()
+  const status: PlanRefineJobRecord['status'] = (
+    statusRaw === 'running' || statusRaw === 'completed' || statusRaw === 'failed' || statusRaw === 'cancelled'
+  ) ? statusRaw : 'queued'
+  const priorityRaw = String(raw.priority || 'normal').trim()
+  const priority: PlanRefineJobRecord['priority'] = priorityRaw === 'high' ? 'high' : 'normal'
+  return {
+    id,
+    task_id: taskId,
+    base_revision_id: baseRevisionId,
+    status,
+    created_at: String(raw.created_at || ''),
+    started_at: raw.started_at ? String(raw.started_at) : null,
+    finished_at: raw.finished_at ? String(raw.finished_at) : null,
+    feedback: String(raw.feedback || ''),
+    instructions: raw.instructions ? String(raw.instructions) : null,
+    priority,
+    result_revision_id: raw.result_revision_id ? String(raw.result_revision_id) : null,
+    error: raw.error ? String(raw.error) : null,
+  }
+}
+
+function normalizeTaskPlan(payload: unknown): TaskPlanDocument {
+  const root = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : {}
+  const revisionsRaw = Array.isArray(root.revisions) ? root.revisions : []
+  const revisions = revisionsRaw.map((item) => normalizePlanRevision(item)).filter((item): item is PlanRevisionRecord => item !== null)
+  const plansRaw = Array.isArray(root.plans) ? root.plans : []
+  const plans = plansRaw
     .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
-    .map((item) => ({
-      id: String(item.id || '').trim(),
-      task_id: String(item.task_id || '').trim(),
-      file_path: String(item.file_path || '').trim(),
-      line_number: Number.isFinite(Number(item.line_number)) ? Math.max(0, Math.floor(Number(item.line_number))) : 0,
-      line_type: item.line_type ? String(item.line_type) : null,
-      body: String(item.body || '').trim(),
-      author: item.author ? String(item.author) : null,
-      created_at: item.created_at ? String(item.created_at) : null,
-      resolved: Boolean(item.resolved),
-      parent_id: item.parent_id ? String(item.parent_id) : null,
-    }))
-    .filter((item) => !!item.id)
+    .map((item) => ({ step: item.step ? String(item.step) : null, ts: item.ts ? String(item.ts) : null, content: item.content ? String(item.content) : '' }))
+  const latestRaw = root.latest && typeof root.latest === 'object' && !Array.isArray(root.latest)
+    ? root.latest as Record<string, unknown>
+    : null
+  return {
+    task_id: String(root.task_id || ''),
+    latest_revision_id: root.latest_revision_id ? String(root.latest_revision_id) : null,
+    committed_revision_id: root.committed_revision_id ? String(root.committed_revision_id) : null,
+    revisions,
+    active_refine_job: normalizePlanRefineJob(root.active_refine_job || null),
+    plans,
+    latest: latestRaw ? { step: latestRaw.step ? String(latestRaw.step) : null, ts: latestRaw.ts ? String(latestRaw.ts) : null, content: latestRaw.content ? String(latestRaw.content) : '' } : null,
+  }
+}
+
+function normalizePlanRefineJobs(payload: unknown): PlanRefineJobRecord[] {
+  const root = payload && typeof payload === 'object' && !Array.isArray(payload)
+    ? payload as Record<string, unknown>
+    : {}
+  const jobsRaw = Array.isArray(root.jobs) ? root.jobs : []
+  return jobsRaw
+    .map((item) => normalizePlanRefineJob(item))
+    .filter((item): item is PlanRefineJobRecord => item !== null)
 }
 
 function toLocaleTimestamp(value?: string | null): string {
@@ -872,12 +997,276 @@ function repoNameFromPath(projectPath: string): string {
   return parts[parts.length - 1] || normalized
 }
 
+function summarizePlanDiff(nextText: string, prevText: string): { added: number; removed: number; preview: string[] } {
+  const nextLines = nextText.split('\n')
+  const prevSet = new Set(prevText.split('\n'))
+  const nextSet = new Set(nextLines)
+  let added = 0
+  for (const line of nextLines) {
+    if (!prevSet.has(line)) added += 1
+  }
+  let removed = 0
+  for (const line of prevSet) {
+    if (!nextSet.has(line)) removed += 1
+  }
+  const preview = nextLines
+    .filter((line) => !prevSet.has(line))
+    .map((line) => `+ ${line}`.trimEnd())
+    .slice(0, 8)
+  return { added, removed, preview }
+}
+
+type StructuredStdoutChunk = {
+  text: string
+  hasContent: boolean
+  structured: boolean
+  parsedLines: number
+  streamEvents: number
+  hasTextDelta: boolean
+}
+
+function coerceMessageText(value: unknown): string {
+  if (value == null) return ''
+  if (typeof value === 'string') return value
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => {
+        if (typeof item === 'string') return item
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return ''
+        const rec = item as Record<string, unknown>
+        if (typeof rec.text === 'string') return rec.text
+        if (typeof rec.content === 'string') return rec.content
+        return ''
+      })
+      .filter((item) => item.length > 0)
+      .join('\n')
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const rec = value as Record<string, unknown>
+    if (typeof rec.text === 'string') return rec.text
+    if (typeof rec.content === 'string') return rec.content
+  }
+  return ''
+}
+
+function renderStructuredStdoutChunk(raw: string, prevHasTextDelta = false): StructuredStdoutChunk {
+  const input = String(raw || '')
+  if (!input.trim()) {
+    return { text: '', hasContent: false, structured: false, parsedLines: 0, streamEvents: 0, hasTextDelta: prevHasTextDelta }
+  }
+  const lines = input.split('\n')
+  let parsedLines = 0
+  let streamEvents = 0
+  let hasTextDelta = prevHasTextDelta
+  let lastAssistantText = ''
+  const parts: string[] = []
+  const pushText = (text: string): void => {
+    if (!text) return
+    parts.push(text)
+  }
+  const pushLine = (line: string): void => {
+    if (!line.trim()) return
+    if (parts.length > 0 && !parts[parts.length - 1].endsWith('\n')) {
+      parts.push('\n')
+    }
+    parts.push(line.trimEnd())
+    parts.push('\n')
+  }
+
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) continue
+    let obj: unknown
+    try {
+      obj = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+      continue
+    }
+    parsedLines += 1
+    const record = obj as Record<string, unknown>
+    const type = String(record.type || '')
+    const emittedToolErrors = new Set<string>()
+    const emitToolError = (rawError: string): void => {
+      const toolError = rawError.trim()
+      if (!toolError || emittedToolErrors.has(toolError)) return
+      emittedToolErrors.add(toolError)
+      pushLine(`Tool error: ${toolError}`)
+    }
+
+    const topLevelToolError = coerceMessageText(record.tool_use_result).trim()
+    if (topLevelToolError) {
+      emitToolError(topLevelToolError)
+    }
+
+    if (type === 'tool_use_result') {
+      const toolResultError = coerceMessageText(record.result ?? record.content ?? record.message).trim()
+      if (toolResultError) {
+        emitToolError(toolResultError)
+      }
+      continue
+    }
+
+    if (type === 'assistant') {
+      // Save but don't emit yet — assistant records duplicate text already
+      // captured by stream_event text_deltas.  With --include-partial-messages
+      // there can be many partial assistant snapshots that each repeat a
+      // growing prefix.  We keep only the last one as a fallback for logs
+      // that lack stream_events entirely.
+      const message = record.message
+      if (message && typeof message === 'object' && !Array.isArray(message)) {
+        const content = (message as Record<string, unknown>).content
+        if (Array.isArray(content)) {
+          const texts: string[] = []
+          for (const item of content) {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+            const ci = item as Record<string, unknown>
+            if (String(ci.type || '') !== 'text') continue
+            const text = coerceMessageText(ci.text)
+            if (text) texts.push(text)
+          }
+          if (texts.length > 0) lastAssistantText = texts.join('')
+        }
+      }
+      continue
+    }
+    if (type === 'result') {
+      const resultText = coerceMessageText(record.result).trim()
+      if (resultText) {
+        pushLine(`Result: ${resultText}`)
+      }
+      continue
+    }
+    if (type === 'stream_event') {
+      streamEvents += 1
+      const event = record.event
+      if (!event || typeof event !== 'object' || Array.isArray(event)) continue
+      const e = event as Record<string, unknown>
+      const eventType = String(e.type || '')
+      if (eventType === 'content_block_start') {
+        const block = e.content_block
+        if (block && typeof block === 'object' && !Array.isArray(block)) {
+          const b = block as Record<string, unknown>
+          const blockType = String(b.type || '')
+          if (blockType === 'tool_use') {
+            const toolName = String(b.name || '').trim()
+            if (toolName) {
+              pushLine(`Tools used: ${toolName}`)
+            }
+          }
+          const startText = coerceMessageText(b.text)
+          if (startText) pushText(startText)
+        }
+        continue
+      }
+      if (eventType === 'content_block_delta') {
+        const delta = e.delta
+        if (!delta || typeof delta !== 'object' || Array.isArray(delta)) continue
+        const d = delta as Record<string, unknown>
+        const deltaType = String(d.type || '')
+        if (deltaType === 'text_delta') {
+          const text = coerceMessageText(d.text)
+          if (text) {
+            pushText(text)
+            hasTextDelta = true
+          }
+        }
+      }
+      // Other stream events are intentionally ignored.
+      continue
+    }
+    if (type === 'user') {
+      const message = record.message
+      if (message && typeof message === 'object' && !Array.isArray(message)) {
+        const content = (message as Record<string, unknown>).content
+        if (Array.isArray(content)) {
+          for (const item of content) {
+            if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+            const ci = item as Record<string, unknown>
+            if (String(ci.type || '') === 'tool_result' && ci.is_error) {
+              const errText = coerceMessageText(ci.content).trim()
+              if (errText) {
+                emitToolError(errText)
+              }
+            }
+          }
+        }
+      }
+      continue
+    }
+    // Other top-level events are intentionally ignored.
+  }
+
+  if (parsedLines === 0) {
+    return { text: input, hasContent: true, structured: false, parsedLines: 0, streamEvents: 0, hasTextDelta }
+  }
+
+  // Fallback: if no stream_event text_deltas were seen, use the last
+  // assistant message text (covers logs without streaming output).
+  if (!hasTextDelta && lastAssistantText) {
+    pushText(lastAssistantText)
+  }
+
+  const text = parts.join('')
+  return {
+    text,
+    hasContent: text.length > 0,
+    structured: true,
+    parsedLines,
+    streamEvents,
+    hasTextDelta,
+  }
+}
+
+function mergeTranscriptChunk(previous: string, incoming: string, mode: 'reset' | 'prepend' | 'append'): string {
+  if (mode === 'reset') return incoming
+  if (!incoming) return previous
+  if (mode === 'prepend') return `${incoming}${previous}`
+  return `${previous}${incoming}`
+}
+
+function formatProgressEntries(progress?: Record<string, unknown>): Array<{ key: string; value: string }> {
+  if (!progress || typeof progress !== 'object') return []
+  const root = progress as Record<string, unknown>
+  const orderedKeys = ['status', 'phase', 'step', 'progress', 'percent', 'message', 'summary', 'last_heartbeat', 'run_id']
+  const seen = new Set<string>()
+  const out: Array<{ key: string; value: string }> = []
+  const toValue = (value: unknown): string => {
+    if (value == null) return ''
+    if (typeof value === 'string') return value
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+    if (Array.isArray(value)) return value.map((item) => (typeof item === 'string' ? item : JSON.stringify(item))).join(', ')
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
+    }
+  }
+  for (const key of orderedKeys) {
+    if (!(key in root)) continue
+    const value = toValue(root[key])
+    if (!value.trim()) continue
+    out.push({ key, value })
+    seen.add(key)
+  }
+  for (const [key, rawValue] of Object.entries(root)) {
+    if (seen.has(key)) continue
+    const value = toValue(rawValue)
+    if (!value.trim()) continue
+    out.push({ key, value })
+    if (out.length >= 12) break
+  }
+  return out
+}
+
 export default function App() {
   const [route, setRoute] = useState<RouteKey>(() => routeFromHash(window.location.hash || localStorage.getItem(STORAGE_ROUTE) || '#/board'))
   const [projectDir, setProjectDir] = useState<string>(() => localStorage.getItem(STORAGE_PROJECT) || '')
   const [board, setBoard] = useState<BoardResponse>({ columns: {} })
   const [orchestrator, setOrchestrator] = useState<OrchestratorStatus | null>(null)
-  const [reviewQueue, setReviewQueue] = useState<TaskRecord[]>([])
   const [agents, setAgents] = useState<AgentRecord[]>([])
   const [workerHealth, setWorkerHealth] = useState<WorkerHealthRecord[]>([])
   const [workerRoutingRows, setWorkerRoutingRows] = useState<WorkerRoutingRow[]>([])
@@ -886,9 +1275,7 @@ export default function App() {
   const [projects, setProjects] = useState<ProjectRef[]>([])
   const [pinnedProjects, setPinnedProjects] = useState<PinnedProjectRef[]>([])
   const [quickActions, setQuickActions] = useState<QuickActionRecord[]>([])
-  const [taskExplorerItems, setTaskExplorerItems] = useState<TaskRecord[]>([])
   const [executionBatches, setExecutionBatches] = useState<string[][]>([])
-  const [phases, setPhases] = useState<PhaseSnapshot[]>([])
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null)
   const [activeProjectId, setActiveProjectId] = useState('')
   const [loading, setLoading] = useState(false)
@@ -897,9 +1284,46 @@ export default function App() {
   const [workOpen, setWorkOpen] = useState(false)
   const [createTab, setCreateTab] = useState<CreateTab>('task')
   const [selectedTaskId, setSelectedTaskId] = useState<string>('')
+  const modalDismissedRef = useRef(false)
+  const modalExplicitRef = useRef(false)
+  const taskSelectTabRef = useRef<TaskDetailTab | undefined>(undefined)
+  const [planningTaskId, setPlanningTaskId] = useState('')
   const [selectedTaskDetail, setSelectedTaskDetail] = useState<TaskRecord | null>(null)
   const [selectedTaskDetailLoading, setSelectedTaskDetailLoading] = useState(false)
-  const [mobileTaskDetailOpen, setMobileTaskDetailOpen] = useState(false)
+  const [selectedTaskPlan, setSelectedTaskPlan] = useState<TaskPlanDocument | null>(null)
+  const [selectedTaskPlanJobs, setSelectedTaskPlanJobs] = useState<PlanRefineJobRecord[]>([])
+  const [selectedPlanRevisionId, setSelectedPlanRevisionId] = useState('')
+  const [planManualContent, setPlanManualContent] = useState('')
+  const [planManualFeedbackNote, setPlanManualFeedbackNote] = useState('')
+  const [planRefineFeedback, setPlanRefineFeedback] = useState('')
+  const [planJobLoading, setPlanJobLoading] = useState(false)
+  const [planRefineStdout, setPlanRefineStdout] = useState('')
+  const [planningWorkerTab, setPlanningWorkerTab] = useState<'plan' | 'manual'>('plan')
+  const [planSavingManual, setPlanSavingManual] = useState(false)
+  const [planCommitting, setPlanCommitting] = useState(false)
+  const [planGenerateLoading, setPlanGenerateLoading] = useState(false)
+  const [planGenerateStdout, setPlanGenerateStdout] = useState('')
+  const [planGenerateSource, setPlanGenerateSource] = useState<'committed' | 'revision' | 'override' | 'latest'>('latest')
+  const [planGenerateRevisionId, setPlanGenerateRevisionId] = useState('')
+  const [planGenerateOverride, setPlanGenerateOverride] = useState('')
+  const [planGenerateInferDeps, setPlanGenerateInferDeps] = useState(true)
+  const [planActionMessage, setPlanActionMessage] = useState('')
+  const [planActionError, setPlanActionError] = useState('')
+  const [taskDetailTab, setTaskDetailTab] = useState<TaskDetailTab>('overview')
+  const [taskDiff, setTaskDiff] = useState<{ commit: string | null; files: { path: string; changes: string }[]; diff: string; stat: string } | null>(null)
+  const [taskDiffLoading, setTaskDiffLoading] = useState(false)
+  const [boardCompact, setBoardCompact] = useState(false)
+  const [pipelineHighlightStatus, setPipelineHighlightStatus] = useState('')
+  useEffect(() => {
+    if (!pipelineHighlightStatus) return
+    const timer = window.setTimeout(() => setPipelineHighlightStatus(''), 2500)
+    return () => window.clearTimeout(timer)
+  }, [pipelineHighlightStatus])
+  // taskEditMode removed — configLocked (status-based) controls editability
+  const [taskActionPending, setTaskActionPending] = useState<TaskActionKey | null>(null)
+  const [taskActionDetail, setTaskActionDetail] = useState('')
+  const [taskActionMessage, setTaskActionMessage] = useState('')
+  const [taskActionError, setTaskActionError] = useState('')
   const [editTaskTitle, setEditTaskTitle] = useState('')
   const [editTaskDescription, setEditTaskDescription] = useState('')
   const [editTaskType, setEditTaskType] = useState('feature')
@@ -907,6 +1331,7 @@ export default function App() {
   const [editTaskLabels, setEditTaskLabels] = useState('')
   const [editTaskApprovalMode, setEditTaskApprovalMode] = useState<'human_review' | 'auto_approve'>('human_review')
   const [editTaskHitlMode, setEditTaskHitlMode] = useState('autopilot')
+  const [editTaskDependencyPolicy, setEditTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
 
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskDescription, setNewTaskDescription] = useState('')
@@ -916,37 +1341,52 @@ export default function App() {
   const [newTaskBlockedBy, setNewTaskBlockedBy] = useState('')
   const [newTaskApprovalMode, setNewTaskApprovalMode] = useState<'human_review' | 'auto_approve'>('human_review')
   const [newTaskHitlMode, setNewTaskHitlMode] = useState('autopilot')
+  const [newTaskDependencyPolicy, setNewTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
   const [newTaskParentId, setNewTaskParentId] = useState('')
   const [newTaskPipelineTemplate, setNewTaskPipelineTemplate] = useState('')
   const [newTaskMetadata, setNewTaskMetadata] = useState('')
   const [newTaskWorkerModel, setNewTaskWorkerModel] = useState('')
   const [collaborationModes, setCollaborationModes] = useState<CollaborationMode[]>(DEFAULT_COLLABORATION_MODES)
-  const [selectedTaskTransition, setSelectedTaskTransition] = useState('ready')
   const [newDependencyId, setNewDependencyId] = useState('')
   const [dependencyActionLoading, setDependencyActionLoading] = useState(false)
   const [dependencyActionMessage, setDependencyActionMessage] = useState('')
-  const [taskExplorerQuery, setTaskExplorerQuery] = useState('')
-  const [taskExplorerStatus, setTaskExplorerStatus] = useState('')
-  const [taskExplorerType, setTaskExplorerType] = useState('')
-  const [taskExplorerPriority, setTaskExplorerPriority] = useState('')
-  const [taskExplorerOnlyBlocked, setTaskExplorerOnlyBlocked] = useState(false)
-  const [taskExplorerLoading, setTaskExplorerLoading] = useState(false)
-  const [taskExplorerError, setTaskExplorerError] = useState('')
+  const [taskExplorerQuery, _setTaskExplorerQuery] = useState('')
+  const [taskExplorerStatus, _setTaskExplorerStatus] = useState('')
+  const [taskExplorerType, _setTaskExplorerType] = useState('')
+  const [taskExplorerPriority, _setTaskExplorerPriority] = useState('')
+  const [taskExplorerOnlyBlocked, _setTaskExplorerOnlyBlocked] = useState(false)
+  const [_taskExplorerLoading, setTaskExplorerLoading] = useState(false)
+  const [_taskExplorerError, setTaskExplorerError] = useState('')
   const [taskExplorerPage, setTaskExplorerPage] = useState(1)
-  const [taskExplorerPageSize, setTaskExplorerPageSize] = useState(6)
+  const [taskExplorerPageSize, _setTaskExplorerPageSize] = useState(6)
+  const [taskExplorerItems, setTaskExplorerItems] = useState<TaskRecord[]>([])
   const [collaborationTimeline, setCollaborationTimeline] = useState<CollaborationTimelineEvent[]>([])
-  const [collaborationFeedback, setCollaborationFeedback] = useState<CollaborationFeedbackItem[]>([])
-  const [collaborationComments, setCollaborationComments] = useState<CollaborationCommentItem[]>([])
   const [collaborationLoading, setCollaborationLoading] = useState(false)
   const [collaborationError, setCollaborationError] = useState('')
-  const [feedbackSummary, setFeedbackSummary] = useState('')
-  const [feedbackDetails, setFeedbackDetails] = useState('')
-  const [feedbackType, setFeedbackType] = useState('general')
-  const [feedbackPriority, setFeedbackPriority] = useState('should')
-  const [feedbackTargetFile, setFeedbackTargetFile] = useState('')
-  const [commentFilePath, setCommentFilePath] = useState('')
-  const [commentLineNumber, setCommentLineNumber] = useState('0')
-  const [commentBody, setCommentBody] = useState('')
+  const [selectedTaskLogs, setSelectedTaskLogs] = useState<TaskLogsSnapshot | null>(null)
+  const [selectedTaskLogsError, setSelectedTaskLogsError] = useState('')
+  const [selectedTaskLogsLoading, setSelectedTaskLogsLoading] = useState(false)
+  const planManualSeedRef = useRef<{ taskId: string; workerText: string }>({ taskId: '', workerText: '' })
+  const planRefineOutputRef = useRef<{ taskId: string; logId: string; jobKey: string; text: string }>({ taskId: '', logId: '', jobKey: '', text: '' })
+  const planGenerateOutputRef = useRef<{ taskId: string; logId: string; jobKey: string; text: string }>({ taskId: '', logId: '', jobKey: '', text: '' })
+  const logAccumRef = useRef<LogAccumState>(createEmptyLogAccum())
+  const [stdoutHistory, setStdoutHistory] = useState('')
+  const [stderrHistory, setStderrHistory] = useState('')
+  const [stdoutRawHistory, setStdoutRawHistory] = useState('')
+  const [stderrRawHistory, setStderrRawHistory] = useState('')
+  const [stdoutRenderStats, setStdoutRenderStats] = useState<{ parsedLines: number; streamEvents: number; structured: boolean }>({
+    parsedLines: 0,
+    streamEvents: 0,
+    structured: false,
+  })
+  const stdoutPreRef = useRef<HTMLPreElement>(null)
+  const stderrPreRef = useRef<HTMLPreElement>(null)
+  const taskLogsRequestSeqRef = useRef(0)
+  const logAutoPinRef = useRef<Record<LogPaneKey, boolean>>({ stdout: true, stderr: true })
+  const logScrollSnapshotRef = useRef<Record<LogPaneKey, { top: number; height: number; op: 'none' | 'prepend' | 'append' | 'reset' }>>({
+    stdout: { top: 0, height: 0, op: 'none' },
+    stderr: { top: 0, height: 0, op: 'none' },
+  })
 
   const [importText, setImportText] = useState('')
   const [importJobId, setImportJobId] = useState('')
@@ -966,6 +1406,9 @@ export default function App() {
   const [selectedQuickActionError, setSelectedQuickActionError] = useState('')
   const [selectedQuickActionErrorAt, setSelectedQuickActionErrorAt] = useState('')
   const [reviewGuidance, setReviewGuidance] = useState('')
+  const [retryFromStep, setRetryFromStep] = useState('')
+  const [logViewStep, setLogViewStep] = useState('')
+  const logViewStepRef = useRef('')
 
   const [manualPinPath, setManualPinPath] = useState('')
   const [allowNonGit, setAllowNonGit] = useState(false)
@@ -1009,9 +1452,11 @@ export default function App() {
   const [settingsGateHigh, setSettingsGateHigh] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.high))
   const [settingsGateMedium, setSettingsGateMedium] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.medium))
   const [settingsGateLow, setSettingsGateLow] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.low))
+  const [settingsDependencyPolicy, setSettingsDependencyPolicy] = useState(DEFAULT_SETTINGS.defaults.dependency_policy)
 
   const selectedTaskIdRef = useRef(selectedTaskId)
   const selectedQuickActionIdRef = useRef(selectedQuickActionId)
+  const selectedImportJobIdRef = useRef(selectedImportJobId)
   const activeProjectIdRef = useRef(activeProjectId)
   const projectDirRef = useRef(projectDir)
   const taskDetailRequestSeqRef = useRef(0)
@@ -1028,8 +1473,31 @@ export default function App() {
   }, [selectedTaskId])
 
   useEffect(() => {
+    setTaskDetailTab(taskSelectTabRef.current || 'overview')
+    taskSelectTabRef.current = undefined
+    setTaskActionPending(null)
+    setTaskActionDetail('')
+    setTaskActionError('')
+    setTaskActionMessage('')
+    setNewDependencyId('')
+    setDependencyActionMessage('')
+    setPlanRefineFeedback('')
+    setPlanGenerateSource('latest')
+    setPlanGenerateOverride('')
+    setPlanGenerateInferDeps(true)
+    setTaskDiff(null)
+    setTaskDiffLoading(false)
+    setReviewGuidance('')
+    setRetryFromStep('')
+  }, [selectedTaskId])
+
+  useEffect(() => {
     selectedQuickActionIdRef.current = selectedQuickActionId
   }, [selectedQuickActionId])
+
+  useEffect(() => {
+    selectedImportJobIdRef.current = selectedImportJobId
+  }, [selectedImportJobId])
 
   useEffect(() => {
     activeProjectIdRef.current = activeProjectId
@@ -1088,19 +1556,19 @@ export default function App() {
   }, [projectDir])
 
   useEffect(() => {
-    const hasModalOpen = workOpen || browseOpen || mobileTaskDetailOpen
+    const hasModalOpen = workOpen || browseOpen || (!!selectedTaskId && modalExplicitRef.current && !modalDismissedRef.current)
     document.documentElement.classList.toggle('modal-open', hasModalOpen)
     document.body.classList.toggle('modal-open', hasModalOpen)
     return () => {
       document.documentElement.classList.remove('modal-open')
       document.body.classList.remove('modal-open')
     }
-  }, [workOpen, browseOpen, mobileTaskDetailOpen])
+  }, [workOpen, browseOpen, selectedTaskId, route])
 
   useEffect(() => {
-    const columns = ['backlog', 'ready', 'in_progress', 'in_review', 'blocked', 'done'] as const
+    const columns = ['backlog', 'queued', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled'] as const
     const allTasks = columns.flatMap((column) => board.columns[column] || [])
-    if (!selectedTaskId && allTasks.length > 0) {
+    if (!selectedTaskId && !modalDismissedRef.current && allTasks.length > 0) {
       setSelectedTaskId(allTasks[0].id)
     }
     if (selectedTaskId && allTasks.every((task) => task.id !== selectedTaskId)) {
@@ -1108,6 +1576,45 @@ export default function App() {
       setSelectedTaskDetail(null)
     }
   }, [board, selectedTaskId])
+
+  useEffect(() => {
+    if (route !== 'execution') return
+    const prioritized = [
+      ...(board.columns.in_progress || []),
+      ...(board.columns.queued || []),
+      ...(board.columns.backlog || []),
+      ...(board.columns.in_review || []),
+      ...(board.columns.blocked || []),
+      ...(board.columns.done || []),
+      ...(board.columns.cancelled || []),
+    ]
+    if (prioritized.length === 0) return
+    if (selectedTaskId && prioritized.every((task) => task.id !== selectedTaskId)) {
+      setSelectedTaskId(prioritized[0].id)
+    }
+  }, [route, board, selectedTaskId])
+
+  useEffect(() => {
+    if (route !== 'planning') return
+    const planTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => t.task_type === 'plan' || t.task_type === 'plan_only')
+    if (planTasks.length === 0) {
+      if (planningTaskId) setPlanningTaskId('')
+      return
+    }
+
+    const hasPlanningTask = !!(planningTaskId && planTasks.some((task) => task.id === planningTaskId))
+    const hasSelectedTask = !!(selectedTaskId && planTasks.some((task) => task.id === selectedTaskId))
+    const nextTaskId = hasPlanningTask
+      ? planningTaskId
+      : (hasSelectedTask ? selectedTaskId : planTasks[0].id)
+
+    if (planningTaskId !== nextTaskId) {
+      setPlanningTaskId(nextTaskId)
+    }
+    if (selectedTaskId !== nextTaskId) {
+      setSelectedTaskId(nextTaskId)
+    }
+  }, [route, board, planningTaskId, selectedTaskId])
 
   function applySettings(payload: SystemSettings): void {
     setSettingsConcurrency(String(payload.orchestrator.concurrency))
@@ -1184,6 +1691,7 @@ export default function App() {
     setSettingsGateHigh(String(payload.defaults.quality_gate.high))
     setSettingsGateMedium(String(payload.defaults.quality_gate.medium))
     setSettingsGateLow(String(payload.defaults.quality_gate.low))
+    setSettingsDependencyPolicy(payload.defaults.dependency_policy || 'prudent')
   }
 
   async function loadSettings(): Promise<void> {
@@ -1241,6 +1749,7 @@ export default function App() {
       }
       const task = detail.task
       setSelectedTaskDetail(task)
+      void loadTaskPlan(taskId)
       setEditTaskTitle(task.title || '')
       setEditTaskDescription(task.description || '')
       setEditTaskType(task.task_type || 'feature')
@@ -1248,11 +1757,16 @@ export default function App() {
       setEditTaskLabels((task.labels || []).join(', '))
       setEditTaskApprovalMode(task.approval_mode || 'human_review')
       setEditTaskHitlMode(task.hitl_mode || 'autopilot')
+      setEditTaskDependencyPolicy(task.dependency_policy || 'prudent')
+      if (task.status === 'blocked' && task.current_step) {
+        setRetryFromStep(task.current_step)
+      }
     } catch {
       if (requestSeq !== taskDetailRequestSeqRef.current || selectedTaskIdRef.current !== taskId) {
         return
       }
       setSelectedTaskDetail(null)
+      setSelectedTaskPlan(null)
     } finally {
       if (requestSeq === taskDetailRequestSeqRef.current) {
         setSelectedTaskDetailLoading(false)
@@ -1260,28 +1774,151 @@ export default function App() {
     }
   }
 
+  async function loadTaskPlan(taskId: string): Promise<void> {
+    if (!taskId) {
+      setSelectedTaskPlan(null)
+      setSelectedTaskPlanJobs([])
+      setSelectedPlanRevisionId('')
+      return
+    }
+    try {
+      const payload = await requestJson<unknown>(buildApiUrl(`/api/tasks/${taskId}/plan`, projectDir))
+      if (selectedTaskIdRef.current !== taskId) {
+        return
+      }
+      const planDoc = normalizeTaskPlan(payload)
+      setSelectedTaskPlan(planDoc)
+      void loadTaskPlanJobs(taskId)
+      const committedOrLatest = planDoc.committed_revision_id || planDoc.latest_revision_id || ''
+      setSelectedPlanRevisionId((prev) => {
+        if (prev && planDoc.revisions.some((item) => item.id === prev)) {
+          return prev
+        }
+        return committedOrLatest
+      })
+      setPlanGenerateRevisionId((prev) => {
+        if (prev && planDoc.revisions.some((item) => item.id === prev)) {
+          return prev
+        }
+        return committedOrLatest
+      })
+      setPlanActionError('')
+    } catch (err) {
+      if (selectedTaskIdRef.current !== taskId) {
+        return
+      }
+      setSelectedTaskPlan(null)
+      setSelectedTaskPlanJobs([])
+      setPlanActionError(toErrorMessage('Failed to load planning data', err))
+    }
+  }
+
+  async function loadTaskPlanJobs(taskId: string): Promise<void> {
+    try {
+      const payload = await requestJson<unknown>(buildApiUrl(`/api/tasks/${taskId}/plan/jobs`, projectDir))
+      if (selectedTaskIdRef.current !== taskId) return
+      setSelectedTaskPlanJobs(normalizePlanRefineJobs(payload))
+    } catch {
+      // Keep the last known history on transient failures to avoid UI dropouts.
+      if (selectedTaskIdRef.current !== taskId) return
+    }
+  }
+
   useEffect(() => {
-    if (!selectedTaskId) return
+    const refineOut = planRefineOutputRef.current
+    if (refineOut.taskId !== selectedTaskId) {
+      planRefineOutputRef.current = { taskId: selectedTaskId || '', logId: '', jobKey: '', text: '' }
+      planGenerateOutputRef.current = { taskId: selectedTaskId || '', logId: '', jobKey: '', text: '' }
+      planManualSeedRef.current = { taskId: selectedTaskId || '', workerText: '' }
+      setPlanRefineStdout('')
+      setPlanGenerateStdout('')
+      setPlanningWorkerTab('plan')
+      setPlanManualContent('')
+      setPlanManualFeedbackNote('')
+    }
+    if (!selectedTaskId) {
+      setSelectedTaskPlan(null)
+      setSelectedTaskPlanJobs([])
+      setSelectedPlanRevisionId('')
+      setPlanActionMessage('')
+      setPlanActionError('')
+      return
+    }
+    setPlanActionMessage('')
+    setPlanActionError('')
     void loadTaskDetail(selectedTaskId)
   }, [selectedTaskId, projectDir])
 
-  useEffect(() => {
-    if (route !== 'board' && mobileTaskDetailOpen) {
-      setMobileTaskDetailOpen(false)
+  function appendPlanRefineStdout(
+    taskId: string,
+    logId: string,
+    jobKey: string,
+    incoming: string,
+    mode: 'reset' | 'prepend' | 'append',
+  ): void {
+    if (!taskId || !jobKey) return
+    const nextText = String(incoming || '')
+    const current = planRefineOutputRef.current
+    const logChanged = !!(logId && current.logId && logId !== current.logId)
+    if (current.taskId !== taskId || current.jobKey !== jobKey || logChanged || mode === 'reset') {
+      planRefineOutputRef.current = { taskId, logId, jobKey, text: nextText }
+      setPlanRefineStdout(nextText)
+      return
     }
-  }, [route, mobileTaskDetailOpen])
+    const merged = mergeTranscriptChunk(current.text, nextText, mode)
+    if (merged !== current.text) {
+      planRefineOutputRef.current = { taskId, logId: logId || current.logId, jobKey, text: merged }
+      setPlanRefineStdout(merged)
+    }
+  }
 
-  useEffect(() => {
-    if (!selectedTaskId && mobileTaskDetailOpen) {
-      setMobileTaskDetailOpen(false)
+  function appendPlanGenerateStdout(
+    taskId: string,
+    logId: string,
+    jobKey: string,
+    incoming: string,
+    mode: 'reset' | 'prepend' | 'append',
+  ): void {
+    if (!taskId || !jobKey) return
+    const nextText = String(incoming || '')
+    const current = planGenerateOutputRef.current
+    const logChanged = !!(logId && current.logId && logId !== current.logId)
+    if (current.taskId !== taskId || current.jobKey !== jobKey || logChanged || mode === 'reset') {
+      planGenerateOutputRef.current = { taskId, logId, jobKey, text: nextText }
+      setPlanGenerateStdout(nextText)
+      return
     }
-  }, [selectedTaskId, mobileTaskDetailOpen])
+    const merged = mergeTranscriptChunk(current.text, nextText, mode)
+    if (merged !== current.text) {
+      planGenerateOutputRef.current = { taskId, logId: logId || current.logId, jobKey, text: merged }
+      setPlanGenerateStdout(merged)
+    }
+  }
+
+  function openPlanningWorkerTab(taskId: string, nextTab: 'plan' | 'manual', workerPlanText: string): void {
+    if (nextTab === 'manual') {
+      const planText = String(workerPlanText || '').trim()
+      if (planText) {
+        setPlanManualContent((current) => {
+          const currentTrimmed = current.trim()
+          const seeded = planManualSeedRef.current
+          const wasSeededForTask = seeded.taskId === taskId && seeded.workerText.trim().length > 0
+          const sameAsSeeded = wasSeededForTask && currentTrimmed === seeded.workerText.trim()
+          if (!currentTrimmed || sameAsSeeded) {
+            planManualSeedRef.current = { taskId, workerText: planText }
+            return planText
+          }
+          return current
+        })
+      }
+    }
+    setPlanningWorkerTab(nextTab)
+  }
+
 
   async function loadCollaboration(taskId: string): Promise<void> {
     if (!taskId) {
       setCollaborationTimeline([])
-      setCollaborationFeedback([])
-      setCollaborationComments([])
       setCollaborationError('')
       return
     }
@@ -1290,26 +1927,18 @@ export default function App() {
     setCollaborationLoading(true)
     setCollaborationError('')
     try {
-      const [timelinePayload, feedbackPayload, commentsPayload] = await Promise.all([
-        requestJson<unknown>(buildApiUrl(`/api/collaboration/timeline/${taskId}`, projectDir)),
-        requestJson<unknown>(buildApiUrl(`/api/collaboration/feedback/${taskId}`, projectDir)),
-        requestJson<unknown>(buildApiUrl(`/api/collaboration/comments/${taskId}`, projectDir)),
-      ])
+      const timelinePayload = await requestJson<unknown>(buildApiUrl(`/api/collaboration/timeline/${taskId}`, projectDir))
       if (requestSeq !== collaborationRequestSeqRef.current || selectedTaskIdRef.current !== taskId) {
         return
       }
       setCollaborationTimeline(normalizeTimelineEvents(timelinePayload))
-      setCollaborationFeedback(normalizeFeedbackItems(feedbackPayload))
-      setCollaborationComments(normalizeComments(commentsPayload))
     } catch (err) {
       if (requestSeq !== collaborationRequestSeqRef.current || selectedTaskIdRef.current !== taskId) {
         return
       }
       setCollaborationTimeline([])
-      setCollaborationFeedback([])
-      setCollaborationComments([])
       const detail = err instanceof Error ? err.message : 'unknown error'
-      setCollaborationError(`Failed to load collaboration context (${detail})`)
+      setCollaborationError(`Failed to load activity (${detail})`)
     } finally {
       if (requestSeq === collaborationRequestSeqRef.current) {
         setCollaborationLoading(false)
@@ -1317,16 +1946,349 @@ export default function App() {
     }
   }
 
+  function getLogPaneElement(pane: LogPaneKey): HTMLPreElement | null {
+    return pane === 'stdout' ? stdoutPreRef.current : stderrPreRef.current
+  }
+
+  function updateLogAutoPin(pane: LogPaneKey): void {
+    const el = getLogPaneElement(pane)
+    if (!el) return
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
+    logAutoPinRef.current[pane] = distanceFromBottom < LOG_NEAR_BOTTOM_PX
+  }
+
+  function handleLogPaneScroll(pane: LogPaneKey): void {
+    updateLogAutoPin(pane)
+  }
+
+  function snapshotLogScrollOps(stdoutOp: 'none' | 'prepend' | 'append' | 'reset', stderrOp: 'none' | 'prepend' | 'append' | 'reset'): void {
+    const stdoutEl = stdoutPreRef.current
+    const stderrEl = stderrPreRef.current
+    logScrollSnapshotRef.current.stdout = {
+      top: stdoutEl ? stdoutEl.scrollTop : 0,
+      height: stdoutEl ? stdoutEl.scrollHeight : 0,
+      op: stdoutOp,
+    }
+    logScrollSnapshotRef.current.stderr = {
+      top: stderrEl ? stderrEl.scrollTop : 0,
+      height: stderrEl ? stderrEl.scrollHeight : 0,
+      op: stderrOp,
+    }
+  }
+
+  async function loadTaskLogs(taskId: string, quiet = false, stepOverride?: string): Promise<void> {
+    if (!taskId) {
+      setSelectedTaskLogs(null)
+      setSelectedTaskLogsError('')
+      return
+    }
+    const requestSeq = taskLogsRequestSeqRef.current + 1
+    taskLogsRequestSeqRef.current = requestSeq
+    if (!quiet) setSelectedTaskLogsLoading(true)
+    let continueBackfill = false
+    try {
+      if (logAccumRef.current.taskId !== taskId) {
+        logAccumRef.current = createEmptyLogAccum(taskId)
+      }
+      const accum = logAccumRef.current
+      const backfillStdoutBefore = accum.stdoutBackfillOffset
+      const backfillStderrBefore = accum.stderrBackfillOffset
+      const params = new URLSearchParams()
+      params.set('max_chars', String(LOG_CHUNK_CHARS))
+      const viewStep = stepOverride !== undefined ? stepOverride : logViewStep
+      if (viewStep) {
+        params.set('step', viewStep)
+      }
+      if (accum.phase === 'backfill') {
+        params.set('backfill', 'true')
+        const stdoutNeedsBackfill = accum.stdoutTailStart > 0 && accum.stdoutBackfillOffset > 0
+        const stderrNeedsBackfill = accum.stderrTailStart > 0 && accum.stderrBackfillOffset > 0
+
+        const stdoutReadTo = stdoutNeedsBackfill ? accum.stdoutBackfillOffset : accum.stdoutOffset
+        const stderrReadTo = stderrNeedsBackfill ? accum.stderrBackfillOffset : accum.stderrOffset
+        const stdoutOffset = stdoutNeedsBackfill
+          ? Math.max(0, accum.stdoutBackfillOffset - LOG_CHUNK_CHARS)
+          : accum.stdoutOffset
+        const stderrOffset = stderrNeedsBackfill
+          ? Math.max(0, accum.stderrBackfillOffset - LOG_CHUNK_CHARS)
+          : accum.stderrOffset
+
+        params.set('stdout_offset', String(stdoutOffset))
+        params.set('stderr_offset', String(stderrOffset))
+        params.set('stdout_read_to', String(stdoutReadTo))
+        params.set('stderr_read_to', String(stderrReadTo))
+      } else if (accum.phase === 'forward') {
+        // Incremental: read from where we left off.
+        params.set('stdout_offset', String(Math.max(0, accum.stdoutOffset)))
+        params.set('stderr_offset', String(Math.max(0, accum.stderrOffset)))
+      }
+      const qs = params.toString()
+      const url = buildApiUrl(`/api/tasks/${taskId}/logs${qs ? `?${qs}` : ''}`, projectDir)
+      const payload = await requestJson<TaskLogsSnapshot>(url)
+      if (requestSeq !== taskLogsRequestSeqRef.current || selectedTaskIdRef.current !== taskId) return
+
+      const payloadLogId = String(payload.log_id || payload.started_at || '').trim()
+      if (accum.logId && payloadLogId && accum.logId !== payloadLogId) {
+        const reset = createEmptyLogAccum(taskId)
+        reset.logId = payloadLogId
+        logAccumRef.current = reset
+        snapshotLogScrollOps('reset', 'reset')
+        planRefineOutputRef.current = { taskId, logId: payloadLogId, jobKey: '', text: '' }
+        planGenerateOutputRef.current = { taskId, logId: payloadLogId, jobKey: '', text: '' }
+        // Don't clear display state here — let the re-fetch replace it
+        // to avoid a blank flash between step transitions.
+        setPlanRefineStdout('')
+        setPlanGenerateStdout('')
+        void loadTaskLogs(taskId, true)
+        return
+      }
+      if (!accum.logId && payloadLogId) {
+        accum.logId = payloadLogId
+      }
+
+      setSelectedTaskLogs(payload)
+      setSelectedTaskLogsError('')
+
+      let stdoutOp: 'none' | 'prepend' | 'append' | 'reset' = 'none'
+      let stderrOp: 'none' | 'prepend' | 'append' | 'reset' = 'none'
+      let stdoutChunkRendered = ''
+      let stdoutChunkMode: 'none' | 'prepend' | 'append' | 'reset' = 'none'
+
+      const stdoutBackfillRequested = accum.phase === 'backfill' && accum.stdoutTailStart > 0 && accum.stdoutBackfillOffset > 0
+      const stderrBackfillRequested = accum.phase === 'backfill' && accum.stderrTailStart > 0 && accum.stderrBackfillOffset > 0
+      const nextStdoutBackfillOffset = stdoutBackfillRequested
+        ? Math.max(0, accum.stdoutBackfillOffset - LOG_CHUNK_CHARS)
+        : accum.stdoutBackfillOffset
+      const nextStderrBackfillOffset = stderrBackfillRequested
+        ? Math.max(0, accum.stderrBackfillOffset - LOG_CHUNK_CHARS)
+        : accum.stderrBackfillOffset
+
+      if (accum.phase === 'init') {
+        const stdoutChunkRaw = payload.stdout || ''
+        const stderrChunkRaw = payload.stderr || ''
+        const stdoutParsed = renderStructuredStdoutChunk(stdoutChunkRaw)
+        const stderrParsed = renderStructuredStdoutChunk(stderrChunkRaw)
+        accum.stdoutRaw = stdoutChunkRaw
+        accum.stderrRaw = stderrChunkRaw
+        accum.stdoutRendered = stdoutParsed.text
+        accum.stderrRendered = stderrParsed.text
+        accum.stdoutParsedLines = stdoutParsed.parsedLines
+        accum.stdoutStreamEvents = stdoutParsed.streamEvents
+        accum.stderrParsedLines = stderrParsed.parsedLines
+        accum.stderrStreamEvents = stderrParsed.streamEvents
+        accum.stdoutHasTextDelta = stdoutParsed.hasTextDelta
+        accum.stderrHasTextDelta = stderrParsed.hasTextDelta
+        stdoutOp = 'reset'
+        stderrOp = 'reset'
+        if (stdoutParsed.text) {
+          stdoutChunkRendered = stdoutParsed.text
+          stdoutChunkMode = 'reset'
+        }
+        if (payload.stdout_offset != null) accum.stdoutOffset = payload.stdout_offset
+        if (payload.stderr_offset != null) accum.stderrOffset = payload.stderr_offset
+        accum.stdoutTailStart = payload.stdout_tail_start || 0
+        accum.stderrTailStart = payload.stderr_tail_start || 0
+        accum.stdoutBackfillOffset = accum.stdoutTailStart
+        accum.stderrBackfillOffset = accum.stderrTailStart
+        accum.phase = (accum.stdoutTailStart > 0 || accum.stderrTailStart > 0) ? 'backfill' : 'forward'
+      } else if (accum.phase === 'backfill') {
+        const stdoutNeedsBackfill = stdoutBackfillRequested
+        const stderrNeedsBackfill = stderrBackfillRequested
+
+        if (stdoutNeedsBackfill) {
+          const stdoutChunkRaw = payload.stdout || ''
+          const stdoutParsed = renderStructuredStdoutChunk(stdoutChunkRaw)
+          if (stdoutChunkRaw) {
+            accum.stdoutRaw = stdoutChunkRaw + accum.stdoutRaw
+          }
+          if (stdoutParsed.text) {
+            accum.stdoutRendered = stdoutParsed.text + accum.stdoutRendered
+            stdoutOp = 'prepend'
+            stdoutChunkRendered = stdoutParsed.text
+            stdoutChunkMode = 'prepend'
+          }
+          accum.stdoutParsedLines += stdoutParsed.parsedLines
+          accum.stdoutStreamEvents += stdoutParsed.streamEvents
+          accum.stdoutHasTextDelta = accum.stdoutHasTextDelta || stdoutParsed.hasTextDelta
+          const reportedStart = typeof payload.stdout_chunk_start === 'number'
+            ? payload.stdout_chunk_start
+            : nextStdoutBackfillOffset
+          accum.stdoutBackfillOffset = Math.max(0, Math.min(reportedStart, accum.stdoutBackfillOffset))
+        }
+        if (stderrNeedsBackfill) {
+          const stderrChunkRaw = payload.stderr || ''
+          const stderrParsed = renderStructuredStdoutChunk(stderrChunkRaw)
+          if (stderrChunkRaw) {
+            accum.stderrRaw = stderrChunkRaw + accum.stderrRaw
+          }
+          if (stderrParsed.text) {
+            accum.stderrRendered = stderrParsed.text + accum.stderrRendered
+            stderrOp = 'prepend'
+          }
+          accum.stderrParsedLines += stderrParsed.parsedLines
+          accum.stderrStreamEvents += stderrParsed.streamEvents
+          accum.stderrHasTextDelta = accum.stderrHasTextDelta || stderrParsed.hasTextDelta
+          const reportedStart = typeof payload.stderr_chunk_start === 'number'
+            ? payload.stderr_chunk_start
+            : nextStderrBackfillOffset
+          accum.stderrBackfillOffset = Math.max(0, Math.min(reportedStart, accum.stderrBackfillOffset))
+        }
+
+        const stdoutBackfillDone = accum.stdoutTailStart <= 0 || accum.stdoutBackfillOffset <= 0
+        const stderrBackfillDone = accum.stderrTailStart <= 0 || accum.stderrBackfillOffset <= 0
+        if (stdoutBackfillDone && stderrBackfillDone) {
+          accum.phase = 'forward'
+        }
+      } else {
+        const stdoutChunkRaw = payload.stdout || ''
+        const stderrChunkRaw = payload.stderr || ''
+        const stdoutParsed = renderStructuredStdoutChunk(stdoutChunkRaw, accum.stdoutHasTextDelta)
+        const stderrParsed = renderStructuredStdoutChunk(stderrChunkRaw, accum.stderrHasTextDelta)
+        accum.stdoutHasTextDelta = stdoutParsed.hasTextDelta
+        accum.stderrHasTextDelta = stderrParsed.hasTextDelta
+        if (stdoutChunkRaw) {
+          accum.stdoutRaw += stdoutChunkRaw
+        }
+        if (stdoutParsed.text) {
+          accum.stdoutRendered += stdoutParsed.text
+          stdoutOp = 'append'
+          stdoutChunkRendered = stdoutParsed.text
+          stdoutChunkMode = 'append'
+        }
+        accum.stdoutParsedLines += stdoutParsed.parsedLines
+        accum.stdoutStreamEvents += stdoutParsed.streamEvents
+        if (stderrChunkRaw) {
+          accum.stderrRaw += stderrChunkRaw
+        }
+        if (stderrParsed.text) {
+          accum.stderrRendered += stderrParsed.text
+          stderrOp = 'append'
+        }
+        accum.stderrParsedLines += stderrParsed.parsedLines
+        accum.stderrStreamEvents += stderrParsed.streamEvents
+        if (payload.stdout_offset != null) accum.stdoutOffset = payload.stdout_offset
+        if (payload.stderr_offset != null) accum.stderrOffset = payload.stderr_offset
+      }
+
+      if (accum.stdoutRaw.length > LOG_HISTORY_MAX_CHARS) {
+        accum.stdoutRaw = accum.stdoutRaw.slice(accum.stdoutRaw.length - LOG_HISTORY_MAX_CHARS)
+      }
+      if (accum.stderrRaw.length > LOG_HISTORY_MAX_CHARS) {
+        accum.stderrRaw = accum.stderrRaw.slice(accum.stderrRaw.length - LOG_HISTORY_MAX_CHARS)
+      }
+      if (accum.stdoutRendered.length > LOG_HISTORY_MAX_CHARS) {
+        accum.stdoutRendered = accum.stdoutRendered.slice(accum.stdoutRendered.length - LOG_HISTORY_MAX_CHARS)
+        stdoutOp = 'reset'
+        stdoutChunkMode = 'none'
+      }
+      if (accum.stderrRendered.length > LOG_HISTORY_MAX_CHARS) {
+        accum.stderrRendered = accum.stderrRendered.slice(accum.stderrRendered.length - LOG_HISTORY_MAX_CHARS)
+        stderrOp = 'reset'
+      }
+
+      snapshotLogScrollOps(stdoutOp, stderrOp)
+      setStdoutRawHistory(accum.stdoutRaw)
+      setStderrRawHistory(accum.stderrRaw)
+      setStdoutHistory(accum.stdoutRendered)
+      setStderrHistory(accum.stderrRendered)
+      setStdoutRenderStats({
+        parsedLines: accum.stdoutParsedLines,
+        streamEvents: accum.stdoutStreamEvents,
+        structured: accum.stdoutParsedLines > 0,
+      })
+
+      if (stdoutChunkMode !== 'none') {
+        const step = String(payload.step || '')
+        if (step === 'plan_refine') {
+          const refineJobKey = String(selectedTaskPlan?.active_refine_job?.id || payload.started_at || payload.log_id || 'plan_refine')
+          appendPlanRefineStdout(taskId, payloadLogId, refineJobKey, stdoutChunkRendered, stdoutChunkMode)
+        } else if (step === 'generate_tasks') {
+          const generateJobKey = String(payload.started_at || payload.finished_at || payload.log_id || 'generate_tasks')
+          appendPlanGenerateStdout(taskId, payloadLogId, generateJobKey, stdoutChunkRendered, stdoutChunkMode)
+        }
+      }
+
+      const stdoutProgressed = accum.stdoutBackfillOffset < backfillStdoutBefore
+      const stderrProgressed = accum.stderrBackfillOffset < backfillStderrBefore
+      continueBackfill = accum.phase === 'backfill' && (stdoutProgressed || stderrProgressed)
+    } catch (err) {
+      if (requestSeq !== taskLogsRequestSeqRef.current || selectedTaskIdRef.current !== taskId) return
+      setSelectedTaskLogs(null)
+      if (!quiet) {
+        const detail = err instanceof Error ? err.message : 'unknown error'
+        setSelectedTaskLogsError(`Failed to load logs (${detail})`)
+      }
+    } finally {
+      if (requestSeq === taskLogsRequestSeqRef.current && !quiet) setSelectedTaskLogsLoading(false)
+    }
+    if (continueBackfill && requestSeq === taskLogsRequestSeqRef.current && selectedTaskIdRef.current === taskId) {
+      // Drain historical backfill quickly so rendered text stabilizes sooner.
+      void loadTaskLogs(taskId, true)
+    }
+  }
+
   useEffect(() => {
     if (!selectedTaskId) {
       setCollaborationTimeline([])
-      setCollaborationFeedback([])
-      setCollaborationComments([])
       setCollaborationError('')
+      setSelectedTaskLogs(null)
+      setSelectedTaskLogsError('')
+      logAccumRef.current = createEmptyLogAccum()
+      taskLogsRequestSeqRef.current += 1
+      logAutoPinRef.current = { stdout: true, stderr: true }
+      logScrollSnapshotRef.current = {
+        stdout: { top: 0, height: 0, op: 'none' },
+        stderr: { top: 0, height: 0, op: 'none' },
+      }
+      setStdoutHistory('')
+      setStderrHistory('')
+      setStdoutRawHistory('')
+      setStderrRawHistory('')
+      setStdoutRenderStats({ parsedLines: 0, streamEvents: 0, structured: false })
       return
     }
+    logAutoPinRef.current = { stdout: true, stderr: true }
+    logScrollSnapshotRef.current = {
+      stdout: { top: 0, height: 0, op: 'reset' },
+      stderr: { top: 0, height: 0, op: 'reset' },
+    }
+    setLogViewStep('')
+    logViewStepRef.current = ''
     void loadCollaboration(selectedTaskId)
+    void loadTaskLogs(selectedTaskId)
   }, [selectedTaskId, projectDir])
+
+  useEffect(() => {
+    if (!selectedTaskId) return
+    const timer = window.setInterval(() => {
+      void loadTaskLogs(selectedTaskId, true, logViewStepRef.current || undefined)
+    }, 2_000)
+    return () => window.clearInterval(timer)
+  }, [selectedTaskId, projectDir])
+
+  // Keep log panes pinned to bottom unless user scrolled up.
+  useEffect(() => {
+    const panes: LogPaneKey[] = ['stdout', 'stderr']
+    for (const pane of panes) {
+      const el = getLogPaneElement(pane)
+      if (!el) continue
+      const snap = logScrollSnapshotRef.current[pane]
+      const shouldPin = logAutoPinRef.current[pane]
+      if (shouldPin) {
+        el.scrollTop = el.scrollHeight
+      } else if (snap.op === 'prepend') {
+        const delta = el.scrollHeight - snap.height
+        if (delta !== 0) {
+          el.scrollTop = Math.max(0, snap.top + delta)
+        }
+      }
+      logScrollSnapshotRef.current[pane] = {
+        top: el.scrollTop,
+        height: el.scrollHeight,
+        op: 'none',
+      }
+    }
+  }, [stdoutHistory, stderrHistory])
 
   async function loadTaskExplorer(): Promise<void> {
     const requestSeq = taskExplorerRequestSeqRef.current + 1
@@ -1394,8 +2356,10 @@ export default function App() {
     setSelectedImportJobErrorAt('')
     try {
       const payload = await requestJson<{ job: ImportJobRecord }>(buildApiUrl(`/api/import/${jobId}`, projectDir))
-      setSelectedImportJob(payload.job)
+      if (selectedImportJobIdRef.current !== jobId) return
+      setSelectedImportJob(payload.job ?? null)
     } catch (err) {
+      if (selectedImportJobIdRef.current !== jobId) return
       setSelectedImportJob(null)
       const detail = err instanceof Error ? err.message : 'unknown error'
       setSelectedImportJobError(`Failed to load import job detail (${detail})`)
@@ -1413,9 +2377,6 @@ export default function App() {
   useEffect(() => {
     if (!workOpen || createTab !== 'import') return
     if (!selectedImportJobId) return
-    if (!selectedImportJob) return
-    const status = String(selectedImportJob.status || '').toLowerCase()
-    if (!['preview_ready', 'committing'].includes(status)) return
     const startedAt = Date.now()
     const timer = window.setInterval(() => {
       if (Date.now() - startedAt > 60_000) {
@@ -1425,7 +2386,28 @@ export default function App() {
       void loadImportJobDetail(selectedImportJobId)
     }, 2_000)
     return () => window.clearInterval(timer)
-  }, [workOpen, createTab, selectedImportJobId, selectedImportJob, projectDir])
+  }, [workOpen, createTab, selectedImportJobId, projectDir])
+
+  useEffect(() => {
+    const activeJob = selectedTaskPlan?.active_refine_job
+    const isActive = activeJob && (activeJob.status === 'queued' || activeJob.status === 'running')
+    if (!isActive && planJobLoading) {
+      setPlanJobLoading(false)
+    }
+  }, [selectedTaskPlan?.active_refine_job?.status, planJobLoading])
+
+  useEffect(() => {
+    if (!selectedTaskId) return
+    const activeJob = selectedTaskPlan?.active_refine_job
+    if (!activeJob) return
+    if (!(activeJob.status === 'queued' || activeJob.status === 'running')) return
+    async function pollRefine(): Promise<void> {
+      void loadTaskPlan(selectedTaskId)
+    }
+    void pollRefine()
+    const timer = window.setInterval(() => void pollRefine(), 2_000)
+    return () => window.clearInterval(timer)
+  }, [selectedTaskId, selectedTaskPlan?.active_refine_job?.status, projectDir])
 
   async function loadQuickActionDetail(quickActionId: string): Promise<void> {
     if (!quickActionId) {
@@ -1437,8 +2419,10 @@ export default function App() {
     setSelectedQuickActionErrorAt('')
     try {
       const payload = await requestJson<{ quick_action: QuickActionRecord }>(buildApiUrl(`/api/quick-actions/${quickActionId}`, projectDir))
-      setSelectedQuickActionDetail(payload.quick_action)
+      if (selectedQuickActionIdRef.current !== quickActionId) return
+      setSelectedQuickActionDetail(payload.quick_action ?? null)
     } catch (err) {
+      if (selectedQuickActionIdRef.current !== quickActionId) return
       setSelectedQuickActionDetail(null)
       const detail = err instanceof Error ? err.message : 'unknown error'
       setSelectedQuickActionError(`Failed to load quick action detail (${detail})`)
@@ -1461,12 +2445,10 @@ export default function App() {
   async function refreshTasksSurface(): Promise<void> {
     const refreshProjectDir = projectDirRef.current
     try {
-      const [boardData, orchestratorData, reviewData, executionOrderData, phasesData, metricsData] = await Promise.all([
+      const [boardData, orchestratorData, executionOrderData, metricsData] = await Promise.all([
         requestJson<BoardResponse>(buildApiUrl('/api/tasks/board', refreshProjectDir)),
         requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/status', refreshProjectDir)),
-        requestJson<{ tasks: TaskRecord[] }>(buildApiUrl('/api/review-queue', refreshProjectDir)),
         requestJson<{ batches: string[][] }>(buildApiUrl('/api/tasks/execution-order', refreshProjectDir)),
-        requestJson<unknown>(buildApiUrl('/api/phases', refreshProjectDir)).catch(() => []),
         requestJson<unknown>(buildApiUrl('/api/metrics', refreshProjectDir)).catch(() => null),
       ])
       if (refreshProjectDir !== projectDirRef.current) {
@@ -1474,14 +2456,13 @@ export default function App() {
       }
       setBoard(boardData)
       setOrchestrator(orchestratorData)
-      setReviewQueue(reviewData.tasks || [])
       setExecutionBatches(executionOrderData.batches || [])
-      setPhases(normalizePhases(phasesData))
       setMetrics(normalizeMetrics(metricsData))
 
       const selectedTask = String(selectedTaskIdRef.current || '').trim()
       if (selectedTask) {
         void loadTaskDetail(selectedTask)
+        void loadTaskPlan(selectedTask)
       }
     } catch (err) {
       if (refreshProjectDir !== projectDirRef.current) {
@@ -1545,26 +2526,22 @@ export default function App() {
       const [
         boardData,
         orchestratorData,
-        reviewData,
         agentData,
         projectData,
         pinnedData,
         quickActionData,
         executionOrderData,
-        phasesData,
         metricsData,
         workerHealthData,
         workerRoutingData,
       ] = await Promise.all([
         requestJson<BoardResponse>(buildApiUrl('/api/tasks/board', projectDir)),
         requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/status', projectDir)),
-        requestJson<{ tasks: TaskRecord[] }>(buildApiUrl('/api/review-queue', projectDir)),
         requestJson<{ agents: AgentRecord[] }>(buildApiUrl('/api/agents', projectDir)),
         requestJson<{ projects: ProjectRef[] }>(buildApiUrl('/api/projects', projectDir)),
         requestJson<{ items: PinnedProjectRef[] }>(buildApiUrl('/api/projects/pinned', projectDir)),
         requestJson<{ quick_actions: QuickActionRecord[] }>(buildApiUrl('/api/quick-actions', projectDir)),
         requestJson<{ batches: string[][] }>(buildApiUrl('/api/tasks/execution-order', projectDir)),
-        requestJson<unknown>(buildApiUrl('/api/phases', projectDir)).catch(() => []),
         requestJson<unknown>(buildApiUrl('/api/metrics', projectDir)).catch(() => null),
         requestJson<unknown>(buildApiUrl('/api/workers/health', projectDir)).catch(() => ({ providers: [] })),
         requestJson<unknown>(buildApiUrl('/api/workers/routing', projectDir)).catch(() => ({ default: 'codex', rows: [] })),
@@ -1574,13 +2551,11 @@ export default function App() {
       }
       setBoard(boardData)
       setOrchestrator(orchestratorData)
-      setReviewQueue(reviewData.tasks)
-      setAgents(agentData.agents)
-      setProjects(projectData.projects)
+      setAgents(agentData.agents || [])
+      setProjects(projectData.projects || [])
       setPinnedProjects(pinnedData.items || [])
       setQuickActions(quickActionData.quick_actions || [])
       setExecutionBatches(executionOrderData.batches || [])
-      setPhases(normalizePhases(phasesData))
       setMetrics(normalizeMetrics(metricsData))
       setWorkerHealth(normalizeWorkerHealth(workerHealthData))
       const normalizedRouting = normalizeWorkerRouting(workerRoutingData)
@@ -1739,7 +2714,51 @@ export default function App() {
     }
   }, [projectDir, activeProjectId])
 
-  async function submitTask(event: FormEvent): Promise<void> {
+  async function runTaskMutation(
+    kind: TaskActionKey,
+    mutation: () => Promise<void>,
+    options?: {
+      startMessage?: string
+      successMessage?: string
+      errorPrefix?: string
+      clearEditModeOnSuccess?: boolean
+      detail?: string
+    },
+  ): Promise<void> {
+    setTaskActionPending(kind)
+    setTaskActionDetail(options?.detail || '')
+    setTaskActionError('')
+    if (options?.startMessage !== undefined) {
+      setTaskActionMessage(options.startMessage)
+    } else {
+      setTaskActionMessage('')
+    }
+    try {
+      await mutation()
+      if (options?.successMessage) {
+        setTaskActionMessage(options.successMessage)
+      }
+      // clearEditModeOnSuccess — no-op (config editability is status-driven)
+    } catch (err) {
+      setTaskActionError(toErrorMessage(options?.errorPrefix || `Failed to ${kind} task`, err))
+      // Always clear on error so buttons become clickable again.
+      setTaskActionPending(null)
+      setTaskActionDetail('')
+      return
+    }
+    // For transitions the board reload changes which buttons render, so
+    // clearing the pending flag early causes a brief flash of the idle
+    // button label before the new status takes effect.  Keep the pending
+    // state for transitions — React will unmount the old buttons when the
+    // task status updates.  For other mutations (save, retry) clear
+    // immediately so the UI becomes interactive again.
+    if (kind !== 'transition') {
+      setTaskActionPending(null)
+      setTaskActionDetail('')
+    }
+  }
+
+  async function submitTask(event: FormEvent, statusOverride?: 'queued' | 'backlog'): Promise<void> {
     event.preventDefault()
     if (!newTaskTitle.trim()) return
     let parsedMetadata: Record<string, unknown> | undefined
@@ -1761,25 +2780,31 @@ export default function App() {
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean)
-    await requestJson<{ task: TaskRecord }>(buildApiUrl('/api/tasks', projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title: newTaskTitle.trim(),
-        description: newTaskDescription,
-        task_type: newTaskType,
-        priority: newTaskPriority,
-        labels: newTaskLabels.split(',').map((item) => item.trim()).filter(Boolean),
-        blocked_by: newTaskBlockedBy.split(',').map((item) => item.trim()).filter(Boolean),
-        approval_mode: newTaskApprovalMode,
-        hitl_mode: newTaskHitlMode,
-        worker_model: newTaskWorkerModel.trim() || undefined,
-        parent_id: newTaskParentId.trim() || undefined,
-        pipeline_template: parsedPipelineTemplate.length > 0 ? parsedPipelineTemplate : undefined,
-        metadata: parsedMetadata,
-        status: 'backlog',
-      }),
-    })
+    try {
+      await requestJson<{ task: TaskRecord }>(buildApiUrl('/api/tasks', projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          title: newTaskTitle.trim(),
+          description: newTaskDescription,
+          task_type: newTaskType,
+          priority: newTaskPriority,
+          labels: newTaskLabels.split(',').map((item) => item.trim()).filter(Boolean),
+          blocked_by: newTaskBlockedBy.split(',').map((item) => item.trim()).filter(Boolean),
+          approval_mode: newTaskApprovalMode,
+          hitl_mode: newTaskHitlMode,
+          dependency_policy: newTaskDependencyPolicy,
+          worker_model: newTaskWorkerModel.trim() || undefined,
+          parent_id: newTaskParentId.trim() || undefined,
+          pipeline_template: parsedPipelineTemplate.length > 0 ? parsedPipelineTemplate : undefined,
+          metadata: parsedMetadata,
+          status: statusOverride || 'queued',
+        }),
+      })
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create task')
+      return
+    }
     setError('')
     setNewTaskTitle('')
     setNewTaskDescription('')
@@ -1789,6 +2814,7 @@ export default function App() {
     setNewTaskBlockedBy('')
     setNewTaskApprovalMode('human_review')
     setNewTaskHitlMode('autopilot')
+    setNewTaskDependencyPolicy('prudent')
     setNewTaskParentId('')
     setNewTaskPipelineTemplate('')
     setNewTaskMetadata('')
@@ -1800,97 +2826,146 @@ export default function App() {
   async function previewImport(event: FormEvent): Promise<void> {
     event.preventDefault()
     if (!importText.trim()) return
-    const preview = await requestJson<{ job_id: string; preview: PrdPreview }>(buildApiUrl('/api/import/prd/preview', projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content: importText, default_priority: 'P2' }),
-    })
-    setImportJobId(preview.job_id)
-    setImportPreview(preview.preview)
-    setSelectedImportJobId(preview.job_id)
-    setRecentImportJobIds((prev) => [preview.job_id, ...prev.filter((item) => item !== preview.job_id)].slice(0, 8))
+    try {
+      const preview = await requestJson<{ job_id: string; preview: PrdPreview }>(buildApiUrl('/api/import/prd/preview', projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: importText, default_priority: 'P2' }),
+      })
+      setImportJobId(preview.job_id)
+      setImportPreview(preview.preview)
+      setSelectedImportJobId(preview.job_id)
+      setRecentImportJobIds((prev) => [preview.job_id, ...prev.filter((item) => item !== preview.job_id)].slice(0, 8))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to preview import')
+    }
   }
 
   async function commitImport(): Promise<void> {
     if (!importJobId) return
-    const commitResponse = await requestJson<{ created_task_ids: string[] }>(buildApiUrl('/api/import/prd/commit', projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ job_id: importJobId }),
-    })
-    setRecentImportCommitMap((prev) => ({ ...prev, [importJobId]: commitResponse.created_task_ids || [] }))
-    if (importJobId) {
-      setSelectedImportJobId(importJobId)
-      setRecentImportJobIds((prev) => [importJobId, ...prev.filter((item) => item !== importJobId)].slice(0, 8))
-      await loadImportJobDetail(importJobId)
+    try {
+      const commitResponse = await requestJson<{ created_task_ids: string[] }>(buildApiUrl('/api/import/prd/commit', projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: importJobId }),
+      })
+      setRecentImportCommitMap((prev) => ({ ...prev, [importJobId]: commitResponse.created_task_ids || [] }))
+      if (importJobId) {
+        setSelectedImportJobId(importJobId)
+        setRecentImportJobIds((prev) => [importJobId, ...prev.filter((item) => item !== importJobId)].slice(0, 8))
+        await loadImportJobDetail(importJobId)
+      }
+      setImportJobId('')
+      setImportPreview(null)
+      setImportText('')
+      setWorkOpen(false)
+      await reloadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to commit import')
     }
-    setImportJobId('')
-    setImportPreview(null)
-    setImportText('')
-    setWorkOpen(false)
-    await reloadAll()
   }
 
   async function submitQuickAction(event: FormEvent): Promise<void> {
     event.preventDefault()
     if (!quickPrompt.trim()) return
-    const resp = await requestJson<{ quick_action: QuickActionRecord }>(buildApiUrl('/api/quick-actions', projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt: quickPrompt.trim() }),
-    })
-    if (resp.quick_action) {
-      setSelectedQuickActionId(resp.quick_action.id)
-      setSelectedQuickActionDetail(resp.quick_action)
-    }
-    setQuickPrompt('')
-    setWorkOpen(false)
-    await reloadAll()
-  }
-
-  async function taskAction(taskId: string, action: 'run' | 'retry' | 'cancel'): Promise<void> {
-    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/${action}`, projectDir), {
-      method: 'POST',
-    })
-    await reloadAll()
-    if (selectedTaskId === taskId) {
-      await loadTaskDetail(taskId)
+    try {
+      const resp = await requestJson<{ quick_action: QuickActionRecord }>(buildApiUrl('/api/quick-actions', projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: quickPrompt.trim() }),
+      })
+      if (resp.quick_action) {
+        setSelectedQuickActionId(resp.quick_action.id)
+        setSelectedQuickActionDetail(resp.quick_action)
+      }
+      setQuickPrompt('')
+      setWorkOpen(false)
+      await reloadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to submit quick action')
     }
   }
 
-  async function transitionTask(taskId: string): Promise<void> {
-    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/transition`, projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ status: selectedTaskTransition }),
-    })
-    await reloadAll()
-    if (selectedTaskId === taskId) {
-      await loadTaskDetail(taskId)
+  async function transitionTask(taskId: string, targetStatus: string): Promise<void> {
+    const status = targetStatus
+    await runTaskMutation(
+      'transition',
+      async () => {
+        await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/transition`, projectDir), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status }),
+        })
+        await reloadAll()
+        if (selectedTaskIdRef.current === taskId) {
+          await loadTaskDetail(taskId)
+        }
+      },
+      {
+        successMessage: `Task moved to ${humanizeLabel(status)}.`,
+        errorPrefix: 'Failed to transition task',
+        detail: status,
+      },
+    )
+  }
+
+  function switchLogStep(step: string): void {
+    const effective = step || ''
+    setLogViewStep(effective)
+    logViewStepRef.current = effective
+    // Reset accumulator so we fetch the full log for the new step.
+    // Don't clear display state here — let loadTaskLogs replace it when
+    // the fetch completes, avoiding a blank flash between steps.
+    logAccumRef.current = createEmptyLogAccum(selectedTaskId)
+    snapshotLogScrollOps('reset', 'reset')
+    if (selectedTaskId) {
+      void loadTaskLogs(selectedTaskId, false, effective)
+    }
+  }
+
+  async function fetchTaskDiff(taskId: string): Promise<void> {
+    setTaskDiffLoading(true)
+    try {
+      const data = await requestJson<{ commit: string | null; files: { path: string; changes: string }[]; diff: string; stat: string }>(
+        buildApiUrl(`/api/tasks/${taskId}/diff`, projectDir),
+      )
+      setTaskDiff(data)
+    } catch {
+      setTaskDiff(null)
+    } finally {
+      setTaskDiffLoading(false)
     }
   }
 
   async function addDependency(taskId: string): Promise<void> {
     if (!newDependencyId.trim()) return
-    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/dependencies`, projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ depends_on: newDependencyId.trim() }),
-    })
-    setNewDependencyId('')
-    await reloadAll()
-    if (selectedTaskId === taskId) {
-      await loadTaskDetail(taskId)
+    try {
+      await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/dependencies`, projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ depends_on: newDependencyId.trim() }),
+      })
+      setNewDependencyId('')
+      await reloadAll()
+      if (selectedTaskIdRef.current === taskId) {
+        await loadTaskDetail(taskId)
+      }
+    } catch (err) {
+      setTaskActionError(err instanceof Error ? err.message : 'Failed to add dependency')
     }
   }
 
   async function removeDependency(taskId: string, depId: string): Promise<void> {
-    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/dependencies/${depId}`, projectDir), {
-      method: 'DELETE',
-    })
-    await reloadAll()
-    if (selectedTaskId === taskId) {
-      await loadTaskDetail(taskId)
+    try {
+      await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/dependencies/${depId}`, projectDir), {
+        method: 'DELETE',
+      })
+      await reloadAll()
+      if (selectedTaskIdRef.current === taskId) {
+        await loadTaskDetail(taskId)
+      }
+    } catch (err) {
+      setTaskActionError(err instanceof Error ? err.message : 'Failed to remove dependency')
     }
   }
 
@@ -1935,107 +3010,181 @@ export default function App() {
   }
 
   async function approveGate(taskId: string, gate?: string | null): Promise<void> {
-    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/approve-gate`, projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ gate: gate || undefined }),
-    })
-    await reloadAll()
-    if (selectedTaskId === taskId) {
-      await loadTaskDetail(taskId)
+    try {
+      await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/approve-gate`, projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ gate: gate || undefined }),
+      })
+      await reloadAll()
+      if (selectedTaskIdRef.current === taskId) {
+        await loadTaskDetail(taskId)
+      }
+    } catch (err) {
+      setTaskActionError(err instanceof Error ? err.message : 'Failed to approve gate')
     }
   }
 
-  async function submitFeedback(taskId: string): Promise<void> {
-    if (!feedbackSummary.trim()) return
-    setCollaborationError('')
+  async function refineTaskPlan(taskId: string): Promise<void> {
+    if (planJobLoading) return
+    const activeJob = selectedTaskPlan?.active_refine_job
+    if (activeJob && (activeJob.status === 'queued' || activeJob.status === 'running')) return
+    if (!planRefineFeedback.trim()) {
+      setPlanActionError('Refine feedback is required.')
+      return
+    }
+    setPlanJobLoading(true)
+    setPlanActionMessage('')
+    setPlanActionError('')
     try {
-      await requestJson<{ feedback: CollaborationFeedbackItem }>(buildApiUrl('/api/collaboration/feedback', projectDir), {
+      const baseRevisionId = selectedPlanRevisionId || selectedTaskPlan?.latest_revision_id || undefined
+      await requestJson<{ job: PlanRefineJobRecord }>(buildApiUrl(`/api/tasks/${taskId}/plan/refine`, projectDir), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          task_id: taskId,
-          feedback_type: feedbackType,
-          priority: feedbackPriority,
-          summary: feedbackSummary.trim(),
-          details: feedbackDetails.trim(),
-          target_file: feedbackTargetFile.trim() || undefined,
+          base_revision_id: baseRevisionId,
+          feedback: planRefineFeedback.trim(),
+          priority: 'normal',
         }),
       })
-      setFeedbackSummary('')
-      setFeedbackDetails('')
-      setFeedbackTargetFile('')
-      await loadCollaboration(taskId)
+      setPlanActionMessage('Plan refine job queued.')
+      planRefineOutputRef.current = { taskId, logId: '', jobKey: '', text: '' }
+      setPlanRefineStdout('')
+      await loadTaskPlan(taskId)
     } catch (err) {
-      const detail = err instanceof Error ? err.message : 'unknown error'
-      setCollaborationError(`Failed to add feedback (${detail})`)
+      setPlanActionError(toErrorMessage('Failed to queue plan refine job', err))
+      setPlanJobLoading(false)
     }
   }
 
-  async function dismissFeedback(taskId: string, feedbackId: string): Promise<void> {
-    setCollaborationError('')
-    try {
-      await requestJson<{ feedback: CollaborationFeedbackItem }>(buildApiUrl(`/api/collaboration/feedback/${feedbackId}/dismiss`, projectDir), {
-        method: 'POST',
-      })
-      await loadCollaboration(taskId)
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : 'unknown error'
-      setCollaborationError(`Failed to dismiss feedback (${detail})`)
+  async function saveManualPlanRevision(taskId: string): Promise<void> {
+    const manualContent = planManualContent.trim()
+    if (!manualContent) {
+      setPlanActionError('Manual revision content is required.')
+      return
     }
-  }
-
-  async function submitComment(taskId: string): Promise<void> {
-    if (!commentFilePath.trim() || !commentBody.trim()) return
-    setCollaborationError('')
+    setPlanSavingManual(true)
+    setPlanActionMessage('')
+    setPlanActionError('')
     try {
-      await requestJson<{ comment: CollaborationCommentItem }>(buildApiUrl('/api/collaboration/comments', projectDir), {
+      const resp = await requestJson<{ revision: PlanRevisionRecord }>(buildApiUrl(`/api/tasks/${taskId}/plan/revisions`, projectDir), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          task_id: taskId,
-          file_path: commentFilePath.trim(),
-          line_number: Math.max(0, parseNonNegativeInt(commentLineNumber, 0)),
-          body: commentBody.trim(),
+          content: manualContent,
+          parent_revision_id: selectedPlanRevisionId || selectedTaskPlan?.latest_revision_id || undefined,
+          feedback_note: planManualFeedbackNote.trim() || undefined,
         }),
       })
-      setCommentBody('')
-      await loadCollaboration(taskId)
+      setPlanManualContent(resp.revision.content || manualContent)
+      planManualSeedRef.current = { taskId, workerText: manualContent }
+      setSelectedPlanRevisionId(resp.revision.id)
+      setPlanActionMessage('Manual plan revision saved.')
+      await loadTaskPlan(taskId)
     } catch (err) {
-      const detail = err instanceof Error ? err.message : 'unknown error'
-      setCollaborationError(`Failed to add comment (${detail})`)
+      setPlanActionError(toErrorMessage('Failed to save manual plan revision', err))
+    } finally {
+      setPlanSavingManual(false)
     }
   }
 
-  async function resolveComment(taskId: string, commentId: string): Promise<void> {
-    setCollaborationError('')
+  async function commitPlanRevision(taskId: string, revisionId: string): Promise<void> {
+    if (!revisionId) {
+      setPlanActionError('Select a plan revision to commit.')
+      return
+    }
+    setPlanCommitting(true)
+    setPlanActionMessage('')
+    setPlanActionError('')
     try {
-      await requestJson<{ comment: CollaborationCommentItem }>(buildApiUrl(`/api/collaboration/comments/${commentId}/resolve`, projectDir), {
+      await requestJson<{ committed_revision_id: string }>(buildApiUrl(`/api/tasks/${taskId}/plan/commit`, projectDir), {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ revision_id: revisionId }),
       })
-      await loadCollaboration(taskId)
+      setPlanActionMessage('Committed selected plan revision.')
+      await loadTaskPlan(taskId)
     } catch (err) {
-      const detail = err instanceof Error ? err.message : 'unknown error'
-      setCollaborationError(`Failed to resolve comment (${detail})`)
+      setPlanActionError(toErrorMessage('Failed to commit plan revision', err))
+    } finally {
+      setPlanCommitting(false)
+    }
+  }
+
+  async function generateTasksFromPlan(taskId: string): Promise<void> {
+    setPlanGenerateLoading(true)
+    planGenerateOutputRef.current = { taskId, logId: '', jobKey: '', text: '' }
+    setPlanGenerateStdout('')
+    setPlanActionMessage('')
+    setPlanActionError('')
+    void loadTaskLogs(taskId, true)
+    try {
+      const payload: Record<string, unknown> = {
+        source: planGenerateSource,
+        infer_deps: planGenerateInferDeps,
+      }
+      if (planGenerateSource === 'revision') {
+        const revisionId = planGenerateRevisionId || selectedPlanRevisionId || selectedTaskPlan?.latest_revision_id || ''
+        if (!revisionId) {
+          throw new Error('Choose a revision source before generating.')
+        }
+        payload.revision_id = revisionId
+      }
+      if (planGenerateSource === 'override') {
+        if (!planGenerateOverride.trim()) {
+          throw new Error('Manual override plan text is required.')
+        }
+        payload.plan_override = planGenerateOverride
+      }
+      const result = await requestJson<{ created_task_ids: string[] }>(buildApiUrl(`/api/tasks/${taskId}/generate-tasks`, projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      setPlanActionMessage(`Generated ${result.created_task_ids?.length || 0} task(s) from plan.`)
+      try {
+        const boardData = await requestJson<BoardResponse>(buildApiUrl('/api/tasks/board', projectDir))
+        setBoard(boardData)
+      } catch {
+        // Keep user-facing flow resilient even if ancillary reloads fail.
+      }
+      await reloadAll()
+      await loadTaskPlan(taskId)
+    } catch (err) {
+      setPlanActionError(toErrorMessage('Failed to generate tasks', err))
+    } finally {
+      await loadTaskLogs(taskId, true)
+      setPlanGenerateLoading(false)
     }
   }
 
   async function saveTaskEdits(taskId: string): Promise<void> {
-    await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}`, projectDir), {
-      method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        title: editTaskTitle.trim(),
-        description: editTaskDescription,
-        task_type: editTaskType,
-        priority: editTaskPriority,
-        labels: editTaskLabels.split(',').map((item) => item.trim()).filter(Boolean),
-        approval_mode: editTaskApprovalMode,
-        hitl_mode: editTaskHitlMode,
-      }),
-    })
-    await reloadAll()
-    await loadTaskDetail(taskId)
+    await runTaskMutation(
+      'save',
+      async () => {
+        await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}`, projectDir), {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: editTaskTitle.trim(),
+            description: editTaskDescription,
+            task_type: editTaskType,
+            priority: editTaskPriority,
+            labels: editTaskLabels.split(',').map((item) => item.trim()).filter(Boolean),
+            approval_mode: editTaskApprovalMode,
+            hitl_mode: editTaskHitlMode,
+            dependency_policy: editTaskDependencyPolicy,
+          }),
+        })
+        await reloadAll()
+        await loadTaskDetail(taskId)
+      },
+      {
+        successMessage: 'Task configuration saved.',
+        errorPrefix: 'Failed to save task configuration',
+        clearEditModeOnSuccess: true,
+      },
+    )
   }
 
   function buildWorkerProvidersPayload(extraProviders: Record<string, WorkerProviderSettings>): Record<string, WorkerProviderSettings> {
@@ -2133,6 +3282,7 @@ export default function App() {
             medium: parseNonNegativeInt(settingsGateMedium, 0),
             low: parseNonNegativeInt(settingsGateLow, 0),
           },
+          dependency_policy: settingsDependencyPolicy,
         },
         workers: {
           default: (settingsWorkerDefault === 'ollama' || settingsWorkerDefault === 'claude') ? settingsWorkerDefault : 'codex',
@@ -2235,52 +3385,106 @@ export default function App() {
   }
 
   async function promoteQuickAction(quickActionId: string): Promise<void> {
-    await requestJson<{ task: TaskRecord; already_promoted: boolean }>(buildApiUrl(`/api/quick-actions/${quickActionId}/promote`, projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ priority: 'P2' }),
-    })
-    await reloadAll()
-    if (selectedQuickActionId === quickActionId) {
-      await loadQuickActionDetail(quickActionId)
+    try {
+      await requestJson<{ task: TaskRecord; already_promoted: boolean }>(buildApiUrl(`/api/quick-actions/${quickActionId}/promote`, projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ priority: 'P2' }),
+      })
+      await reloadAll()
+      if (selectedQuickActionIdRef.current === quickActionId) {
+        await loadQuickActionDetail(quickActionId)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to promote quick action')
     }
   }
 
   async function controlOrchestrator(action: 'pause' | 'resume' | 'drain' | 'stop'): Promise<void> {
-    await requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/control', projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action }),
-    })
-    await reloadAll()
+    try {
+      await requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/control', projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      })
+      await reloadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Failed to ${action} orchestrator`)
+    }
   }
 
-  async function reviewAction(taskId: string, action: 'approve' | 'request-changes'): Promise<void> {
-    const endpoint = action === 'approve' ? `/api/review/${taskId}/approve` : `/api/review/${taskId}/request-changes`
-    await requestJson<{ task: TaskRecord }>(buildApiUrl(endpoint, projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ guidance: reviewGuidance.trim() || undefined }),
-    })
-    setReviewGuidance('')
-    await reloadAll()
+  async function retryTask(taskId: string, startFromStep?: string): Promise<void> {
+    await runTaskMutation(
+      'retry',
+      async () => {
+        await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/retry`, projectDir), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            guidance: reviewGuidance.trim() || undefined,
+            start_from_step: startFromStep || undefined,
+          }),
+        })
+        setReviewGuidance('')
+        setRetryFromStep('')
+        await reloadAll()
+        if (selectedTaskIdRef.current === taskId) {
+          await loadTaskDetail(taskId)
+        }
+      },
+      {
+        successMessage: startFromStep ? `Task re-queued from ${startFromStep}.` : 'Task re-queued.',
+        errorPrefix: 'Failed to retry task',
+      },
+    )
+  }
+
+  async function requestChanges(taskId: string): Promise<void> {
+    await runTaskMutation(
+      'transition',
+      async () => {
+        await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/review/${taskId}/request-changes`, projectDir), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ guidance: reviewGuidance.trim() || undefined }),
+        })
+        setReviewGuidance('')
+        await reloadAll()
+        if (selectedTaskIdRef.current === taskId) {
+          await loadTaskDetail(taskId)
+        }
+      },
+      {
+        successMessage: 'Changes requested. Task re-queued.',
+        errorPrefix: 'Failed to request changes',
+        detail: 'request_changes',
+      },
+    )
   }
 
   async function pinProjectPath(path: string, allowNonGitValue: boolean): Promise<void> {
-    const pinned = await requestJson<{ project: ProjectRef }>(buildApiUrl('/api/projects/pinned', projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path, allow_non_git: allowNonGitValue }),
-    })
-    setProjectDir(pinned.project.path)
-    await reloadAll()
+    try {
+      const pinned = await requestJson<{ project: ProjectRef }>(buildApiUrl('/api/projects/pinned', projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path, allow_non_git: allowNonGitValue }),
+      })
+      setProjectDir(pinned.project?.path || path)
+      await reloadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to pin project')
+    }
   }
 
   async function unpinProject(projectId: string): Promise<void> {
-    await requestJson<{ removed: boolean }>(buildApiUrl(`/api/projects/pinned/${projectId}`, projectDir), {
-      method: 'DELETE',
-    })
-    await reloadAll()
+    try {
+      await requestJson<{ removed: boolean }>(buildApiUrl(`/api/projects/pinned/${projectId}`, projectDir), {
+        method: 'DELETE',
+      })
+      await reloadAll()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to unpin project')
+    }
   }
 
   async function pinManualProject(event: FormEvent): Promise<void> {
@@ -2324,440 +3528,548 @@ export default function App() {
   }
 
   function handleRouteChange(nextRoute: RouteKey): void {
+    modalDismissedRef.current = false
     window.location.hash = toHash(nextRoute)
     setRoute(nextRoute)
-    if (nextRoute !== 'board') {
-      setMobileTaskDetailOpen(false)
-    }
   }
 
-  function handleTaskSelect(taskId: string): void {
+  function handleTaskSelect(taskId: string, defaultTab?: TaskDetailTab): void {
+    modalDismissedRef.current = false
+    modalExplicitRef.current = true
+    taskSelectTabRef.current = defaultTab
     setSelectedTaskId(taskId)
-    if (isMobileBoardViewport()) {
-      setMobileTaskDetailOpen(true)
-    }
   }
 
-  function renderBoard(): JSX.Element {
-    const columns = ['backlog', 'ready', 'in_progress', 'in_review', 'blocked', 'done']
-    const allTasks = columns.flatMap((column) => board.columns[column] || [])
-    const taskIndex = new Map<string, TaskRecord>()
-    for (const task of allTasks) {
-      taskIndex.set(task.id, task)
-    }
-    if (selectedTaskDetail) {
-      taskIndex.set(selectedTaskDetail.id, selectedTaskDetail)
-    }
-    const selectedTask = allTasks.find((task) => task.id === selectedTaskId) || allTasks[0]
-    const selectedTaskView = selectedTaskDetail && selectedTask && selectedTaskDetail.id === selectedTask.id ? selectedTaskDetail : selectedTask
-    const blockerIds = selectedTaskView?.blocked_by || []
-    const blockedIds = selectedTaskView?.blocks || []
-    const queueTasks = [...(board.columns.ready || []), ...(board.columns.in_progress || [])]
-    const totalExplorerItems = taskExplorerItems.length
-    const explorerStart = (taskExplorerPage - 1) * taskExplorerPageSize
-    const explorerEnd = explorerStart + taskExplorerPageSize
-    const pagedExplorerItems = taskExplorerItems.slice(explorerStart, explorerEnd)
-    const taskDetailContent = selectedTaskView ? (
+  const boardColumns = ['backlog', 'queued', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled']
+  const allBoardTasks = boardColumns.flatMap((column) => board.columns[column] || [])
+  const taskIndex = new Map<string, TaskRecord>()
+  for (const task of allBoardTasks) {
+    taskIndex.set(task.id, task)
+  }
+  if (selectedTaskDetail) {
+    taskIndex.set(selectedTaskDetail.id, selectedTaskDetail)
+  }
+  const selectedTask = allBoardTasks.find((task) => task.id === selectedTaskId) ?? (selectedTaskId ? undefined : allBoardTasks[0])
+  const selectedTaskView = selectedTaskDetail && selectedTaskDetail.id === selectedTaskId ? selectedTaskDetail : selectedTask
+  const blockerIds = selectedTaskView?.blocked_by || []
+  const blockedIds = selectedTaskView?.blocks || []
+  const isPlanTask = selectedTaskView?.task_type === 'plan' || selectedTaskView?.task_type === 'plan_only'
+  const isTaskActionBusy = taskActionPending !== null
+  const configLocked = !new Set(['backlog', 'queued', 'blocked', 'cancelled']).has(selectedTaskView?.status || '')
+  const taskStatus = selectedTaskView?.status || ''
+  const unresolvedBlockers = blockerIds.filter((depId) => {
+    const dep = taskIndex.get(depId)
+    return !dep || (dep.status !== 'done' && dep.status !== 'cancelled')
+  })
+  const hasUnresolvedBlockers = unresolvedBlockers.length > 0
+  const showViewPlan = isPlanTask && selectedTaskView?.status === 'done'
+
+  const taskDetailContent = selectedTaskView ? (
       <div className="detail-card">
         {selectedTaskDetailLoading ? <p className="field-label">Loading full task detail...</p> : null}
-        <p className="task-title">{selectedTaskView.title}</p>
-        <p className="task-meta">{selectedTaskView.id} · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.status)} · {humanizeLabel(selectedTaskView.task_type || 'feature')}</p>
-        {selectedTaskView.description ? <p className="task-desc">{selectedTaskView.description}</p> : <p className="task-desc">No description.</p>}
-        <p className="field-label">Blockers: {(selectedTaskView.blocked_by || []).join(', ') || 'None'}</p>
-        <div className="dependency-graph-panel">
-          <p className="field-label">Dependency graph</p>
-          <div className="dependency-graph-grid">
-            <div className="dependency-graph-column">
-              <p className="field-label">Blocked by</p>
-              {blockerIds.length > 0 ? (
-                blockerIds.map((depId) => {
-                  const dep = describeTask(depId, taskIndex)
-                  return (
-                    <div className="dependency-node dependency-node-blocker" key={`blocker-${depId}`}>
-                      <p className="dependency-node-title">{dep.label}</p>
-                      <p className="dependency-node-meta">{humanizeLabel(dep.status)} {'->'} depends on</p>
-                    </div>
-                  )
-                })
-              ) : (
-                <p className="empty">No blockers</p>
-              )}
-            </div>
-            <div className="dependency-graph-column dependency-graph-center">
-              <p className="field-label">Selected task</p>
-              <div className="dependency-node dependency-node-current">
-                <p className="dependency-node-title">{selectedTaskView.title} ({selectedTaskView.id})</p>
-                <p className="dependency-node-meta">{humanizeLabel(selectedTaskView.status)}</p>
-              </div>
-            </div>
-            <div className="dependency-graph-column">
-              <p className="field-label">Blocks</p>
-              {blockedIds.length > 0 ? (
-                blockedIds.map((depId) => {
-                  const dep = describeTask(depId, taskIndex)
-                  return (
-                    <div className="dependency-node dependency-node-dependent" key={`dependent-${depId}`}>
-                      <p className="dependency-node-title">{dep.label}</p>
-                      <p className="dependency-node-meta">blocked until done · {humanizeLabel(dep.status)}</p>
-                    </div>
-                  )
-                })
-              ) : (
-                <p className="empty">No dependents</p>
-              )}
-            </div>
-          </div>
-          {blockerIds.length > 0 || blockedIds.length > 0 ? (
-            <div className="dependency-edge-list">
-              {blockerIds.map((depId) => (
-                <p key={`edge-in-${depId}`} className="dependency-edge">
-                  {describeTask(depId, taskIndex).label} {'->'} {selectedTaskView.id}
-                </p>
-              ))}
-              {blockedIds.map((depId) => (
-                <p key={`edge-out-${depId}`} className="dependency-edge">
-                  {selectedTaskView.id} {'->'} {describeTask(depId, taskIndex).label}
-                </p>
-              ))}
-            </div>
+        <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}</p>
+        <div className="detail-tabs" role="tablist" aria-label="Task detail sections">
+          <button
+            className={`detail-tab ${taskDetailTab === 'overview' ? 'is-active' : ''}`}
+            aria-pressed={taskDetailTab === 'overview'}
+            onClick={() => setTaskDetailTab('overview')}
+          >
+            Overview
+          </button>
+          <button
+            className={`detail-tab ${taskDetailTab === 'logs' ? 'is-active' : ''}`}
+            aria-pressed={taskDetailTab === 'logs'}
+            onClick={() => setTaskDetailTab('logs')}
+          >
+            Logs
+          </button>
+          <button
+            className={`detail-tab ${taskDetailTab === 'activity' ? 'is-active' : ''}`}
+            aria-pressed={taskDetailTab === 'activity'}
+            onClick={() => setTaskDetailTab('activity')}
+          >
+            Activity
+          </button>
+          <button
+            className={`detail-tab ${taskDetailTab === 'dependencies' ? 'is-active' : ''}`}
+            aria-pressed={taskDetailTab === 'dependencies'}
+            onClick={() => setTaskDetailTab('dependencies')}
+          >
+            Dependencies
+          </button>
+          <button
+            className={`detail-tab ${taskDetailTab === 'configuration' ? 'is-active' : ''}`}
+            aria-pressed={taskDetailTab === 'configuration'}
+            onClick={() => setTaskDetailTab('configuration')}
+          >
+            Configuration
+          </button>
+          {(selectedTaskView.status === 'in_review' || selectedTaskView.status === 'done' || selectedTaskView.status === 'blocked') && selectedTaskView.task_type !== 'plan' ? (
+            <button
+              className={`detail-tab ${taskDetailTab === 'changes' ? 'is-active' : ''}`}
+              aria-pressed={taskDetailTab === 'changes'}
+              onClick={() => { setTaskDetailTab('changes'); if (!taskDiff && !taskDiffLoading) { void fetchTaskDiff(selectedTaskView.id) } }}
+            >
+              Changes
+            </button>
           ) : null}
         </div>
-        {selectedTaskView.pending_gate ? (
-          <div className="preview-box">
+        {taskDetailTab === 'overview' ? (
+          <div className="task-detail-section-body">
+            {selectedTaskView.description ? <RenderedMarkdown content={selectedTaskView.description} className="task-desc" /> : <p className="task-desc">No description.</p>}
             <p className="field-label">
-              Pending gate: <strong>{humanizeLabel(selectedTaskView.pending_gate)}</strong>
+              {'Depends on: '}
+              {blockerIds.length > 0 ? (
+                blockerIds.map((depId, idx) => {
+                  const dep = describeTask(depId, taskIndex)
+                  const resolved = dep.status === 'done' || dep.status === 'cancelled'
+                  return (
+                    <span key={`dep-inline-${depId}`}>
+                      {idx > 0 ? ', ' : ''}
+                      <button className="link-button" onClick={() => handleTaskSelect(depId)}>{dep.label}</button>
+                      <span className={`status-pill status-pill-inline ${resolved ? 'status-running' : 'status-blocked'}`}>{humanizeLabel(dep.status)}</span>
+                    </span>
+                  )
+                })
+              ) : 'None'}
             </p>
-            <button className="button button-primary" onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}>
-              Approve gate
-            </button>
+            {selectedTaskView.parent_id ? (
+              <p className="field-label">
+                {'Generated from: '}
+                <button className="link-button" onClick={() => handleTaskSelect(selectedTaskView.parent_id!)}>{describeTask(selectedTaskView.parent_id, taskIndex).label}</button>
+              </p>
+            ) : null}
+            {(selectedTaskView.children_ids?.length ?? 0) > 0 ? (
+              <div className="generated-tasks-section">
+                <p className="field-label">Generated tasks ({selectedTaskView.children_ids!.length}):</p>
+                <div className="generated-tasks-list">
+                  {selectedTaskView.children_ids!.map((childId) => {
+                    const child = describeTask(childId, taskIndex)
+                    return (
+                      <button key={childId} className="generated-task-chip" onClick={() => handleTaskSelect(childId)}>
+                        <span className={`status-pill status-pill-inline ${child.status === 'done' ? 'status-done' : child.status === 'in_progress' ? 'status-running' : child.status === 'blocked' || child.status === 'cancelled' ? 'status-failed' : 'status-paused'}`}>{humanizeLabel(child.status)}</span>
+                        {child.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            ) : null}
+            {selectedTaskView.error?.trim() ? (() => {
+              const stderrTail = (stderrHistory || '').trim()
+              const logTail = (stdoutHistory || '').trim()
+              const contextLines: string[] = []
+              if (logTail) {
+                const last = logTail.slice(-800)
+                const fromNewline = last.indexOf('\n')
+                contextLines.push(fromNewline > 0 ? last.slice(fromNewline + 1) : last)
+              }
+              if (stderrTail) {
+                const last = stderrTail.slice(-400)
+                const fromNewline = last.indexOf('\n')
+                contextLines.push('stderr: ' + (fromNewline > 0 ? last.slice(fromNewline + 1) : last))
+              }
+              const context = contextLines.join('\n').trim()
+              return (
+                <div className="error-detail-box">
+                  <p className="error-detail-label">Error</p>
+                  <pre>{context ? `${selectedTaskView.error}\n\n${context}` : selectedTaskView.error}</pre>
+                </div>
+              )
+            })() : null}
+            {selectedTaskView.pending_gate ? (
+              <div className="preview-box">
+                <p className="field-label">
+                  Pending gate: <strong>{humanizeLabel(selectedTaskView.pending_gate)}</strong>
+                </p>
+                <button className="button button-primary" onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}>
+                  Approve gate
+                </button>
+              </div>
+            ) : null}
+            {Array.isArray(selectedTaskView.human_blocking_issues) && selectedTaskView.human_blocking_issues.length > 0 ? (
+              <div className="preview-box">
+                <p className="field-label">Human blocking issues</p>
+                {selectedTaskView.human_blocking_issues.map((issue, index) => (
+                  <div className="row-card" key={`task-human-issue-${index}`}>
+                    <p className="task-title">{issue.summary}</p>
+                    {issue.details ? <p className="task-desc">{issue.details}</p> : null}
+                    {(issue.action || issue.blocking_on || issue.category || issue.severity) ? (
+                      <p className="task-meta">
+                        {issue.action ? `action: ${issue.action}` : null}
+                        {issue.action && issue.blocking_on ? ' · ' : null}
+                        {issue.blocking_on ? `blocking on: ${issue.blocking_on}` : null}
+                        {(issue.action || issue.blocking_on) && issue.category ? ' · ' : null}
+                        {issue.category ? `category: ${issue.category}` : null}
+                        {(issue.action || issue.blocking_on || issue.category) && issue.severity ? ' · ' : null}
+                        {issue.severity ? `severity: ${issue.severity}` : null}
+                      </p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </div>
         ) : null}
-        {Array.isArray(selectedTaskView.human_blocking_issues) && selectedTaskView.human_blocking_issues.length > 0 ? (
-          <div className="preview-box">
-            <p className="field-label">Human blocking issues</p>
-            {selectedTaskView.human_blocking_issues.map((issue, index) => (
-              <div className="row-card" key={`task-human-issue-${index}`}>
-                <p className="task-title">{issue.summary}</p>
-                {issue.details ? <p className="task-desc">{issue.details}</p> : null}
-                {(issue.action || issue.blocking_on || issue.category || issue.severity) ? (
-                  <p className="task-meta">
-                    {issue.action ? `action: ${issue.action}` : null}
-                    {issue.action && issue.blocking_on ? ' · ' : null}
-                    {issue.blocking_on ? `blocking on: ${issue.blocking_on}` : null}
-                    {(issue.action || issue.blocking_on) && issue.category ? ' · ' : null}
-                    {issue.category ? `category: ${issue.category}` : null}
-                    {(issue.action || issue.blocking_on || issue.category) && issue.severity ? ' · ' : null}
-                    {issue.severity ? `severity: ${issue.severity}` : null}
-                  </p>
+        {taskDetailTab === 'configuration' ? (
+          <div className="task-detail-section-body">
+              <div className="form-stack">
+                <label className="field-label" htmlFor="edit-task-approval-mode">Approval mode</label>
+                <select
+                  id="edit-task-approval-mode"
+                  value={configLocked ? (selectedTaskView.approval_mode || 'human_review') : editTaskApprovalMode}
+                  onChange={(event) => setEditTaskApprovalMode(event.target.value as 'human_review' | 'auto_approve')}
+                  disabled={configLocked || taskActionPending === 'save'}
+                >
+                  <option value="human_review">{humanizeLabel('human_review')}</option>
+                  <option value="auto_approve">{humanizeLabel('auto_approve')}</option>
+                </select>
+                <label className="field-label" htmlFor="edit-task-labels">Labels (comma-separated)</label>
+                <input
+                  id="edit-task-labels"
+                  value={configLocked ? ((selectedTaskView.labels || []).join(', ')) : editTaskLabels}
+                  onChange={(event) => setEditTaskLabels(event.target.value)}
+                  disabled={configLocked || taskActionPending === 'save'}
+                />
+                <label className="field-label">HITL mode</label>
+                {configLocked ? (
+                  <p className="task-meta">{humanizeLabel(selectedTaskView.hitl_mode || 'default')}</p>
+                ) : (
+                  <HITLModeSelector
+                    currentMode={editTaskHitlMode}
+                    onModeChange={setEditTaskHitlMode}
+                    projectDir={projectDir}
+                  />
+                )}
+                <label className="field-label">Dependency policy</label>
+                {configLocked ? (
+                  <p className="task-meta">{humanizeLabel(selectedTaskView.dependency_policy || 'prudent')}</p>
+                ) : (
+                  <div className="toggle-group" role="group" aria-label="Dependency policy">
+                    {(['permissive', 'prudent', 'strict'] as const).map((level) => (
+                      <button
+                        key={level}
+                        type="button"
+                        className={`toggle-button ${editTaskDependencyPolicy === level ? 'is-active' : ''}`}
+                        aria-pressed={editTaskDependencyPolicy === level}
+                        onClick={() => setEditTaskDependencyPolicy(level)}
+                        disabled={taskActionPending === 'save'}
+                      >
+                        {humanizeLabel(level)}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                <p className="field-label">
+                  {(configLocked ? (selectedTaskView.dependency_policy || 'prudent') : editTaskDependencyPolicy) === 'permissive' && 'Prefer libraries over manual implementation. Install what you need.'}
+                  {(configLocked ? (selectedTaskView.dependency_policy || 'prudent') : editTaskDependencyPolicy) === 'prudent' && 'Prefer existing deps. Only add new ones when manual implementation would be unreliable or complex.'}
+                  {(configLocked ? (selectedTaskView.dependency_policy || 'prudent') : editTaskDependencyPolicy) === 'strict' && 'No new dependencies allowed. Work only with what is already installed.'}
+                </p>
+                {!configLocked ? (
+                  <div className="inline-actions">
+                    <button
+                      className="button button-primary"
+                      onClick={() => void saveTaskEdits(selectedTaskView.id)}
+                      disabled={taskActionPending === 'save'}
+                    >
+                      {taskActionPending === 'save' ? 'Saving...' : 'Save'}
+                    </button>
+                  </div>
                 ) : null}
               </div>
-            ))}
           </div>
         ) : null}
-        <div className="form-stack">
-          <label className="field-label" htmlFor="edit-task-title">Edit title</label>
-          <input id="edit-task-title" value={editTaskTitle} onChange={(event) => setEditTaskTitle(event.target.value)} />
-          <label className="field-label" htmlFor="edit-task-description">Edit description</label>
-          <textarea id="edit-task-description" rows={3} value={editTaskDescription} onChange={(event) => setEditTaskDescription(event.target.value)} />
-          <div className="inline-actions">
-            <select value={editTaskType} onChange={(event) => setEditTaskType(event.target.value)}>
-              {TASK_TYPE_OPTIONS.map((taskType) => (
-                <option key={taskType} value={taskType}>{humanizeLabel(taskType)}</option>
-              ))}
-            </select>
-            <select value={editTaskPriority} onChange={(event) => setEditTaskPriority(event.target.value)}>
-              <option value="P0">P0</option>
-              <option value="P1">P1</option>
-              <option value="P2">P2</option>
-              <option value="P3">P3</option>
-            </select>
-            <select value={editTaskApprovalMode} onChange={(event) => setEditTaskApprovalMode(event.target.value as 'human_review' | 'auto_approve')}>
-              <option value="human_review">{humanizeLabel('human_review')}</option>
-              <option value="auto_approve">{humanizeLabel('auto_approve')}</option>
-            </select>
-          </div>
-          <label className="field-label" htmlFor="edit-task-labels">Labels (comma-separated)</label>
-          <input id="edit-task-labels" value={editTaskLabels} onChange={(event) => setEditTaskLabels(event.target.value)} />
-          <label className="field-label">HITL mode</label>
-          <HITLModeSelector
-            currentMode={editTaskHitlMode}
-            onModeChange={setEditTaskHitlMode}
-            projectDir={projectDir}
-          />
-          <button className="button" onClick={() => void saveTaskEdits(selectedTaskView.id)}>Save edits</button>
-        </div>
-        <div className="inline-actions">
-          <button className="button" onClick={() => void taskAction(selectedTaskView.id, 'run')}>Run</button>
-          <button className="button" onClick={() => void taskAction(selectedTaskView.id, 'retry')}>Retry</button>
-          <button className="button button-danger" onClick={() => void taskAction(selectedTaskView.id, 'cancel')}>Cancel</button>
-        </div>
-        <div className="inline-actions">
-          <select value={selectedTaskTransition} onChange={(event) => setSelectedTaskTransition(event.target.value)}>
-            {TASK_STATUS_OPTIONS.map((status) => (
-              <option key={status} value={status}>{humanizeLabel(status)}</option>
-            ))}
-          </select>
-          <button className="button" onClick={() => void transitionTask(selectedTaskView.id)}>Transition</button>
-        </div>
-        <div className="form-stack">
-          <label className="field-label" htmlFor="task-blocker-input">Add blocker task ID</label>
-          <div className="inline-actions">
-            <input
-              id="task-blocker-input"
-              value={newDependencyId}
-              onChange={(event) => setNewDependencyId(event.target.value)}
-              placeholder="task-xxxxxxxxxx"
-            />
-            <button className="button" onClick={() => void addDependency(selectedTaskView.id)}>Add dependency</button>
-          </div>
-          {(selectedTaskView.blocked_by || []).map((depId) => (
-            <div className="row-card" key={depId}>
-              <p className="task-meta">{depId}</p>
-              <button className="button button-danger" onClick={() => void removeDependency(selectedTaskView.id, depId)}>
-                Remove
-              </button>
-            </div>
-          ))}
-          <div className="inline-actions">
-            <button
-              className="button"
-              onClick={() => void analyzeDependencies()}
-              disabled={dependencyActionLoading}
-            >
-              Analyze dependencies
-            </button>
-            <button
-              className="button"
-              onClick={() => void resetDependencyAnalysis(selectedTaskView.id)}
-              disabled={dependencyActionLoading}
-            >
-              Reset inferred deps
-            </button>
-          </div>
-          {dependencyActionMessage ? <p className="field-label">{dependencyActionMessage}</p> : null}
-        </div>
-        <div className="list-stack">
-          <p className="field-label">Collaboration timeline</p>
-          {collaborationLoading ? <p className="field-label">Loading collaboration activity...</p> : null}
-          {collaborationTimeline.slice(0, 8).map((event) => (
-            <div className="row-card" key={event.id}>
-              <div>
-                <p className="task-title">{event.summary || humanizeLabel(event.type)}</p>
-                <p className="task-meta">{humanizeLabel(event.type)} · {event.actor} · {toLocaleTimestamp(event.timestamp) || '-'}</p>
+        {taskDetailTab === 'dependencies' ? (
+          <div className="task-detail-section-body">
+            <div className="dependency-graph-panel">
+              <p className="field-label">Dependency graph</p>
+              <div className="dependency-graph-grid">
+                <div className="dependency-graph-column">
+                  <p className="field-label">Depends on</p>
+                  {blockerIds.length > 0 ? (
+                    blockerIds.map((depId) => {
+                      const dep = describeTask(depId, taskIndex)
+                      return (
+                        <div className="dependency-node dependency-node-blocker" key={`blocker-${depId}`} onClick={() => handleTaskSelect(depId)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleTaskSelect(depId) } }} role="button" tabIndex={0} style={{ cursor: 'pointer' }}>
+                          <p className="dependency-node-title">{dep.label}</p>
+                          <p className="dependency-node-meta">{humanizeLabel(dep.status)} {'->'} depends on</p>
+                        </div>
+                      )
+                    })
+                  ) : (
+                    <p className="empty">No dependencies</p>
+                  )}
+                </div>
+                <div className="dependency-graph-column dependency-graph-center">
+                  <p className="field-label">Selected task</p>
+                  <div className="dependency-node dependency-node-current">
+                    <p className="dependency-node-title">{selectedTaskView.title} ({selectedTaskView.id})</p>
+                    <p className="dependency-node-meta">{humanizeLabel(selectedTaskView.status)}</p>
+                  </div>
+                </div>
+                <div className="dependency-graph-column">
+                  <p className="field-label">Blocks</p>
+                  {blockedIds.length > 0 ? (
+                    blockedIds.map((depId) => {
+                      const dep = describeTask(depId, taskIndex)
+                      return (
+                        <div className="dependency-node dependency-node-dependent" key={`dependent-${depId}`} onClick={() => handleTaskSelect(depId)} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleTaskSelect(depId) } }} role="button" tabIndex={0} style={{ cursor: 'pointer' }}>
+                          <p className="dependency-node-title">{dep.label}</p>
+                          <p className="dependency-node-meta">depends on current task · {humanizeLabel(dep.status)}</p>
+                        </div>
+                      )
+                    })
+                  ) : (
+                    <p className="empty">No dependents</p>
+                  )}
+                </div>
               </div>
-              {event.details ? <p className="task-desc">{event.details}</p> : null}
-              {event.human_blocking_issues && event.human_blocking_issues.length > 0 ? (
-                <div className="list-stack">
-                  <p className="field-label">Required human input</p>
-                  {event.human_blocking_issues.map((issue, idx) => (
-                    <p className="task-meta" key={`${event.id}-issue-${idx}`}>- {issue.summary}</p>
+              {blockerIds.length > 0 || blockedIds.length > 0 ? (
+                <div className="dependency-edge-list">
+                  {blockerIds.map((depId) => (
+                    <p key={`edge-in-${depId}`} className="dependency-edge">
+                      {describeTask(depId, taskIndex).label} {'->'} {selectedTaskView.id}
+                    </p>
+                  ))}
+                  {blockedIds.map((depId) => (
+                    <p key={`edge-out-${depId}`} className="dependency-edge">
+                      {selectedTaskView.id} {'->'} {describeTask(depId, taskIndex).label}
+                    </p>
                   ))}
                 </div>
               ) : null}
             </div>
-          ))}
-          {collaborationTimeline.length === 0 && !collaborationLoading ? <p className="empty">No collaboration events for this task yet.</p> : null}
-        </div>
-        <div className="list-stack">
-          <p className="field-label">Feedback</p>
-          <div className="form-stack">
-            <label className="field-label" htmlFor="feedback-summary">Summary</label>
-            <input
-              id="feedback-summary"
-              value={feedbackSummary}
-              onChange={(event) => setFeedbackSummary(event.target.value)}
-              placeholder="What should change?"
-            />
-            <div className="inline-actions">
-              <select value={feedbackType} onChange={(event) => setFeedbackType(event.target.value)} aria-label="Feedback type">
-                <option value="general">General</option>
-                <option value="bug">Bug</option>
-                <option value="nit">Nit</option>
-                <option value="question">Question</option>
-              </select>
-              <select value={feedbackPriority} onChange={(event) => setFeedbackPriority(event.target.value)} aria-label="Feedback priority">
-                <option value="must">Must</option>
-                <option value="should">Should</option>
-                <option value="could">Could</option>
-              </select>
-            </div>
-            <label className="field-label" htmlFor="feedback-details">Details</label>
-            <textarea
-              id="feedback-details"
-              rows={3}
-              value={feedbackDetails}
-              onChange={(event) => setFeedbackDetails(event.target.value)}
-            />
-            <label className="field-label" htmlFor="feedback-file">Target file (optional)</label>
-            <input
-              id="feedback-file"
-              value={feedbackTargetFile}
-              onChange={(event) => setFeedbackTargetFile(event.target.value)}
-              placeholder="src/path/file.ts"
-            />
-            <button className="button" onClick={() => void submitFeedback(selectedTaskView.id)}>
-              Add feedback
-            </button>
-          </div>
-          {collaborationFeedback.map((item) => (
-            <div className="row-card" key={item.id}>
-              <div>
-                <p className="task-title">{item.summary}</p>
-                <p className="task-meta">
-                  {humanizeLabel(item.feedback_type)} · {humanizeLabel(item.priority)} · {humanizeLabel(item.status)}
-                </p>
-                {item.details ? <p className="task-desc">{item.details}</p> : null}
-                {item.target_file ? <p className="task-meta">file: {item.target_file}</p> : null}
+            <div className="form-stack">
+              <label className="field-label" htmlFor="task-blocker-input">Add dependency task ID</label>
+              <div className="inline-actions">
+                <input
+                  id="task-blocker-input"
+                  value={newDependencyId}
+                  onChange={(event) => setNewDependencyId(event.target.value)}
+                  placeholder="task-xxxxxxxxxx"
+                />
+                <button className="button" onClick={() => void addDependency(selectedTaskView.id)}>Add dependency</button>
               </div>
-              {item.status !== 'addressed' ? (
-                <button className="button" onClick={() => void dismissFeedback(selectedTaskView.id, item.id)}>
-                  Dismiss
+              {(selectedTaskView.blocked_by || []).map((depId) => (
+                <div className="row-card" key={depId}>
+                  <p className="task-meta">{depId}</p>
+                  <button className="button button-danger" onClick={() => void removeDependency(selectedTaskView.id, depId)}>
+                    Remove
+                  </button>
+                </div>
+              ))}
+              <div className="inline-actions">
+                <button
+                  className="button"
+                  onClick={() => void analyzeDependencies()}
+                  disabled={dependencyActionLoading}
+                >
+                  Analyze dependencies
                 </button>
-              ) : null}
-            </div>
-          ))}
-          {collaborationFeedback.length === 0 ? <p className="empty">No feedback yet.</p> : null}
-        </div>
-        <div className="list-stack">
-          <p className="field-label">Comments</p>
-          <div className="form-stack">
-            <label className="field-label" htmlFor="comment-file-path">File path</label>
-            <input
-              id="comment-file-path"
-              value={commentFilePath}
-              onChange={(event) => setCommentFilePath(event.target.value)}
-              placeholder="src/path/file.ts"
-            />
-            <label className="field-label" htmlFor="comment-line-number">Line number</label>
-            <input
-              id="comment-line-number"
-              value={commentLineNumber}
-              onChange={(event) => setCommentLineNumber(event.target.value)}
-              inputMode="numeric"
-            />
-            <label className="field-label" htmlFor="comment-body">Comment</label>
-            <textarea
-              id="comment-body"
-              rows={3}
-              value={commentBody}
-              onChange={(event) => setCommentBody(event.target.value)}
-            />
-            <button className="button" onClick={() => void submitComment(selectedTaskView.id)}>
-              Add comment
-            </button>
-          </div>
-          {collaborationComments.map((comment) => (
-            <div className="row-card" key={comment.id}>
-              <div>
-                <p className="task-title">{comment.file_path}:{comment.line_number}</p>
-                <p className="task-meta">{comment.author || 'human'} · {toLocaleTimestamp(comment.created_at) || '-'}</p>
-                <p className="task-desc">{comment.body}</p>
-                {comment.resolved ? <p className="task-meta">Resolved</p> : null}
+                <button
+                  className="button"
+                  onClick={() => void resetDependencyAnalysis(selectedTaskView.id)}
+                  disabled={dependencyActionLoading}
+                >
+                  Reset inferred deps
+                </button>
               </div>
-              {!comment.resolved ? (
-                <button className="button" onClick={() => void resolveComment(selectedTaskView.id, comment.id)}>
-                  Resolve
-                </button>
-              ) : null}
+              {dependencyActionMessage ? <p className="field-label">{dependencyActionMessage}</p> : null}
             </div>
-          ))}
-          {collaborationComments.length === 0 ? <p className="empty">No comments yet.</p> : null}
-        </div>
-        {collaborationError ? <p className="error-banner">{collaborationError}</p> : null}
-        <p className="field-label">Activity: Review queue size is {reviewQueue.length}. Trigger actions from Review Queue.</p>
+          </div>
+        ) : null}
+        {taskDetailTab === 'activity' ? (
+          <div className="task-detail-section-body">
+            <div className="list-stack">
+              {collaborationLoading ? <p className="field-label">Loading activity...</p> : null}
+              {collaborationTimeline.slice(0, 8).map((event) => (
+                <div className="row-card timeline-event-card" key={event.id}>
+                  <div>
+                    <p className="task-title">{event.summary || humanizeLabel(event.type)}</p>
+                    <p className="task-meta">{humanizeLabel(event.type)} · {event.actor} · {toLocaleTimestamp(event.timestamp) || '-'}</p>
+                  </div>
+                  {event.details ? <RenderedMarkdown content={event.details} className="task-desc" /> : null}
+                  {event.human_blocking_issues && event.human_blocking_issues.length > 0 ? (
+                    <div className="list-stack">
+                      <p className="field-label">Required human input</p>
+                      {event.human_blocking_issues.map((issue, idx) => (
+                        <p className="task-meta" key={`${event.id}-issue-${idx}`}>- {issue.summary}</p>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ))}
+              {collaborationTimeline.length === 0 && !collaborationLoading ? <p className="empty">No activity for this task yet.</p> : null}
+              {collaborationError ? <p className="error-banner">{collaborationError}</p> : null}
+            </div>
+          </div>
+        ) : null}
+        {taskDetailTab === 'logs' ? (() => {
+          const hasTaskLogs = !!(stdoutHistory || stderrHistory || stdoutRawHistory || stderrRawHistory) || (!!selectedTaskLogs && (selectedTaskLogs.mode !== 'none' || !!selectedTaskLogs.stdout || !!selectedTaskLogs.stderr))
+          const progressEntries = formatProgressEntries(selectedTaskLogs?.progress)
+          const availableSteps = selectedTaskLogs?.available_steps || []
+          const stepCounts = selectedTaskLogs?.step_execution_counts || {}
+          const activeLogStep = logViewStep || selectedTaskLogs?.step || ''
+          const latestStep = selectedTaskLogs?.current_step || selectedTaskView.current_step || ''
+          const taskIsRunning = selectedTaskView.status === 'in_progress' || selectedTaskView.status === 'queued'
+          const totalExecutions = Object.values(stepCounts).reduce((a, b) => a + b, 0)
+          const extraSteps = totalExecutions - Object.keys(stepCounts).length
+          return (
+            <div className="task-detail-section-body">
+              {availableSteps.length > 1 ? (
+                <div className="log-step-selector">
+                  {availableSteps.map((s) => {
+                    const isViewed = s === activeLogStep
+                    const isLatest = s === latestStep
+                    const count = stepCounts[s] || 0
+                    const cls = `log-step-pill${isViewed ? ' is-active' : ''}${isLatest ? ' is-latest' : ''}`
+                    return (
+                      <button
+                        key={s}
+                        className={cls}
+                        onClick={() => switchLogStep(s === activeLogStep ? '' : s)}
+                      >
+                        {humanizeLabel(s)}{count > 1 ? <span className="log-step-count">{'\u00d7'}{count}</span> : null}{isLatest && taskIsRunning ? <span className="log-step-live-dot" /> : null}
+                      </button>
+                    )
+                  })}
+                  {logViewStep ? (
+                    <button className="log-step-pill" onClick={() => switchLogStep('')}>Latest</button>
+                  ) : null}
+                  {extraSteps > 0 ? (
+                    <span className="log-step-summary">{totalExecutions} steps run · {extraSteps} {extraSteps === 1 ? 'retry' : 'retries'}</span>
+                  ) : null}
+                </div>
+              ) : null}
+              <p className="task-meta">
+                Source: {humanizeLabel(selectedTaskLogs?.mode || 'none')}
+                {selectedTaskLogs?.step ? ` · step: ${selectedTaskLogs.step}` : ''}
+                {selectedTaskLogs?.started_at ? ` · started: ${toLocaleTimestamp(selectedTaskLogs.started_at) || selectedTaskLogs.started_at}` : ''}
+                {selectedTaskLogs?.finished_at ? ` · finished: ${toLocaleTimestamp(selectedTaskLogs.finished_at) || selectedTaskLogs.finished_at}` : ''}
+              </p>
+              {selectedTaskLogsLoading ? <p className="field-label">Loading logs...</p> : null}
+              {selectedTaskLogsError ? <p className="error-banner">{selectedTaskLogsError}</p> : null}
+              {progressEntries.length > 0 ? (
+                <div className="preview-box">
+                  <p className="field-label">Run snapshot</p>
+                  {progressEntries.map((item) => (
+                    <p className="task-meta" key={`detail-log-progress-${item.key}`}>
+                      <strong>{humanizeLabel(item.key)}:</strong> {item.value}
+                    </p>
+                  ))}
+                </div>
+              ) : null}
+              {hasTaskLogs ? (
+                <div className="task-log-grid">
+                  <div className="task-log-pane">
+                    <p className="field-label">Stdout{stdoutRenderStats.structured ? ' (rendered)' : ''}</p>
+                    {stdoutRenderStats.structured ? (
+                      <p className="task-meta">Parsed {stdoutRenderStats.parsedLines} JSON lines · {stdoutRenderStats.streamEvents} stream events</p>
+                    ) : null}
+                    <pre className="task-log-output" ref={stdoutPreRef} onScroll={() => handleLogPaneScroll('stdout')}>{stdoutHistory || '(empty)'}</pre>
+                  </div>
+                  <div className="task-log-pane">
+                    <p className="field-label">Stderr</p>
+                    <pre className="task-log-output" ref={stderrPreRef} onScroll={() => handleLogPaneScroll('stderr')}>{stderrHistory || '(empty)'}</pre>
+                  </div>
+                </div>
+              ) : (
+                <p className="empty">No logs available.</p>
+              )}
+            </div>
+          )
+        })() : null}
+        {taskDetailTab === 'changes' ? (
+          <div className="task-detail-section-body">
+            {taskDiffLoading ? <p className="field-label">Loading diff...</p> : null}
+            {!taskDiffLoading && taskDiff && !taskDiff.commit ? (
+              <p className="empty">No commit found for this task.</p>
+            ) : null}
+            {!taskDiffLoading && taskDiff && taskDiff.commit ? (() => {
+              // Split unified diff into per-file chunks
+              const fileChunks: { path: string; additions: number; deletions: number; lines: string[] }[] = []
+              if (taskDiff.diff) {
+                let current: { path: string; additions: number; deletions: number; lines: string[] } | null = null
+                for (const line of taskDiff.diff.split('\n')) {
+                  if (line.startsWith('diff --git ')) {
+                    if (current) fileChunks.push(current)
+                    const match = line.match(/diff --git a\/.+ b\/(.+)/)
+                    current = { path: match ? match[1] : '?', additions: 0, deletions: 0, lines: [line] }
+                  } else if (current) {
+                    current.lines.push(line)
+                    if (line.startsWith('+') && !line.startsWith('+++')) current.additions++
+                    else if (line.startsWith('-') && !line.startsWith('---')) current.deletions++
+                  }
+                }
+                if (current) fileChunks.push(current)
+              }
+              return (
+                <>
+                  <p className="task-meta">Commit: <code>{taskDiff.commit.slice(0, 12)}</code> · {taskDiff.files.length} file{taskDiff.files.length !== 1 ? 's' : ''} changed</p>
+                  {fileChunks.length > 0 ? (
+                    <div className="diff-file-sections">
+                      {fileChunks.map((chunk) => (
+                        <details key={chunk.path} className="diff-file-section" open>
+                          <summary className="diff-file-header">
+                            <code className="diff-file-name">{chunk.path}</code>
+                            <span className="diff-file-stats">
+                              {chunk.additions > 0 ? <span className="diff-stat-add">+{chunk.additions}</span> : null}
+                              {chunk.deletions > 0 ? <span className="diff-stat-del">-{chunk.deletions}</span> : null}
+                            </span>
+                          </summary>
+                          <pre className="diff-content">{chunk.lines.map((line, i) => {
+                            const cls = line.startsWith('+++') || line.startsWith('---') ? 'diff-line-meta'
+                              : line.startsWith('@@') ? 'diff-line-hunk'
+                              : line.startsWith('+') ? 'diff-line-add'
+                              : line.startsWith('-') ? 'diff-line-del'
+                              : line.startsWith('diff ') ? 'diff-line-meta'
+                              : ''
+                            return <span key={i} className={cls}>{line}{'\n'}</span>
+                          })}</pre>
+                        </details>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="empty">No diff content available.</p>
+                  )}
+                </>
+              )
+            })() : null}
+          </div>
+        ) : null}
       </div>
     ) : (
       <p className="empty">No tasks on board yet.</p>
     )
+
+  function renderBoard(): JSX.Element {
     return (
       <section className="panel">
         <header className="panel-head">
           <h2>Board</h2>
+          <label className="switch-label"><input type="checkbox" role="switch" checked={boardCompact} onChange={() => setBoardCompact((v) => !v)} /> Compact</label>
         </header>
-        <div className="workbench-grid">
-          <article className="workbench-pane">
-            <h3>Kanban</h3>
-            <p className="field-label board-mobile-hint">Tap any task card to open full detail.</p>
-            <div className="board-grid">
-              {columns.map((column) => (
-                <article className="board-col" key={column}>
-                  <h3>{humanizeLabel(column)}</h3>
-                  <div className="card-list">
-                    {(board.columns[column] || []).map((task) => (
-                      <button className="task-card task-card-button" key={task.id} onClick={() => handleTaskSelect(task.id)}>
-                        <p className="task-title">{task.title}</p>
-                        <p className="task-meta">{task.priority} · {task.id}</p>
-                        {task.description ? <p className="task-desc">{task.description}</p> : null}
-                      </button>
-                    ))}
-                  </div>
-                </article>
-              ))}
-            </div>
-          </article>
-          <article className="workbench-pane">
-            <h3>Task Detail</h3>
-            {mobileTaskDetailOpen ? <p className="field-label">Task detail is open in full-screen mode.</p> : taskDetailContent}
-          </article>
-          <article className="workbench-pane">
-            <h3>Queue & Workers</h3>
-            <div className="list-stack">
-              <p className="field-label">Queue depth: {orchestrator?.queue_depth ?? 0}</p>
-              <p className="field-label">In progress: {orchestrator?.in_progress ?? 0}</p>
-              {queueTasks.slice(0, 5).map((task) => (
-                <div key={task.id} className="row-card">
-                  <p className="task-title">{task.title}</p>
-                  <p className="task-meta">{humanizeLabel(task.status)}</p>
-                </div>
-              ))}
-              {queueTasks.length === 0 ? <p className="empty">No queued or running tasks.</p> : null}
-              <p className="field-label">Workers ({agents.length})</p>
-              {agents.slice(0, 4).map((agent) => (
-                <div key={agent.id} className="row-card">
-                  <p className="task-title">{humanizeLabel(agent.role)}</p>
-                  <p className="task-meta">{humanizeLabel(agent.status)}</p>
-                </div>
-              ))}
-              <TaskExplorerPanel
-                query={taskExplorerQuery}
-                status={taskExplorerStatus}
-                taskType={taskExplorerType}
-                priority={taskExplorerPriority}
-                onlyBlocked={taskExplorerOnlyBlocked}
-                loading={taskExplorerLoading}
-                error={taskExplorerError}
-                items={pagedExplorerItems}
-                page={taskExplorerPage}
-                pageSize={taskExplorerPageSize}
-                totalItems={totalExplorerItems}
-                statusOptions={TASK_STATUS_OPTIONS}
-                typeOptions={TASK_TYPE_OPTIONS}
-                onQueryChange={setTaskExplorerQuery}
-                onStatusChange={setTaskExplorerStatus}
-                onTypeChange={setTaskExplorerType}
-                onPriorityChange={setTaskExplorerPriority}
-                onOnlyBlockedChange={setTaskExplorerOnlyBlocked}
-                onPageChange={setTaskExplorerPage}
-                onPageSizeChange={setTaskExplorerPageSize}
-                onSelectTask={handleTaskSelect}
-                onRetry={() => void loadTaskExplorer()}
-              />
-            </div>
-          </article>
-        </div>
-        {mobileTaskDetailOpen ? (
-          <div className="modal-scrim mobile-detail-scrim" role="dialog" aria-modal="true" aria-label="Task detail">
-            <div className="modal-card mobile-task-detail-modal">
-              <header className="panel-head mobile-task-detail-head">
-                <h2>Task Detail</h2>
-                <button className="button" onClick={() => setMobileTaskDetailOpen(false)}>Close</button>
-              </header>
-              <div className="mobile-task-detail-body">
-                {taskDetailContent}
+        <div className="board-grid">
+          {boardColumns.map((column) => (
+            <article className="board-col" key={column}>
+              <h3>{humanizeLabel(column)}</h3>
+              <div className="card-list">
+                {(board.columns[column] || []).map((task) => (
+                  <button className={`task-card task-card-button${boardCompact ? ' task-card-compact' : ''}`} key={task.id} onClick={() => handleTaskSelect(task.id)}>
+                    <p className="task-title">{task.title}</p>
+                    {!boardCompact && <p className="task-meta">{task.priority} · {task.id.replace(/^task-/, '')}{task.parent_id ? ' · from plan' : ''}</p>}
+                    {!boardCompact && task.description ? <p className="task-desc">{task.description}</p> : null}
+                  </button>
+                ))}
               </div>
-            </div>
-          </div>
-        ) : null}
+            </article>
+          ))}
+        </div>
+        <div className="board-summary">
+          <span className="field-label">Queue: {orchestrator?.queue_depth ?? 0}</span>
+          <span className="field-label">In progress: {orchestrator?.in_progress ?? 0}</span>
+          <span className="field-label">Workers: {agents.length}</span>
+        </div>
       </section>
     )
   }
@@ -2769,42 +4081,67 @@ export default function App() {
         taskById.set(task.id, task)
       }
     }
+    const blockedCount = (board.columns.blocked || []).length
     return (
       <section className="panel">
         <header className="panel-head">
-          <h2>Execution</h2>
+          <h2>Execution <span className={`status-pill status-pill-inline ${orchestrator?.status === 'running' ? (orchestrator?.draining ? 'status-blocked' : 'status-running') : orchestrator?.status === 'paused' ? 'status-paused' : 'status-failed'}`} style={{ verticalAlign: 'middle' }}>{humanizeLabel(orchestrator?.status === 'running' && orchestrator?.draining ? 'draining' : orchestrator?.status ?? 'unknown')}</span></h2>
           <div className="inline-actions">
-            <button className="button" onClick={() => void controlOrchestrator('pause')}>Pause</button>
-            <button className="button" onClick={() => void controlOrchestrator('resume')}>Resume</button>
-            <button className="button" onClick={() => void controlOrchestrator('drain')}>Drain</button>
-            <button className="button button-danger" onClick={() => void controlOrchestrator('stop')}>Stop</button>
+            {orchestrator?.status === 'running' ? <button className="button" onClick={() => void controlOrchestrator('pause')}>Pause Queue</button> : null}
+            {orchestrator?.status === 'paused' || orchestrator?.status === 'stopped' ? <button className="button" onClick={() => void controlOrchestrator('resume')}>Start Queue</button> : null}
+            {orchestrator?.status === 'running' && !orchestrator?.draining ? <button className="button" onClick={() => void controlOrchestrator('drain')}>Finish &amp; Stop</button> : null}
+            {orchestrator?.status !== 'stopped' ? <button className="button button-danger" onClick={() => void controlOrchestrator('stop')}>Stop Queue</button> : null}
           </div>
         </header>
         <div className="status-grid">
-          <div className="status-card">
-            <span>State</span>
-            <strong>{humanizeLabel(orchestrator?.status ?? 'unknown')}</strong>
-          </div>
-          <div className="status-card">
+          <button className={`status-card status-card-clickable${pipelineHighlightStatus === 'queued' ? ' status-card-active' : ''}`} onClick={() => setPipelineHighlightStatus((prev) => prev === 'queued' ? '' : 'queued')}>
             <span>Queue</span>
             <strong>{orchestrator?.queue_depth ?? 0}</strong>
-          </div>
-          <div className="status-card">
+          </button>
+          <button className={`status-card status-card-clickable${pipelineHighlightStatus === 'in_progress' ? ' status-card-active' : ''}`} onClick={() => setPipelineHighlightStatus((prev) => prev === 'in_progress' ? '' : 'in_progress')}>
             <span>In Progress</span>
             <strong>{orchestrator?.in_progress ?? 0}</strong>
-          </div>
-          <div className="status-card">
-            <span>Run Branch</span>
-            <strong>{orchestrator?.run_branch || '-'}</strong>
-          </div>
+          </button>
+          <button className={`status-card status-card-clickable${pipelineHighlightStatus === 'blocked' ? ' status-card-active' : ''}`} onClick={() => setPipelineHighlightStatus((prev) => prev === 'blocked' ? '' : 'blocked')}>
+            <span>Blocked</span>
+            <strong>{blockedCount}</strong>
+          </button>
         </div>
         <div className="list-stack">
-          <p className="field-label">Runtime metrics</p>
+          <p className="field-label section-heading">Execution pipeline</p>
+          {executionBatches.map((batch, index) => (
+            <div className="wave-card" key={`batch-${index}`}>
+              <div className="wave-label">
+                <p className="wave-title">Wave {index + 1}</p>
+                <p className="wave-count">{batch.length} {batch.length === 1 ? 'task' : 'tasks'}</p>
+              </div>
+              <div className="wave-tasks">
+                {batch.map((taskId, i) => {
+                  const task = taskById.get(taskId)
+                  const label = task?.title || taskId
+                  const status = task?.status || ''
+                  return (
+                    <span key={`batch-${index}-${taskId}`} className="wave-task-item">
+                      {i > 0 ? <span className="wave-sep">|</span> : null}
+                      <span className={`wave-task-content${pipelineHighlightStatus && status === pipelineHighlightStatus ? ' wave-task-highlight' : ''}`}>
+                        <button className="link-button" onClick={() => handleTaskSelect(taskId, 'logs')}>{label}</button>
+                        {status ? <span className={`status-pill status-pill-inline ${statusPillClass(status)}`}>{humanizeLabel(status)}</span> : null}
+                      </span>
+                    </span>
+                  )
+                })}
+              </div>
+            </div>
+          ))}
+          {executionBatches.length === 0 ? <p className="empty">No execution batches available.</p> : null}
+        </div>
+        <div className="list-stack">
+          <p className="field-label section-heading">Runtime metrics</p>
           <div className="row-card">
             <p className="task-meta">
               API calls: {metrics?.api_calls ?? 0} ·
               wall time: {metrics?.wall_time_seconds ?? 0}s ·
-              phases: {metrics?.phases_completed ?? 0}/{metrics?.phases_total ?? 0}
+              steps: {metrics?.phases_completed ?? 0}/{metrics?.phases_total ?? 0}
             </p>
             <p className="task-meta">
               tokens: {metrics?.tokens_used ?? 0} ·
@@ -2812,71 +4149,6 @@ export default function App() {
               files changed: {metrics?.files_changed ?? 0}
             </p>
           </div>
-        </div>
-        <div className="list-stack">
-          <p className="field-label">Execution order</p>
-          {executionBatches.map((batch, index) => (
-            <div className="row-card" key={`batch-${index}`}>
-              <p className="task-title">Batch {index + 1}</p>
-              <p className="task-meta">{batch.map((taskId) => taskById.get(taskId)?.title || taskId).join(' | ')}</p>
-            </div>
-          ))}
-          {executionBatches.length === 0 ? <p className="empty">No execution batches available.</p> : null}
-        </div>
-        <ParallelPlanView projectDir={projectDir} />
-        <div className="list-stack phase-list">
-          <p className="field-label">Phase timeline</p>
-          {phases.map((phase) => {
-            const progressPercent = Math.round((phase.progress || 0) * 100)
-            return (
-              <div className="phase-card" key={phase.id}>
-                <div className="phase-head">
-                  <p className="task-title">{phase.name}</p>
-                  <p className="task-meta">{humanizeLabel(phase.status)}</p>
-                </div>
-                {phase.description ? <p className="task-desc">{phase.description}</p> : null}
-                <div className="phase-progress-track">
-                  <span className="phase-progress-fill" style={{ width: `${progressPercent}%` }} />
-                </div>
-                <p className="task-meta">
-                  {progressPercent}% complete · {phase.deps.length > 0 ? `deps: ${phase.deps.join(', ')}` : 'no blockers'}
-                </p>
-              </div>
-            )
-          })}
-          {phases.length === 0 ? <p className="empty">No phases available.</p> : null}
-        </div>
-      </section>
-    )
-  }
-
-  function renderReviewQueue(): JSX.Element {
-    return (
-      <section className="panel">
-        <header className="panel-head">
-          <h2>Review Queue</h2>
-        </header>
-        <div className="list-stack">
-          <label className="field-label" htmlFor="review-guidance">Optional review guidance</label>
-          <input
-            id="review-guidance"
-            value={reviewGuidance}
-            onChange={(event) => setReviewGuidance(event.target.value)}
-            placeholder="What should be fixed or accepted?"
-          />
-          {reviewQueue.map((task) => (
-            <div className="row-card" key={task.id}>
-              <div>
-                <p className="task-title">{task.title}</p>
-                <p className="task-meta">{task.id}</p>
-              </div>
-              <div className="inline-actions json-editor-actions">
-                <button className="button" onClick={() => void reviewAction(task.id, 'request-changes')}>Request changes</button>
-                <button className="button button-primary" onClick={() => void reviewAction(task.id, 'approve')}>Approve</button>
-              </div>
-            </div>
-          ))}
-          {reviewQueue.length === 0 ? <p className="empty">No tasks waiting for review.</p> : null}
         </div>
       </section>
     )
@@ -2923,7 +4195,7 @@ export default function App() {
     const stepLabel = (step: string): string => {
       const normalized = String(step || '').trim().toLowerCase()
       if (normalized === 'plan') return 'Task Planning'
-      if (normalized === 'plan_impl') return 'Execution Plan'
+
       return humanizeLabel(normalized)
     }
 
@@ -3167,7 +4439,7 @@ export default function App() {
 
           <article className="settings-card settings-card-routing">
             <h3>Execution & Routing</h3>
-            <form className="form-stack" onSubmit={(event) => void saveSettings(event)}>
+            <form id="settings-main-form" className="form-stack" onSubmit={(event) => void saveSettings(event)}>
               <label className="field-label" htmlFor="settings-concurrency">Orchestrator concurrency</label>
               <input
                 id="settings-concurrency"
@@ -3467,26 +4739,319 @@ export default function App() {
                   </div>
                 </div>
               </div>
-              <div className="inline-actions">
-                <button className="button button-primary" type="submit" disabled={settingsSaving}>
-                  {settingsSaving ? 'Saving...' : 'Save settings'}
-                </button>
-                <button className="button" type="button" onClick={() => void loadSettings()} disabled={settingsLoading}>
-                  {settingsLoading ? 'Loading...' : 'Reload settings'}
-                </button>
+              <p className="settings-subheading">Dependency Policy</p>
+              <p className="field-label">
+                Controls whether workers may install new dependencies. Applies as the default for newly created tasks.
+              </p>
+              <div className="toggle-group" role="group" aria-label="Default dependency policy">
+                {(['permissive', 'prudent', 'strict'] as const).map((level) => (
+                  <button
+                    key={level}
+                    type="button"
+                    className={`toggle-button ${settingsDependencyPolicy === level ? 'is-active' : ''}`}
+                    aria-pressed={settingsDependencyPolicy === level}
+                    onClick={() => setSettingsDependencyPolicy(level)}
+                  >
+                    {humanizeLabel(level)}
+                  </button>
+                ))}
               </div>
-              {settingsError ? <p className="error-banner">{settingsError}</p> : null}
-              {settingsSuccess ? <p className="field-label">{settingsSuccess}</p> : null}
+              <p className="field-label">
+                {settingsDependencyPolicy === 'permissive' && 'Workers will prefer well-maintained libraries over manual implementation and install what they need.'}
+                {settingsDependencyPolicy === 'prudent' && 'Workers will prefer existing dependencies but may install new ones when manual implementation would be unreliable or disproportionately complex.'}
+                {settingsDependencyPolicy === 'strict' && 'Workers must not install any new dependencies. All solutions must use only what is already in the project.'}
+              </p>
             </form>
           </article>
+        </div>
+        <div className="settings-sticky-footer">
+          <div className="inline-actions">
+            <button className="button button-primary" type="submit" form="settings-main-form" disabled={settingsSaving}>
+              {settingsSaving ? 'Saving...' : 'Save settings'}
+            </button>
+            <button className="button" type="button" onClick={() => void loadSettings()} disabled={settingsLoading}>
+              {settingsLoading ? 'Loading...' : 'Reload settings'}
+            </button>
+          </div>
+          {settingsError ? <p className="error-banner">{settingsError}</p> : null}
+          {settingsSuccess ? <p className="field-label">{settingsSuccess}</p> : null}
+        </div>
+      </section>
+    )
+  }
+
+  function renderPlanning(): JSX.Element {
+    const allTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => t.task_type === 'plan' || t.task_type === 'plan_only')
+    const planningTask = allTasks.find((t) => t.id === planningTaskId) || null
+    const planRevisions = selectedTaskPlan?.revisions || []
+    const selectedPlanRevision = selectedPlanRevisionId
+      ? (planRevisions.find((item) => item.id === selectedPlanRevisionId) || null)
+      : null
+    const latestPlanRevision = selectedTaskPlan?.latest_revision_id
+      ? (planRevisions.find((item) => item.id === selectedTaskPlan.latest_revision_id) || null)
+      : null
+    const effectiveWorkerPlanRevision = selectedPlanRevision || latestPlanRevision
+    const selectedPlanParentRevision = effectiveWorkerPlanRevision?.parent_revision_id
+      ? planRevisions.find((item) => item.id === effectiveWorkerPlanRevision.parent_revision_id) || null
+      : null
+    const selectedPlanDiff = effectiveWorkerPlanRevision && selectedPlanParentRevision
+      ? summarizePlanDiff(effectiveWorkerPlanRevision.content || '', selectedPlanParentRevision.content || '')
+      : null
+    const effectiveGenerateRevisionId = planGenerateRevisionId || selectedPlanRevisionId || selectedTaskPlan?.latest_revision_id || ''
+    const workerPlanContent = (effectiveWorkerPlanRevision?.content || selectedTaskPlan?.latest?.content || '').trim()
+    const isRefining = !!(selectedTaskPlan?.active_refine_job
+      && (selectedTaskPlan.active_refine_job.status === 'queued' || selectedTaskPlan.active_refine_job.status === 'running'))
+    const workerOutputDisplay = planRefineStdout || ' '
+    const generateOutputDisplay = planGenerateStdout || ' '
+
+    function selectPlanningTask(taskId: string): void {
+      setPlanningTaskId(taskId)
+      setSelectedTaskId(taskId)
+      setPlanActionMessage('')
+      setPlanActionError('')
+    }
+
+    function openCreatePlanTaskModal(): void {
+      setCreateTab('task')
+      setNewTaskType('plan')
+      setWorkOpen(true)
+    }
+
+    return (
+      <section className="panel">
+        <header className="panel-head">
+          <h2>Planning</h2>
+          <div className="inline-actions">
+            <button className="button button-primary" onClick={openCreatePlanTaskModal}>Create Plan</button>
+          </div>
+        </header>
+        <div className="planning-layout">
+          <aside className="planning-task-list">
+            <p className="field-label">Select a planning task</p>
+            <div className="list-stack">
+              {allTasks.map((task) => (
+                <button
+                  key={task.id}
+                  className={`task-card task-card-button ${planningTaskId === task.id ? 'is-selected' : ''}`}
+                  onClick={() => selectPlanningTask(task.id)}
+                >
+                  <p className="task-title">{task.title}</p>
+                  <p className="task-meta">{task.priority} · {humanizeLabel(task.status)} · {humanizeLabel(task.task_type || 'feature')}{(task.children_ids?.length ?? 0) > 0 ? ` · ${task.children_ids!.length} tasks generated` : ''}</p>
+                </button>
+              ))}
+              {allTasks.length === 0 ? <p className="empty">No planning tasks yet. Create one with "Create Plan".</p> : null}
+            </div>
+          </aside>
+          <div className="planning-content">
+            {planningTask ? (
+              <div className="list-stack">
+                <p className="task-title">{planningTask.title}</p>
+                <p className="task-meta">{planningTask.id} · {humanizeLabel(planningTask.status)}</p>
+                {isRefining ? (
+                  <div className="refine-banner">
+                    <span className="refine-banner-dot" />
+                    <span>Refining plan{selectedTaskPlan?.active_refine_job?.id ? ` · ${selectedTaskPlan.active_refine_job.id}` : ''}</span>
+                  </div>
+                ) : null}
+                <div className="row-card">
+                  <p className="task-meta">
+                    Latest: {selectedTaskPlan?.latest_revision_id || '-'} · Committed: {selectedTaskPlan?.committed_revision_id || '-'}
+                  </p>
+                </div>
+                <label className="field-label" htmlFor="planning-revision-selector">Select revision</label>
+                <select
+                  id="planning-revision-selector"
+                  value={selectedPlanRevisionId}
+                  onChange={(event) => {
+                    setSelectedPlanRevisionId(event.target.value)
+                    setPlanGenerateRevisionId(event.target.value)
+                  }}
+                >
+                  <option value="">(latest)</option>
+                  {planRevisions.map((revision) => (
+                    <option key={revision.id} value={revision.id}>
+                      {revision.id} · {humanizeLabel(revision.source)} · {toLocaleTimestamp(revision.created_at) || revision.created_at}
+                    </option>
+                  ))}
+                </select>
+                <div className="form-stack">
+                  <div className="detail-tabs planning-worker-tabs" role="tablist" aria-label="Worker plan panels">
+                    <button
+                      className={`detail-tab ${planningWorkerTab === 'plan' ? 'is-active' : ''}`}
+                      aria-pressed={planningWorkerTab === 'plan'}
+                      onClick={() => openPlanningWorkerTab(planningTask.id, 'plan', workerPlanContent)}
+                    >
+                      Worker Plan
+                    </button>
+                    <button
+                      className={`detail-tab ${planningWorkerTab === 'manual' ? 'is-active' : ''}`}
+                      aria-pressed={planningWorkerTab === 'manual'}
+                      onClick={() => openPlanningWorkerTab(planningTask.id, 'manual', workerPlanContent)}
+                    >
+                      Manual Revision
+                    </button>
+                  </div>
+                  {planningWorkerTab === 'plan' ? (
+                    workerPlanContent ? (
+                      <div className="preview-box">
+                        {effectiveWorkerPlanRevision ? (
+                          <p className="task-meta">
+                            {humanizeLabel(effectiveWorkerPlanRevision.source)}
+                            {effectiveWorkerPlanRevision.step ? ` · ${humanizeLabel(effectiveWorkerPlanRevision.step)}` : ''}
+                            {effectiveWorkerPlanRevision.provider ? ` · ${effectiveWorkerPlanRevision.provider}` : ''}
+                            {effectiveWorkerPlanRevision.model ? `/${effectiveWorkerPlanRevision.model}` : ''}
+                            {' · '}
+                            {humanizeLabel(effectiveWorkerPlanRevision.status)}
+                            {!selectedPlanRevisionId ? ' · latest' : ''}
+                          </p>
+                        ) : null}
+                        <RenderedMarkdown content={workerPlanContent} className="plan-content-field" />
+                        {selectedPlanDiff ? (
+                          <p className="task-meta">
+                            Compared to parent: +{selectedPlanDiff.added} / -{selectedPlanDiff.removed} lines
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <p className="empty">No worker plan yet.</p>
+                    )
+                  ) : (
+                    <div className="form-stack">
+                      <textarea
+                        id="planning-manual-content"
+                        className="plan-content-field"
+                        rows={20}
+                        value={planManualContent}
+                        onChange={(event) => setPlanManualContent(event.target.value)}
+                        placeholder="Paste or edit full plan text."
+                      />
+                      <div className="inline-actions">
+                        <button
+                          className="button"
+                          onClick={() => void saveManualPlanRevision(planningTask.id)}
+                          disabled={planSavingManual}
+                        >
+                          {planSavingManual ? 'Saving...' : 'Save Revision'}
+                        </button>
+                        <button
+                          className="button button-primary"
+                          onClick={() => void commitPlanRevision(planningTask.id, selectedPlanRevisionId || selectedTaskPlan?.latest_revision_id || '')}
+                          disabled={planCommitting}
+                        >
+                          {planCommitting ? 'Committing...' : 'Commit Selected Revision'}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="form-stack">
+                  <label className="field-label" htmlFor="planning-refine-feedback">Request changes from worker</label>
+                  <div className="planning-refine-inline">
+                    <input
+                      id="planning-refine-feedback"
+                      value={planRefineFeedback}
+                      onChange={(event) => setPlanRefineFeedback(event.target.value)}
+                      placeholder="Describe what should change in the plan."
+                    />
+                    <button
+                      className="button"
+                      onClick={() => void refineTaskPlan(planningTask.id)}
+                      disabled={planJobLoading || isRefining || !planRefineFeedback.trim()}
+                    >
+                      {planJobLoading ? 'Requesting changes...' : isRefining ? 'Requesting changes...' : 'Refine'}
+                    </button>
+                  </div>
+                  <div className="preview-box">
+                    <p className="field-label">Worker output{isRefining ? ' (live)' : ''}</p>
+                    <pre className="task-log-output plan-content-field planning-worker-output">{workerOutputDisplay}</pre>
+                  </div>
+                </div>
+
+                <div className="form-stack">
+                  <label className="field-label" htmlFor="planning-generate-source">Generate tasks from</label>
+                  <select
+                    id="planning-generate-source"
+                    value={planGenerateSource}
+                    onChange={(event) => setPlanGenerateSource(event.target.value as 'committed' | 'revision' | 'override' | 'latest')}
+                  >
+                    <option value="latest">Latest revision</option>
+                    <option value="committed">Committed revision</option>
+                    <option value="revision">Selected revision</option>
+                    <option value="override">Manual override text</option>
+                  </select>
+                  {planGenerateSource === 'revision' ? (
+                    <select
+                      value={effectiveGenerateRevisionId}
+                      onChange={(event) => setPlanGenerateRevisionId(event.target.value)}
+                      aria-label="Generate from revision"
+                    >
+                      <option value="">Select revision</option>
+                      {planRevisions.map((revision) => (
+                        <option key={`gen-${revision.id}`} value={revision.id}>{revision.id}</option>
+                      ))}
+                    </select>
+                  ) : null}
+                  {planGenerateSource === 'override' ? (
+                    <textarea
+                      rows={4}
+                      value={planGenerateOverride}
+                      onChange={(event) => setPlanGenerateOverride(event.target.value)}
+                      placeholder="Provide full plan text override."
+                      aria-label="Manual generate override"
+                    />
+                  ) : null}
+                  <label className="checkbox-row">
+                    <input
+                      type="checkbox"
+                      checked={planGenerateInferDeps}
+                      onChange={(event) => setPlanGenerateInferDeps(event.target.checked)}
+                    />
+                    Infer dependencies between generated tasks
+                  </label>
+                  <button
+                    className="button button-primary"
+                    onClick={() => void generateTasksFromPlan(planningTask.id)}
+                    disabled={planGenerateLoading}
+                  >
+                    {planGenerateLoading ? 'Generating...' : 'Generate Tasks'}
+                  </button>
+                  <div className="preview-box">
+                    <p className="field-label">Worker output{planGenerateLoading ? ' (live)' : ''}</p>
+                    <pre className="task-log-output plan-content-field planning-worker-output">{generateOutputDisplay}</pre>
+                  </div>
+                </div>
+
+                <div className="list-stack planning-job-history">
+                  <p className="field-label">Refine job history</p>
+                  {selectedTaskPlanJobs.map((job) => (
+                    <div className="refine-job-card" key={job.id}>
+                      <div className="refine-job-head">
+                        <span className={`status-pill ${job.status === 'completed' ? 'status-done' : job.status === 'failed' ? 'status-failed' : job.status === 'running' || job.status === 'queued' ? 'status-running' : 'status-paused'}`}>{humanizeLabel(job.status)}</span>
+                        <span className="task-meta">{toLocaleTimestamp(job.created_at) || job.created_at}</span>
+                      </div>
+                      {job.feedback ? <p className="refine-job-feedback">{job.feedback}</p> : null}
+                      {job.error ? <p className="refine-job-error">{job.error}</p> : null}
+                      <p className="task-meta">{job.id}{job.result_revision_id ? ` · result: ${job.result_revision_id}` : ''}</p>
+                    </div>
+                  ))}
+                  {selectedTaskPlanJobs.length === 0 ? <p className="empty">No refine jobs yet.</p> : null}
+                </div>
+                {planActionError ? <p className="error-banner">{planActionError}</p> : null}
+                {planActionMessage ? <p className="field-label">{planActionMessage}</p> : null}
+              </div>
+            ) : (
+              <p className="empty">Select a task to view its plan.</p>
+            )}
+          </div>
         </div>
       </section>
     )
   }
 
   function renderRoute(): JSX.Element {
+    if (route === 'planning') return renderPlanning()
     if (route === 'execution') return renderExecution()
-    if (route === 'review') return renderReviewQueue()
     if (route === 'agents') return renderAgents()
     if (route === 'settings') return renderSettings()
     return renderBoard()
@@ -3554,10 +5119,131 @@ export default function App() {
 
       <main className="main-content">{renderRoute()}</main>
 
+      {selectedTaskId && selectedTaskView && modalExplicitRef.current && !modalDismissedRef.current ? (
+        <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Task detail" onClick={(event) => { if (event.target === event.currentTarget) { modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') } }} onKeyDown={(event) => { if (event.key === 'Escape') { modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') } }}>
+          <div className="modal-card task-detail-modal">
+            <header className="task-detail-modal-head">
+              <div className="task-detail-modal-head-row">
+                <h2>{selectedTaskView.title}</h2>
+                <span className={`status-pill status-pill-prominent ${statusPillClass(taskStatus)}`}>{humanizeLabel(selectedTaskView.status)}</span>
+              </div>
+              {(selectedTaskView.pipeline_template || []).length > 0 ? (() => {
+                const pipelineSteps = selectedTaskView.pipeline_template!
+                const currentStep = selectedTaskView.current_step || null
+                const isDone = selectedTaskView.status === 'done' || selectedTaskView.status === 'in_review'
+                const currentIdx = currentStep ? pipelineSteps.indexOf(currentStep) : -1
+                return (
+                  <div className="pipeline-flow">
+                    {pipelineSteps.map((step, idx) => {
+                      const isCurrent = step === currentStep && !isDone
+                      const isCompleted = isDone || (currentIdx >= 0 && idx < currentIdx)
+                      const cls = isCurrent ? 'pipeline-step is-current' : isCompleted ? 'pipeline-step is-completed' : 'pipeline-step'
+                      return (
+                        <span key={step} className="pipeline-step-wrap">
+                          {idx > 0 ? <span className={`pipeline-arrow${isCompleted || isCurrent ? ' is-reached' : ''}`} /> : null}
+                          <span className={cls}>{humanizeLabel(step)}</span>
+                        </span>
+                      )
+                    })}
+                  </div>
+                )
+              })() : null}
+            </header>
+            <div className="task-detail-modal-body">
+              {taskDetailContent}
+            </div>
+            <footer className="task-detail-modal-foot">
+              {taskActionMessage ? <p className="field-label">{taskActionMessage}</p> : null}
+              {taskActionError ? <p className="error-banner">{taskActionError}</p> : null}
+              {taskStatus === 'blocked' ? (
+                <>
+                  <div className="inline-actions blocked-retry-row">
+                    <input
+                      className="review-guidance-input"
+                      value={reviewGuidance}
+                      onChange={(event) => setReviewGuidance(event.target.value)}
+                      placeholder="Guidance for retry..."
+                      disabled={isTaskActionBusy || hasUnresolvedBlockers}
+                    />
+                    <select
+                      className="retry-step-select"
+                      value={retryFromStep}
+                      onChange={(event) => setRetryFromStep(event.target.value)}
+                      disabled={isTaskActionBusy || hasUnresolvedBlockers}
+                    >
+                      <option value="">From beginning</option>
+                      {(selectedTaskView.pipeline_template || []).map((step) => (
+                        <option key={step} value={step}>{humanizeLabel(step)}</option>
+                      ))}
+                    </select>
+                    <button
+                      className="button button-primary"
+                      onClick={() => void retryTask(selectedTaskView.id, retryFromStep || undefined)}
+                      disabled={isTaskActionBusy || hasUnresolvedBlockers}
+                      title={hasUnresolvedBlockers ? `Blocked by: ${unresolvedBlockers.map((id) => describeTask(id, taskIndex).label).join(', ')}` : undefined}
+                    >
+                      {taskActionPending === 'retry' ? 'Retrying...' : 'Retry'}
+                    </button>
+                  </div>
+                  {hasUnresolvedBlockers ? (
+                    <p className="field-label">Unresolved {unresolvedBlockers.length === 1 ? 'dependency' : 'dependencies'}: {unresolvedBlockers.map((id) => describeTask(id, taskIndex).label).join(', ')}</p>
+                  ) : null}
+                </>
+              ) : null}
+              <div className="inline-actions">
+                {taskStatus === 'backlog' ? (
+                  <>
+                    <button className="button button-primary" onClick={() => void transitionTask(selectedTaskView.id, 'queued')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'queued' ? 'Queuing...' : 'Queue'}</button>
+                    <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'cancelled' ? 'Cancelling...' : 'Cancel'}</button>
+                  </>
+                ) : null}
+                {taskStatus === 'queued' ? (
+                  <>
+                    <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'backlog')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'backlog' ? 'Moving...' : 'Move to Backlog'}</button>
+                    <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'cancelled' ? 'Cancelling...' : 'Cancel'}</button>
+                  </>
+                ) : null}
+                {taskStatus === 'in_progress' ? (
+                  <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'cancelled' ? 'Cancelling...' : 'Cancel'}</button>
+                ) : null}
+                {taskStatus === 'in_review' ? (
+                  <>
+                    <button className="button button-primary" onClick={() => void transitionTask(selectedTaskView.id, 'done')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'done' ? 'Approving...' : 'Approve'}</button>
+                    <input
+                      className="review-guidance-input"
+                      value={reviewGuidance}
+                      onChange={(event) => setReviewGuidance(event.target.value)}
+                      placeholder="Guidance for changes..."
+                      disabled={isTaskActionBusy}
+                    />
+                    <button className="button" onClick={() => void requestChanges(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'request_changes' ? 'Requesting...' : 'Request Changes'}</button>
+                    <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'cancelled' ? 'Cancelling...' : 'Cancel'}</button>
+                  </>
+                ) : null}
+                {taskStatus === 'blocked' ? (
+                  <>
+                    <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'in_review')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'in_review' ? 'Moving...' : 'Move to Review'}</button>
+                    <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'cancelled' ? 'Cancelling...' : 'Cancel'}</button>
+                  </>
+                ) : null}
+                {taskStatus === 'cancelled' ? (
+                  <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'backlog')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'backlog' ? 'Moving...' : 'Move to Backlog'}</button>
+                ) : null}
+                {taskStatus === 'done' && showViewPlan ? (
+                  <button className="button button-primary" onClick={() => { setPlanningTaskId(selectedTaskView.id); handleRouteChange('planning'); modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') }}>View Plan</button>
+                ) : null}
+                <span className="foot-spacer" />
+                <button className="button" onClick={() => { modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') }}>Close</button>
+              </div>
+            </footer>
+          </div>
+        </div>
+      ) : null}
+
       {error ? <p className="error-banner">{error}</p> : null}
 
       {workOpen ? (
-        <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Create Work modal">
+        <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Create Work modal" onClick={(event) => { if (event.target === event.currentTarget) setWorkOpen(false) }} onKeyDown={(event) => { if (event.key === 'Escape') setWorkOpen(false) }}>
           <div className="modal-card create-work-modal">
             <div className="modal-sticky-top">
               <header className="panel-head">
@@ -3574,7 +5260,7 @@ export default function App() {
 
             <div className="modal-body">
               {createTab === 'task' ? (
-                <form id="create-task-form" className="form-stack create-task-form" onSubmit={(event) => void submitTask(event)}>
+                <form id="create-task-form" className="form-stack create-task-form" onSubmit={(event) => void submitTask(event, 'queued')}>
                   <label className="field-label" htmlFor="task-title">Title</label>
                   <input id="task-title" value={newTaskTitle} onChange={(event) => setNewTaskTitle(event.target.value)} required />
                   <label className="field-label" htmlFor="task-description">Description</label>
@@ -3633,6 +5319,25 @@ export default function App() {
                           </option>
                         ))}
                       </select>
+                      <label className="field-label">Dependency policy</label>
+                      <div className="toggle-group" role="group" aria-label="Dependency policy">
+                        {(['permissive', 'prudent', 'strict'] as const).map((level) => (
+                          <button
+                            key={level}
+                            type="button"
+                            className={`toggle-button ${newTaskDependencyPolicy === level ? 'is-active' : ''}`}
+                            aria-pressed={newTaskDependencyPolicy === level}
+                            onClick={() => setNewTaskDependencyPolicy(level)}
+                          >
+                            {humanizeLabel(level)}
+                          </button>
+                        ))}
+                      </div>
+                      <p className="field-label">
+                        {newTaskDependencyPolicy === 'permissive' && 'Prefer libraries over manual implementation. Install what you need.'}
+                        {newTaskDependencyPolicy === 'prudent' && 'Prefer existing deps. Only add new ones when manual implementation would be unreliable or complex.'}
+                        {newTaskDependencyPolicy === 'strict' && 'No new dependencies allowed. Work only with what is already installed.'}
+                      </p>
                       <label className="field-label" htmlFor="task-labels">Labels (comma-separated)</label>
                       <input
                         id="task-labels"
@@ -3640,7 +5345,7 @@ export default function App() {
                         onChange={(event) => setNewTaskLabels(event.target.value)}
                         placeholder="frontend, urgent"
                       />
-                      <label className="field-label" htmlFor="task-blocked-by">Blocked by task IDs (comma-separated)</label>
+                      <label className="field-label" htmlFor="task-blocked-by">Depends on task IDs (comma-separated)</label>
                       <input
                         id="task-blocked-by"
                         value={newTaskBlockedBy}
@@ -3729,7 +5434,8 @@ export default function App() {
             </div>
             {createTab === 'task' ? (
               <div className="modal-footer">
-                <button className="button button-primary" type="submit" form="create-task-form">Create Task</button>
+                <button className="button button-primary" type="submit" form="create-task-form">Create & Queue</button>
+                <button className="button" type="button" onClick={(event) => void submitTask(event, 'backlog')}>Add to Backlog</button>
               </div>
             ) : null}
           </div>
@@ -3737,7 +5443,7 @@ export default function App() {
       ) : null}
 
       {browseOpen ? (
-        <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Browse repositories">
+        <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Browse repositories" onClick={(event) => { if (event.target === event.currentTarget) setBrowseOpen(false) }} onKeyDown={(event) => { if (event.key === 'Escape') setBrowseOpen(false) }}>
           <div className="modal-card">
             <header className="panel-head">
               <h2>Browse Repositories</h2>

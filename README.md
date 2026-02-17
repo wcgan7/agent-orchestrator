@@ -12,6 +12,7 @@ Execution runs under enforced coding standards and a continuous review-and-fix c
 
 - Manage a full task lifecycle on a board (`backlog` -> `ready` -> `in_progress` -> `in_review` -> `done`).
 - Import PRDs into executable task graphs with dependency edges.
+- Draft, refine, and commit task plans with full revision lineage before task generation.
 - Run Quick Actions for one-off work and optionally promote results into tasks.
 - Control orchestrator execution (`pause`, `resume`, `drain`, `stop`).
 - Manage agent pool capacity and role/provider routing.
@@ -84,6 +85,8 @@ Runtime state is stored in the selected project directory:
 - `.agent_orchestrator/review_cycles.yaml`
 - `.agent_orchestrator/agents.yaml`
 - `.agent_orchestrator/quick_actions.yaml`
+- `.agent_orchestrator/plan_revisions.yaml`
+- `.agent_orchestrator/plan_refine_jobs.yaml`
 - `.agent_orchestrator/events.jsonl`
 - `.agent_orchestrator/config.yaml`
 

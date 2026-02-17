@@ -48,7 +48,7 @@ def test_in_progress_tasks_recover_on_worker_start(tmp_path: Path) -> None:
     try:
         recovered_task = container.tasks.get(task.id)
         assert recovered_task is not None
-        assert recovered_task.status == "ready"
+        assert recovered_task.status == "queued"
         assert recovered_task.error == "Recovered from interrupted run"
 
         recovered_run = container.runs.list()[0]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -58,9 +59,9 @@ def test_task_dependency_guard_blocks_ready_transition(tmp_path: Path) -> None:
     with TestClient(app) as client:
         blocker = client.post(
             "/api/tasks",
-            json={"title": "Blocker", "approval_mode": "auto_approve", "metadata": {"scripted_findings": [[]]}},
+            json={"title": "Blocker", "status": "backlog", "approval_mode": "auto_approve", "metadata": {"scripted_findings": [[]]}},
         ).json()["task"]
-        blocked = client.post("/api/tasks", json={"title": "Blocked"}).json()["task"]
+        blocked = client.post("/api/tasks", json={"title": "Blocked", "status": "backlog"}).json()["task"]
 
         dep_resp = client.post(
             f"/api/tasks/{blocked['id']}/dependencies",
@@ -70,20 +71,22 @@ def test_task_dependency_guard_blocks_ready_transition(tmp_path: Path) -> None:
 
         transition = client.post(
             f"/api/tasks/{blocked['id']}/transition",
-            json={"status": "ready"},
+            json={"status": "queued"},
         )
         assert transition.status_code == 400
         assert "Unresolved blocker" in transition.text
 
+        # Queue and run the blocker so it completes
+        client.post(f"/api/tasks/{blocker['id']}/transition", json={"status": "queued"})
         done = client.post(f"/api/tasks/{blocker['id']}/run")
         assert done.status_code == 200
         assert done.json()["task"]["status"] == "done"
         ok_transition = client.post(
             f"/api/tasks/{blocked['id']}/transition",
-            json={"status": "ready"},
+            json={"status": "queued"},
         )
         assert ok_transition.status_code == 200
-        assert ok_transition.json()["task"]["status"] == "ready"
+        assert ok_transition.json()["task"]["status"] == "queued"
 
 
 def test_patch_rejects_direct_status_changes(tmp_path: Path) -> None:
@@ -317,6 +320,8 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert baseline.json()["agent_routing"]["default_role"] == "general"
         assert baseline.json()["defaults"]["quality_gate"]["high"] == 0
         assert baseline.json()["workers"]["default"] == "codex"
+        assert baseline.json()["workers"]["heartbeat_seconds"] == 60
+        assert baseline.json()["workers"]["heartbeat_grace_seconds"] == 240
         assert baseline.json()["workers"]["providers"]["codex"]["type"] == "codex"
 
         updated = client.patch(
@@ -332,6 +337,8 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
                 "workers": {
                     "default": "ollama-dev",
                     "default_model": "gpt-5-codex",
+                    "heartbeat_seconds": 90,
+                    "heartbeat_grace_seconds": 360,
                     "routing": {"plan": "codex", "implement": "ollama-dev"},
                     "providers": {
                         "codex": {
@@ -371,6 +378,8 @@ def test_settings_endpoint_round_trip(tmp_path: Path) -> None:
         assert body["defaults"]["quality_gate"]["low"] == 4
         assert body["workers"]["default"] == "ollama-dev"
         assert body["workers"]["default_model"] == "gpt-5-codex"
+        assert body["workers"]["heartbeat_seconds"] == 90
+        assert body["workers"]["heartbeat_grace_seconds"] == 360
         assert body["workers"]["routing"]["plan"] == "codex"
         assert body["workers"]["routing"]["implement"] == "ollama-dev"
         assert body["workers"]["providers"]["codex"]["type"] == "codex"
@@ -486,7 +495,7 @@ def test_project_commands_empty_language_key_ignored(tmp_path: Path) -> None:
 
 def test_claim_lock_prevents_double_claim(tmp_path: Path) -> None:
     container = Container(tmp_path)
-    task = Task(title="Concurrent claim", status="ready")
+    task = Task(title="Concurrent claim", status="queued")
     container.tasks.upsert(task)
 
     def _claim() -> str | None:
@@ -503,10 +512,10 @@ def test_claim_lock_prevents_double_claim(tmp_path: Path) -> None:
 def test_state_machine_allows_and_rejects_expected_transitions(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        task = client.post("/api/tasks", json={"title": "FSM"}).json()["task"]
+        task = client.post("/api/tasks", json={"title": "FSM", "status": "backlog"}).json()["task"]
         task_id = task["id"]
 
-        valid = client.post(f"/api/tasks/{task_id}/transition", json={"status": "ready"})
+        valid = client.post(f"/api/tasks/{task_id}/transition", json={"status": "queued"})
         assert valid.status_code == 200
 
         invalid = client.post(f"/api/tasks/{task_id}/transition", json={"status": "done"})
@@ -521,6 +530,7 @@ def test_api_surfaces_human_blocking_issues_on_task_and_timeline(tmp_path: Path)
             "/api/tasks",
             json={
                 "title": "Needs credentials",
+                "status": "backlog",
                 "approval_mode": "auto_approve",
                 "metadata": {
                     "scripted_steps": {
@@ -561,6 +571,7 @@ def test_retry_clears_pending_gate_and_human_blockers(tmp_path: Path) -> None:
             "/api/tasks",
             json={
                 "title": "Needs credentials",
+                "status": "backlog",
                 "approval_mode": "auto_approve",
                 "metadata": {
                     "scripted_steps": {
@@ -584,7 +595,7 @@ def test_retry_clears_pending_gate_and_human_blockers(tmp_path: Path) -> None:
         retry_resp = client.post(f"/api/tasks/{created['id']}/retry")
         assert retry_resp.status_code == 200
         retried_task = retry_resp.json()["task"]
-        assert retried_task["status"] == "ready"
+        assert retried_task["status"] == "queued"
         assert retried_task["pending_gate"] is None
         assert retried_task.get("human_blocking_issues") == []
 
@@ -597,7 +608,7 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
     with TestClient(app) as client:
         task = client.post(
             "/api/tasks",
-            json={"title": "Needs review", "approval_mode": "human_review", "metadata": {"scripted_findings": [[]]}},
+            json={"title": "Needs review", "status": "backlog", "approval_mode": "human_review", "metadata": {"scripted_findings": [[]]}},
         ).json()["task"]
         ran = client.post(f"/api/tasks/{task['id']}/run")
         assert ran.status_code == 200
@@ -612,7 +623,7 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
             json={"guidance": "Please adjust tests"},
         )
         assert request_changes.status_code == 200
-        assert request_changes.json()["task"]["status"] == "ready"
+        assert request_changes.json()["task"]["status"] == "queued"
 
         client.post(f"/api/tasks/{task['id']}/run")
         approved = client.post(f"/api/review/{task['id']}/approve", json={})
@@ -632,7 +643,7 @@ def test_get_task_plan(tmp_path: Path) -> None:
                 "metadata": {
                     "plans": [
                         {"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Plan A"},
-                        {"step": "plan_impl", "ts": "2025-01-01T00:01:00Z", "content": "Plan B"},
+                        {"step": "plan", "ts": "2025-01-01T00:01:00Z", "content": "Plan B"},
                     ]
                 },
             },
@@ -643,7 +654,7 @@ def test_get_task_plan(tmp_path: Path) -> None:
         body = resp.json()
         assert len(body["plans"]) == 2
         assert body["latest"]["content"] == "Plan B"
-        assert body["latest"]["step"] == "plan_impl"
+        assert body["latest"]["step"] == "plan"
 
         # Non-existent task → 404
         resp_404 = client.get("/api/tasks/nonexistent/plan")
@@ -666,6 +677,7 @@ def test_generate_tasks_endpoint(tmp_path: Path) -> None:
             "/api/tasks",
             json={
                 "title": "Generate from plan",
+                "status": "backlog",
                 "metadata": {
                     "plans": [
                         {"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Build auth"},
@@ -686,6 +698,31 @@ def test_generate_tasks_endpoint(tmp_path: Path) -> None:
         assert body["children"][0]["title"] == "Login endpoint"
         assert body["children"][1]["title"] == "Session store"
         assert body["task"]["children_ids"] == body["created_task_ids"]
+
+
+def test_generate_tasks_endpoint_returns_400_when_worker_outputs_no_tasks(tmp_path: Path) -> None:
+    """Explicit generate should fail loudly when worker returns no task list."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Generate no output",
+                "status": "backlog",
+                "metadata": {
+                    "plans": [
+                        {"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Build auth"},
+                    ],
+                    "scripted_steps": {
+                        "generate_tasks": {"status": "ok", "summary": "No decomposition possible."}
+                    },
+                },
+            },
+        ).json()["task"]
+
+        resp = client.post(f"/api/tasks/{task['id']}/generate-tasks", json={"source": "latest"})
+        assert resp.status_code == 400
+        assert "no generated tasks" in resp.json()["detail"].lower()
 
 
 def test_generate_tasks_with_override(tmp_path: Path) -> None:
@@ -710,13 +747,199 @@ def test_generate_tasks_with_override(tmp_path: Path) -> None:
             json={},
         )
         assert resp_fail.status_code == 400
-        assert "No plan available" in resp_fail.json()["detail"]
+        assert "No plan revision exists" in resp_fail.json()["detail"]
 
         # With override → success
         resp = client.post(
             f"/api/tasks/{task['id']}/generate-tasks",
-            json={"plan_override": "Custom plan text"},
+            json={"source": "override", "plan_override": "Custom plan text"},
         )
         assert resp.status_code == 200
         assert len(resp.json()["created_task_ids"]) == 1
         assert resp.json()["children"][0]["title"] == "From override"
+
+
+def test_plan_refine_job_lifecycle_and_commit(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Iterative plan",
+                "metadata": {
+                    "plans": [{"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Initial plan"}],
+                    "scripted_steps": {
+                        "plan_refine": {"status": "ok", "summary": "Refined plan with rollout"}
+                    },
+                },
+            },
+        ).json()["task"]
+
+        initial_doc = client.get(f"/api/tasks/{task['id']}/plan").json()
+        assert len(initial_doc["revisions"]) == 1
+        base_revision_id = initial_doc["latest_revision_id"]
+
+        queued = client.post(
+            f"/api/tasks/{task['id']}/plan/refine",
+            json={"base_revision_id": base_revision_id, "feedback": "Add rollout and risk checks"},
+        )
+        assert queued.status_code == 200
+        job_id = queued.json()["job"]["id"]
+
+        status = ""
+        for _ in range(50):
+            job = client.get(f"/api/tasks/{task['id']}/plan/jobs/{job_id}").json()["job"]
+            status = job["status"]
+            if status in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(0.05)
+        assert status == "completed"
+        result_revision_id = job["result_revision_id"]
+        assert result_revision_id
+
+        doc = client.get(f"/api/tasks/{task['id']}/plan").json()
+        assert doc["latest_revision_id"] == result_revision_id
+        assert len(doc["revisions"]) == 2
+        refined = next(item for item in doc["revisions"] if item["id"] == result_revision_id)
+        assert refined["source"] == "worker_refine"
+        assert refined["parent_revision_id"] == base_revision_id
+
+        commit = client.post(
+            f"/api/tasks/{task['id']}/plan/commit",
+            json={"revision_id": result_revision_id},
+        )
+        assert commit.status_code == 200
+        assert commit.json()["committed_revision_id"] == result_revision_id
+
+        doc_after_commit = client.get(f"/api/tasks/{task['id']}/plan").json()
+        assert doc_after_commit["committed_revision_id"] == result_revision_id
+
+
+def test_plan_refine_failure_path(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Broken refine",
+                "metadata": {
+                    "plans": [{"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Base"}],
+                    "scripted_steps": {"plan_refine": {"status": "error", "summary": "worker failed"}},
+                },
+            },
+        ).json()["task"]
+
+        queued = client.post(
+            f"/api/tasks/{task['id']}/plan/refine",
+            json={"feedback": "Refine this"},
+        )
+        assert queued.status_code == 200
+        job_id = queued.json()["job"]["id"]
+
+        status = ""
+        for _ in range(50):
+            job = client.get(f"/api/tasks/{task['id']}/plan/jobs/{job_id}").json()["job"]
+            status = job["status"]
+            if status in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(0.05)
+        assert status == "failed"
+        assert "worker failed" in str(job.get("error") or "")
+
+
+def test_plan_refine_emit_error_does_not_mark_job_failed(tmp_path: Path, monkeypatch) -> None:
+    from agent_orchestrator.runtime.events.bus import EventBus
+
+    original_emit = EventBus.emit
+
+    def flaky_emit(self, *, channel: str, event_type: str, entity_id: str, payload: dict | None = None):
+        if event_type == "plan.refine.completed":
+            raise RuntimeError("synthetic bus failure")
+        return original_emit(self, channel=channel, event_type=event_type, entity_id=entity_id, payload=payload)
+
+    monkeypatch.setattr(EventBus, "emit", flaky_emit)
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Refine resilient finalize",
+                "metadata": {
+                    "plans": [{"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Base plan"}],
+                    "scripted_steps": {"plan_refine": {"status": "ok", "summary": "Refined output"}},
+                },
+            },
+        ).json()["task"]
+
+        queued = client.post(
+            f"/api/tasks/{task['id']}/plan/refine",
+            json={"feedback": "Please refine"},
+        )
+        assert queued.status_code == 200
+        job_id = queued.json()["job"]["id"]
+
+        status = ""
+        for _ in range(50):
+            job = client.get(f"/api/tasks/{task['id']}/plan/jobs/{job_id}").json()["job"]
+            status = job["status"]
+            if status in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(0.05)
+
+        assert status == "completed"
+        assert job["result_revision_id"]
+        doc = client.get(f"/api/tasks/{task['id']}/plan").json()
+        assert any(item["id"] == job["result_revision_id"] for item in doc["revisions"])
+
+
+def test_generate_tasks_with_explicit_plan_sources(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Source selection",
+                "metadata": {
+                    "plans": [{"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Base plan"}],
+                    "scripted_generated_tasks": [{"title": "From selected source", "task_type": "feature"}],
+                },
+            },
+        ).json()["task"]
+
+        plan_doc = client.get(f"/api/tasks/{task['id']}/plan").json()
+        latest_revision_id = plan_doc["latest_revision_id"]
+
+        manual = client.post(
+            f"/api/tasks/{task['id']}/plan/revisions",
+            json={"content": "Manual plan text", "parent_revision_id": latest_revision_id, "feedback_note": "manual tweak"},
+        )
+        assert manual.status_code == 200
+        manual_revision_id = manual.json()["revision"]["id"]
+
+        bad_revision = client.post(
+            f"/api/tasks/{task['id']}/generate-tasks",
+            json={"source": "revision"},
+        )
+        assert bad_revision.status_code == 400
+
+        good_revision = client.post(
+            f"/api/tasks/{task['id']}/generate-tasks",
+            json={"source": "revision", "revision_id": manual_revision_id},
+        )
+        assert good_revision.status_code == 200
+        assert good_revision.json()["source"] == "revision"
+        assert good_revision.json()["source_revision_id"] == manual_revision_id
+
+        commit = client.post(
+            f"/api/tasks/{task['id']}/plan/commit",
+            json={"revision_id": manual_revision_id},
+        )
+        assert commit.status_code == 200
+
+        committed_source = client.post(
+            f"/api/tasks/{task['id']}/generate-tasks",
+            json={"source": "committed"},
+        )
+        assert committed_source.status_code == 200
+        assert committed_source.json()["source_revision_id"] == manual_revision_id

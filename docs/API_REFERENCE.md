@@ -37,10 +37,72 @@ Project scoping:
 - `DELETE /tasks/{task_id}/dependencies/{dep_id}`
 - `POST /tasks/analyze-dependencies`
 - `POST /tasks/{task_id}/reset-dep-analysis`
+- `GET /tasks/{task_id}/plan`
+- `POST /tasks/{task_id}/plan/refine`
+- `GET /tasks/{task_id}/plan/jobs`
+- `GET /tasks/{task_id}/plan/jobs/{job_id}`
+- `POST /tasks/{task_id}/plan/commit`
+- `POST /tasks/{task_id}/plan/revisions`
+- `POST /tasks/{task_id}/generate-tasks`
 
 Task payload fields include optional `worker_model`:
 - On `POST /tasks`, set `worker_model` to pin a model for that task.
 - On `PATCH /tasks/{task_id}`, `worker_model` can be updated.
+
+### Iterative Planning Endpoints
+
+`GET /tasks/{task_id}/plan` returns:
+- `task_id`
+- `latest_revision_id`
+- `committed_revision_id`
+- `revisions[]` (`id`, `source`, `parent_revision_id`, `step`, `feedback_note`, `provider`, `model`, `content`, `content_hash`, `status`, timestamps)
+- `active_refine_job` when a refine job is in progress
+
+Legacy compatibility fields are still included:
+- `plans`
+- `latest`
+
+`POST /tasks/{task_id}/plan/refine` request:
+```json
+{
+  "base_revision_id": "pr-abc123",
+  "feedback": "Tighten rollout and risk controls",
+  "instructions": "Keep auth and migration details",
+  "priority": "normal"
+}
+```
+
+`POST /tasks/{task_id}/plan/revisions` request:
+```json
+{
+  "content": "Full revised plan text...",
+  "parent_revision_id": "pr-abc123",
+  "feedback_note": "manual edits before generate"
+}
+```
+
+`POST /tasks/{task_id}/plan/commit` request:
+```json
+{
+  "revision_id": "pr-abc123"
+}
+```
+
+`POST /tasks/{task_id}/generate-tasks` request:
+```json
+{
+  "source": "committed",
+  "revision_id": "pr-abc123",
+  "plan_override": "Manual plan text",
+  "infer_deps": true
+}
+```
+
+`source` values:
+- `latest`
+- `committed`
+- `revision` (requires `revision_id`)
+- `override` (requires `plan_override`)
 
 ## PRD Import
 

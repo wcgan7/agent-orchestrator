@@ -12,7 +12,6 @@ export default defineConfig({
       output: {
         manualChunks(id) {
           if (id.includes('node_modules/react') || id.includes('node_modules/scheduler')) return 'framework'
-          if (id.includes('node_modules/@mui')) return 'mui'
           if (id.includes('node_modules/@xyflow')) return 'graph'
           if (id.includes('/src/components/KanbanBoard/')) return 'kanban'
           if (id.includes('/src/components/AgentCard/')) return 'agents'
@@ -22,6 +21,7 @@ export default defineConfig({
   },
   server: {
     port: devPort,
+    host: true,
     proxy: {
       '/api': {
         target: apiProxyTarget,
@@ -29,6 +29,7 @@ export default defineConfig({
       },
       '/ws': {
         target: wsProxyTarget,
+        changeOrigin: true,
         ws: true,
       },
     },

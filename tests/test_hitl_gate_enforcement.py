@@ -30,7 +30,7 @@ def test_autopilot_no_gates(tmp_path: Path) -> None:
     container, service, _ = _service(tmp_path)
     task = Task(
         title="Auto task",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
@@ -52,7 +52,7 @@ def test_supervised_blocks_at_gates(tmp_path: Path) -> None:
     container, service, _ = _service(tmp_path)
     task = Task(
         title="Supervised task",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="supervised",
     )
@@ -86,7 +86,7 @@ def test_review_only_gates_after_implement_and_before_commit(tmp_path: Path) -> 
     container, service, _ = _service(tmp_path)
     task = Task(
         title="Review-only task",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="review_only",
     )
@@ -120,7 +120,7 @@ def test_collaborative_gates(tmp_path: Path) -> None:
     container, service, _ = _service(tmp_path)
     task = Task(
         title="Collaborative task",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="collaborative",
     )
@@ -153,7 +153,7 @@ def test_gate_timeout_blocks_task(tmp_path: Path) -> None:
     container, service, _ = _service(tmp_path)
     task = Task(
         title="Timeout task",
-        status="ready",
+        status="queued",
         approval_mode="auto_approve",
         hitl_mode="supervised",
     )

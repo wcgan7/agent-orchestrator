@@ -7,6 +7,8 @@ from .file_repos import (
     FileAgentRepository,
     FileConfigRepository,
     FileEventRepository,
+    FilePlanRefineJobRepository,
+    FilePlanRevisionRepository,
     FileQuickActionRepository,
     FileReviewRepository,
     FileRunRepository,
@@ -25,6 +27,8 @@ class Container:
         self.agents = FileAgentRepository(self.state_root / "agents.yaml", self.state_root / "agents.lock")
         self.quick_actions = FileQuickActionRepository(self.state_root / "quick_actions.yaml", self.state_root / "quick_actions.lock")
         self.events = FileEventRepository(self.state_root / "events.jsonl", self.state_root / "events.lock")
+        self.plan_revisions = FilePlanRevisionRepository(self.state_root / "plan_revisions.yaml", self.state_root / "plan_revisions.lock")
+        self.plan_refine_jobs = FilePlanRefineJobRepository(self.state_root / "plan_refine_jobs.yaml", self.state_root / "plan_refine_jobs.lock")
         self.config = FileConfigRepository(self.state_root / "config.yaml", self.state_root / "config.lock")
 
     @property

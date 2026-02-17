@@ -9,10 +9,12 @@ from pathlib import Path
 from typing import Any, Callable, Generic, Optional, TypeVar
 
 from ...io_utils import FileLock
-from ..domain.models import AgentRecord, QuickActionRun, ReviewCycle, RunRecord, Task, now_iso
+from ..domain.models import AgentRecord, PlanRefineJob, PlanRevision, QuickActionRun, ReviewCycle, RunRecord, Task, now_iso
 from .interfaces import (
     AgentRepository,
     EventRepository,
+    PlanRefineJobRepository,
+    PlanRevisionRepository,
     QuickActionRepository,
     ReviewRepository,
     RunRepository,
@@ -141,7 +143,7 @@ class FileTaskRepository(TaskRepository):
                 by_id = {t.id: t for t in tasks}
 
                 def _is_runnable(task: Task) -> bool:
-                    if task.status != "ready":
+                    if task.status != "queued":
                         return False
                     if task.pending_gate:
                         return False
@@ -346,6 +348,84 @@ class FileEventRepository(EventRepository):
             if isinstance(parsed, dict):
                 events.append(parsed)
         return events
+
+
+class FilePlanRevisionRepository(PlanRevisionRepository):
+    def __init__(self, path: Path, lock_path: Path) -> None:
+        self._repo = _YamlCollectionRepo[PlanRevision](
+            path,
+            lock_path,
+            "plan_revisions",
+            loader=PlanRevision.from_dict,
+            dumper=lambda item: item.to_dict(),
+        )
+
+    def list(self) -> list[PlanRevision]:
+        with self._repo._thread_lock:
+            with self._repo._lock:
+                items = self._repo._load()
+        return sorted(items, key=lambda item: item.created_at)
+
+    def for_task(self, task_id: str) -> list[PlanRevision]:
+        return [item for item in self.list() if item.task_id == task_id]
+
+    def get(self, revision_id: str) -> Optional[PlanRevision]:
+        for item in self.list():
+            if item.id == revision_id:
+                return item
+        return None
+
+    def upsert(self, revision: PlanRevision) -> PlanRevision:
+        with self._repo._thread_lock:
+            with self._repo._lock:
+                items = self._repo._load()
+                for idx, existing in enumerate(items):
+                    if existing.id == revision.id:
+                        items[idx] = revision
+                        self._repo._save(items)
+                        return revision
+                items.append(revision)
+                self._repo._save(items)
+                return revision
+
+
+class FilePlanRefineJobRepository(PlanRefineJobRepository):
+    def __init__(self, path: Path, lock_path: Path) -> None:
+        self._repo = _YamlCollectionRepo[PlanRefineJob](
+            path,
+            lock_path,
+            "plan_refine_jobs",
+            loader=PlanRefineJob.from_dict,
+            dumper=lambda item: item.to_dict(),
+        )
+
+    def list(self) -> list[PlanRefineJob]:
+        with self._repo._thread_lock:
+            with self._repo._lock:
+                items = self._repo._load()
+        return sorted(items, key=lambda item: item.created_at, reverse=True)
+
+    def for_task(self, task_id: str) -> list[PlanRefineJob]:
+        return [item for item in self.list() if item.task_id == task_id]
+
+    def get(self, job_id: str) -> Optional[PlanRefineJob]:
+        for item in self.list():
+            if item.id == job_id:
+                return item
+        return None
+
+    def upsert(self, job: PlanRefineJob) -> PlanRefineJob:
+        with self._repo._thread_lock:
+            with self._repo._lock:
+                items = self._repo._load()
+                for idx, existing in enumerate(items):
+                    if existing.id == job.id:
+                        items[idx] = job
+                        self._repo._save(items)
+                        return job
+                items.append(job)
+                self._repo._save(items)
+                return job
 
 
 class FileConfigRepository:

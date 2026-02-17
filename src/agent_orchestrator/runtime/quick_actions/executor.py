@@ -115,6 +115,18 @@ class QuickActionExecutor:
             cfg = self._container.config.load()
             runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
             spec = resolve_worker_for_step(runtime, "implement")
+            workers_cfg = cfg.get("workers") if isinstance(cfg, dict) else {}
+            workers_cfg = workers_cfg if isinstance(workers_cfg, dict) else {}
+            try:
+                heartbeat_seconds = max(1, int(workers_cfg.get("heartbeat_seconds", 60)))
+            except (TypeError, ValueError):
+                heartbeat_seconds = 60
+            try:
+                heartbeat_grace_seconds = max(1, int(workers_cfg.get("heartbeat_grace_seconds", 240)))
+            except (TypeError, ValueError):
+                heartbeat_grace_seconds = 240
+            if heartbeat_grace_seconds < heartbeat_seconds:
+                heartbeat_grace_seconds = heartbeat_seconds
 
             available, reason = test_worker(spec)
             if not available:
@@ -139,8 +151,8 @@ class QuickActionExecutor:
                 project_dir=self._container.project_dir,
                 run_dir=run_dir,
                 timeout_seconds=120,
-                heartbeat_seconds=30,
-                heartbeat_grace_seconds=15,
+                heartbeat_seconds=heartbeat_seconds,
+                heartbeat_grace_seconds=heartbeat_grace_seconds,
                 progress_path=progress_path,
             )
 
