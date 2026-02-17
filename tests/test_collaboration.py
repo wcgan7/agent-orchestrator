@@ -23,8 +23,9 @@ class TestHITLModes:
     def test_supervised_config(self):
         config = MODE_CONFIGS["supervised"]
         assert config.allow_unattended is False
-        assert config.approve_before_plan is True
+        assert config.approve_before_plan is False
         assert config.approve_before_implement is True
+        assert config.approve_after_implement is True
         assert config.approve_before_commit is True
         assert config.require_reasoning is True
 
@@ -51,11 +52,13 @@ class TestHITLModes:
         config = MODE_CONFIGS["supervised"]
         d = config.to_dict()
         assert d["mode"] == "supervised"
-        assert d["approve_before_plan"] is True
+        assert d["approve_before_plan"] is False
+        assert d["approve_after_implement"] is True
 
     def test_should_gate(self):
-        assert should_gate("supervised", "before_plan") is True
+        assert should_gate("supervised", "before_plan") is False
         assert should_gate("supervised", "before_implement") is True
+        assert should_gate("supervised", "after_implement") is True
         assert should_gate("autopilot", "before_plan") is False
         assert should_gate("autopilot", "before_commit") is False
 

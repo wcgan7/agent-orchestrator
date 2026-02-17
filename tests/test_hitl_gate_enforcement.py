@@ -48,7 +48,7 @@ def test_autopilot_no_gates(tmp_path: Path) -> None:
 
 
 def test_supervised_blocks_at_gates(tmp_path: Path) -> None:
-    """Supervised mode activates before_plan, before_implement, before_commit."""
+    """Supervised mode lets plan run freely, then gates before implement, after implement, and before commit."""
     container, service, _ = _service(tmp_path)
     task = Task(
         title="Supervised task",
@@ -71,8 +71,9 @@ def test_supervised_blocks_at_gates(tmp_path: Path) -> None:
         result = service.run_task(task.id)
 
     assert result.status == "done"
-    assert "before_plan" in gates_seen
+    assert "before_plan" not in gates_seen
     assert "before_implement" in gates_seen
+    assert "after_implement" in gates_seen
     assert "before_commit" in gates_seen
 
 
