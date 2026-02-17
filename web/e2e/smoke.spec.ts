@@ -7,9 +7,9 @@ test.beforeEach(async ({ page }) => {
 
 test('loads shell and core navigation', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Board' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Planning' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Execution' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Review Queue' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Agents' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Workers' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible()
 })
 
