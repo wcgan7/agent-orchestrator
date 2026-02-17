@@ -42,7 +42,7 @@ describe('Planning panel', () => {
       description: 'Plan this',
       priority: 'P2',
       status: 'queued',
-      task_type: 'feature',
+      task_type: 'plan',
       blocked_by: [],
       blocks: [],
     }
@@ -197,7 +197,7 @@ describe('Planning worker output', () => {
       description: 'Plan this',
       priority: 'P2',
       status: 'in_progress',
-      task_type: 'feature',
+      task_type: 'plan',
       blocked_by: [],
       blocks: [],
     }
@@ -445,7 +445,7 @@ describe('Planning generate output', () => {
       description: 'Plan this',
       priority: 'P2',
       status: 'in_progress',
-      task_type: 'feature',
+      task_type: 'plan',
       blocked_by: [],
       blocks: [],
     }

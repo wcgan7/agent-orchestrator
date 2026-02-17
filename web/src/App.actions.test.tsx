@@ -58,6 +58,18 @@ function installFetchMock() {
     hitl_mode: 'autopilot',
   }
 
+  const taskR1 = {
+    id: 'task-r1',
+    title: 'Review me',
+    description: 'Review this task',
+    priority: 'P2',
+    status: 'in_review',
+    task_type: 'feature',
+    labels: [],
+    blocked_by: [],
+    blocks: [],
+  }
+
   const settingsPayload = {
     orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10 },
     agent_routing: {
@@ -220,7 +232,7 @@ function installFetchMock() {
           backlog: [task],
           queued: [],
           in_progress: [],
-          in_review: [],
+          in_review: [taskR1],
           blocked: [],
           done: [],
         },
@@ -269,6 +281,11 @@ function installFetchMock() {
     }
     if (u.includes('/api/collaboration/feedback/task-1')) return jsonResponse({ feedback: [] })
     if (u.includes('/api/collaboration/comments/task-1')) return jsonResponse({ comments: [] })
+
+    if (u.includes('/api/tasks/task-r1') && method === 'GET') return jsonResponse({ task: taskR1 })
+    if (u.includes('/api/collaboration/timeline/task-r1')) return jsonResponse({ events: [] })
+    if (u.includes('/api/collaboration/feedback/task-r1')) return jsonResponse({ feedback: [] })
+    if (u.includes('/api/collaboration/comments/task-r1')) return jsonResponse({ comments: [] })
 
     return jsonResponse({})
   })
@@ -394,7 +411,7 @@ describe('App action coverage', () => {
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: /Execution/i })).toBeInTheDocument()
     })
-    fireEvent.click(screen.getByRole('button', { name: /^Pause$/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^Pause Queue$/i }))
 
     await waitFor(() => {
       expect(
@@ -407,16 +424,21 @@ describe('App action coverage', () => {
       ).toBe(true)
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /Review/i }))
+    // Navigate to Board and open an in_review task to test review actions
+    fireEvent.click(screen.getByRole('button', { name: /Board/i }))
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /Review Queue/i })).toBeInTheDocument()
+      expect(screen.getByText('Review me')).toBeInTheDocument()
     })
-    fireEvent.change(screen.getByLabelText(/Optional review guidance/i), { target: { value: 'Looks solid.' } })
-    fireEvent.click(screen.getByRole('button', { name: /^Approve$/i }))
+    fireEvent.click(screen.getByText('Review me'))
+    await waitFor(() => {
+      expect(screen.getByPlaceholderText(/Guidance for changes/i)).toBeInTheDocument()
+    })
+    fireEvent.change(screen.getByPlaceholderText(/Guidance for changes/i), { target: { value: 'Looks solid.' } })
+    fireEvent.click(screen.getByRole('button', { name: /^Request Changes$/i }))
 
     await waitFor(() => {
       const reviewCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/review/task-r1/approve') && (init as RequestInit | undefined)?.method === 'POST'
+        String(url).includes('/api/review/task-r1/request-changes') && (init as RequestInit | undefined)?.method === 'POST'
       )
       expect(reviewCall).toBeTruthy()
       const body = JSON.parse(String((reviewCall?.[1] as RequestInit).body))
