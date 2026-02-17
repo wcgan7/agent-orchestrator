@@ -20,7 +20,7 @@ class TestPipelineTemplate:
 
     def test_feature_pipeline_steps(self):
         tmpl = BUILTIN_TEMPLATES["feature"]
-        assert tmpl.step_names() == ["plan", "plan_impl", "implement", "verify", "review", "commit"]
+        assert tmpl.step_names() == ["plan", "implement", "verify", "review", "commit"]
         assert tmpl.task_types == ("feature",)
 
     def test_bug_fix_pipeline_steps(self):

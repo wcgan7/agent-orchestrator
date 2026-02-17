@@ -105,8 +105,8 @@ def test_single_run_branch_receives_per_task_commits(tmp_path: Path) -> None:
 
     container, service = _service(tmp_path)
 
-    first = Task(title="First task", status="queued", approval_mode="auto_approve")
-    second = Task(title="Second task", status="queued", approval_mode="auto_approve")
+    first = Task(title="First task", status="queued", approval_mode="auto_approve", metadata={"scripted_files": {"first.txt": "first"}})
+    second = Task(title="Second task", status="queued", approval_mode="auto_approve", metadata={"scripted_files": {"second.txt": "second"}})
     container.tasks.upsert(first)
     container.tasks.upsert(second)
 

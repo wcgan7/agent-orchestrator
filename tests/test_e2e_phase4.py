@@ -7,6 +7,19 @@ from fastapi.testclient import TestClient
 
 from agent_orchestrator.server.api import create_app
 from agent_orchestrator.runtime.orchestrator import DefaultWorkerAdapter
+from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+
+class _FileWritingAdapter(DefaultWorkerAdapter):
+    """DefaultWorkerAdapter that also creates a file during implement steps."""
+
+    def run_step(self, *, task, step: str, attempt: int) -> StepResult:
+        result = super().run_step(task=task, step=step, attempt=attempt)
+        if step in ("implement", "implement_fix") and result.status == "ok":
+            wt = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
+            if wt:
+                (Path(wt) / f"change-{task.id}-{attempt}.txt").write_text("impl\n")
+        return result
 
 
 def test_pin_create_run_review_approve_done(tmp_path: Path) -> None:
@@ -110,7 +123,7 @@ def test_single_run_branch_commits_in_task_order(tmp_path: Path) -> None:
     subprocess.run(['git', 'add', 'seed.txt'], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(['git', 'commit', '-m', 'seed'], cwd=tmp_path, check=True, capture_output=True)
 
-    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    app = create_app(project_dir=tmp_path, worker_adapter=_FileWritingAdapter())
     with TestClient(app) as client:
         first = client.post('/api/tasks', json={'title': 'First', 'approval_mode': 'auto_approve'}).json()['task']
         second = client.post('/api/tasks', json={'title': 'Second', 'approval_mode': 'auto_approve'}).json()['task']

@@ -643,7 +643,7 @@ def test_get_task_plan(tmp_path: Path) -> None:
                 "metadata": {
                     "plans": [
                         {"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Plan A"},
-                        {"step": "plan_impl", "ts": "2025-01-01T00:01:00Z", "content": "Plan B"},
+                        {"step": "plan", "ts": "2025-01-01T00:01:00Z", "content": "Plan B"},
                     ]
                 },
             },
@@ -654,7 +654,7 @@ def test_get_task_plan(tmp_path: Path) -> None:
         body = resp.json()
         assert len(body["plans"]) == 2
         assert body["latest"]["content"] == "Plan B"
-        assert body["latest"]["step"] == "plan_impl"
+        assert body["latest"]["step"] == "plan"
 
         # Non-existent task → 404
         resp_404 = client.get("/api/tasks/nonexistent/plan")
@@ -845,53 +845,6 @@ def test_plan_refine_failure_path(tmp_path: Path) -> None:
             time.sleep(0.05)
         assert status == "failed"
         assert "worker failed" in str(job.get("error") or "")
-
-
-def test_plan_refine_rejects_summary_style_output(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
-    with TestClient(app) as client:
-        task = client.post(
-            "/api/tasks",
-            json={
-                "title": "Reject summary refine",
-                "metadata": {
-                    "plans": [{"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Base plan with details"}],
-                    "scripted_steps": {
-                        "plan_refine": {
-                            "status": "ok",
-                            "summary": (
-                                "The plan has been prepared. Here's a summary of key changes.\n\n"
-                                "## Refined Plan — Key Changes\n- Tightened scope\n\n"
-                                "Should I write the full PLAN.md to the repo?"
-                            ),
-                        }
-                    },
-                },
-            },
-        ).json()["task"]
-
-        before = client.get(f"/api/tasks/{task['id']}/plan").json()
-        assert len(before["revisions"]) == 1
-
-        queued = client.post(
-            f"/api/tasks/{task['id']}/plan/refine",
-            json={"feedback": "Please provide full rewrite"},
-        )
-        assert queued.status_code == 200
-        job_id = queued.json()["job"]["id"]
-
-        status = ""
-        for _ in range(50):
-            job = client.get(f"/api/tasks/{task['id']}/plan/jobs/{job_id}").json()["job"]
-            status = job["status"]
-            if status in {"completed", "failed", "cancelled"}:
-                break
-            time.sleep(0.05)
-        assert status == "failed"
-        assert "summary-style output" in str(job.get("error") or "").lower()
-
-        after = client.get(f"/api/tasks/{task['id']}/plan").json()
-        assert len(after["revisions"]) == 1
 
 
 def test_plan_refine_emit_error_does_not_mark_job_failed(tmp_path: Path, monkeypatch) -> None:

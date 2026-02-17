@@ -21,6 +21,7 @@ export default defineConfig({
   },
   server: {
     port: devPort,
+    host: true,
     proxy: {
       '/api': {
         target: apiProxyTarget,
@@ -28,6 +29,7 @@ export default defineConfig({
       },
       '/ws': {
         target: wsProxyTarget,
+        changeOrigin: true,
         ws: true,
       },
     },
