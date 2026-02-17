@@ -626,8 +626,9 @@ a:focus-visible {
   z-index: 10;
   background: var(--color-bg-primary, #fff);
   border-top: 1px solid var(--color-border, #e0e0e0);
-  padding: 0.6rem 0.8rem;
-  margin-top: 0.5rem;
+  padding: 0.6rem 1rem;
+  margin: 0.5rem -1rem -1rem;
+  border-radius: 0 0 var(--radius-card, 0.6rem) var(--radius-card, 0.6rem);
 }
 
 @media (min-width: 1700px) {
