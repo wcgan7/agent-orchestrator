@@ -1110,7 +1110,7 @@ def create_router(
         available_steps: list[str] = []
         step_execution_counts: dict[str, int] = {}
         seen: set[str] = set()
-        for run_id in reversed(task.run_ids[:1]):
+        for run_id in task.run_ids[-1:]:
             for run in container.runs.list():
                 if run.id == run_id:
                     for entry in (run.steps or []):
