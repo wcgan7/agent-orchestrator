@@ -1022,7 +1022,14 @@ def create_router(
     async def execution_order(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         container, _, _ = _ctx(project_dir)
         tasks = container.tasks.list()
-        return {"batches": _execution_batches(tasks)}
+        terminal = {"done", "cancelled"}
+        pending = [t for t in tasks if t.status not in terminal]
+        completed = [t for t in tasks if t.status in terminal]
+        completed.sort(key=lambda t: t.updated_at, reverse=True)
+        return {
+            "batches": _execution_batches(pending),
+            "completed": [t.id for t in completed],
+        }
 
     @router.get("/tasks/{task_id}")
     async def get_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:

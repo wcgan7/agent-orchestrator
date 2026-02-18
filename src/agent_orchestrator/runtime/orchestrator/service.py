@@ -895,6 +895,33 @@ class OrchestratorService:
             counts[sev] += 1
         return any(counts[sev] > int(gate.get(sev, 0)) for sev in counts)
 
+    def _build_review_history_summary(
+        self, task_id: str, *, max_cycles: int = 5, max_chars: int = 4000
+    ) -> list[dict[str, Any]]:
+        """Build a compact summary of prior review cycles for prompt injection."""
+        cycles = self.container.reviews.for_task(task_id)
+        cycles.sort(key=lambda c: c.attempt)
+        if len(cycles) > max_cycles:
+            cycles = cycles[-max_cycles:]
+        result: list[dict[str, Any]] = []
+        total_chars = 0
+        for cycle in cycles:
+            entry: dict[str, Any] = {
+                "attempt": cycle.attempt,
+                "decision": cycle.decision,
+                "findings": [],
+            }
+            for f in cycle.findings:
+                f_entry = {"severity": f.severity, "summary": f.summary, "status": f.status}
+                total_chars += len(f.summary) + 30
+                if total_chars > max_chars:
+                    break
+                entry["findings"].append(f_entry)
+            result.append(entry)
+            if total_chars > max_chars:
+                break
+        return result
+
     def _run_non_review_step(self, task: Task, run: RunRecord, step: str, attempt: int = 1) -> bool:
         result = self.worker_adapter.run_step(task=task, step=step, attempt=attempt)
         step_log: dict[str, Any] = {"step": step, "status": result.status, "ts": now_iso(), "summary": result.summary}
@@ -1454,6 +1481,10 @@ class OrchestratorService:
                 while review_attempt < max_review_attempts:
                     review_attempt += 1
                     task.current_step = "review"
+                    if review_attempt > 1:
+                        task.metadata["review_history"] = self._build_review_history_summary(task.id)
+                    else:
+                        task.metadata.pop("review_history", None)
                     self.container.tasks.upsert(task)
                     findings, review_result = self._findings_from_result(task, review_attempt)
                     if review_result.human_blocking_issues:
@@ -1508,9 +1539,10 @@ class OrchestratorService:
                     if review_attempt >= max_review_attempts:
                         break
 
-                    # Attach open findings so the worker knows what to fix
+                    # Attach open findings and review history so the worker knows what to fix
                     open_findings = [f.to_dict() for f in findings if f.status == "open"]
                     task.metadata["review_findings"] = open_findings
+                    task.metadata["review_history"] = self._build_review_history_summary(task.id)
 
                     # Run implement_fix
                     task.retry_count += 1
@@ -1549,8 +1581,10 @@ class OrchestratorService:
                             return
 
                     task.metadata.pop("review_findings", None)
+                    task.metadata.pop("review_history", None)
 
                 if not review_passed:
+                    task.metadata.pop("review_history", None)
                     task.status = "blocked"
                     task.error = "Review attempt cap exceeded"
                     task.current_step = "review"

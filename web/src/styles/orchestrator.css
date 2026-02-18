@@ -1743,9 +1743,17 @@ textarea {
   }
 
   .task-detail-modal {
-    width: 96vw;
-    max-height: 100vh;
+    width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
     border-radius: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .modal-scrim-task-detail {
+    padding: 0;
+    place-items: stretch;
   }
 
   .task-detail-modal-body .detail-card {
@@ -1863,6 +1871,11 @@ textarea {
   grid-template-columns: auto 1fr;
   gap: 0.8rem;
   align-items: center;
+}
+
+.wave-card-completed {
+  opacity: 0.7;
+  grid-template-columns: 1fr;
 }
 
 .wave-label {
@@ -2155,6 +2168,48 @@ textarea {
   font-size: 0.78rem;
   color: var(--color-text-secondary);
   margin-bottom: 0.5rem;
+}
+
+.execution-summary-prose {
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--color-text-primary);
+  margin-bottom: 0.5rem;
+}
+
+.execution-summary-prose p {
+  margin: 0.3rem 0;
+}
+
+.execution-summary-prose ul,
+.execution-summary-prose ol {
+  margin: 0.25rem 0;
+  padding-left: 1.4rem;
+}
+
+.execution-summary-prose code {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.8rem;
+  background: var(--color-bg-tertiary, rgba(0,0,0,0.04));
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+}
+
+.execution-details-collapse {
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--color-border);
+  padding-top: 0.35rem;
+}
+
+.execution-details-toggle {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.execution-details-toggle:hover {
+  color: var(--color-text-primary);
 }
 
 .execution-step-row {

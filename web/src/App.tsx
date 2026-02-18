@@ -1294,6 +1294,7 @@ export default function App() {
   const [pinnedProjects, setPinnedProjects] = useState<PinnedProjectRef[]>([])
   const [quickActions, setQuickActions] = useState<QuickActionRecord[]>([])
   const [executionBatches, setExecutionBatches] = useState<string[][]>([])
+  const [executionCompleted, setExecutionCompleted] = useState<string[]>([])
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null)
   const [activeProjectId, setActiveProjectId] = useState('')
   const [loading, setLoading] = useState(false)
@@ -2467,7 +2468,7 @@ export default function App() {
       const [boardData, orchestratorData, executionOrderData, metricsData] = await Promise.all([
         requestJson<BoardResponse>(buildApiUrl('/api/tasks/board', refreshProjectDir)),
         requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/status', refreshProjectDir)),
-        requestJson<{ batches: string[][] }>(buildApiUrl('/api/tasks/execution-order', refreshProjectDir)),
+        requestJson<{ batches: string[][]; completed?: string[] }>(buildApiUrl('/api/tasks/execution-order', refreshProjectDir)),
         requestJson<unknown>(buildApiUrl('/api/metrics', refreshProjectDir)).catch(() => null),
       ])
       if (refreshProjectDir !== projectDirRef.current) {
@@ -2476,6 +2477,7 @@ export default function App() {
       setBoard(boardData)
       setOrchestrator(orchestratorData)
       setExecutionBatches(executionOrderData.batches || [])
+      setExecutionCompleted(executionOrderData.completed || [])
       setMetrics(normalizeMetrics(metricsData))
 
       const selectedTask = String(selectedTaskIdRef.current || '').trim()
@@ -2560,7 +2562,7 @@ export default function App() {
         requestJson<{ projects: ProjectRef[] }>(buildApiUrl('/api/projects', projectDir)),
         requestJson<{ items: PinnedProjectRef[] }>(buildApiUrl('/api/projects/pinned', projectDir)),
         requestJson<{ quick_actions: QuickActionRecord[] }>(buildApiUrl('/api/quick-actions', projectDir)),
-        requestJson<{ batches: string[][] }>(buildApiUrl('/api/tasks/execution-order', projectDir)),
+        requestJson<{ batches: string[][]; completed?: string[] }>(buildApiUrl('/api/tasks/execution-order', projectDir)),
         requestJson<unknown>(buildApiUrl('/api/metrics', projectDir)).catch(() => null),
         requestJson<unknown>(buildApiUrl('/api/workers/health', projectDir)).catch(() => ({ providers: [] })),
         requestJson<unknown>(buildApiUrl('/api/workers/routing', projectDir)).catch(() => ({ default: 'codex', rows: [] })),
@@ -2575,6 +2577,7 @@ export default function App() {
       setPinnedProjects(pinnedData.items || [])
       setQuickActions(quickActionData.quick_actions || [])
       setExecutionBatches(executionOrderData.batches || [])
+      setExecutionCompleted(executionOrderData.completed || [])
       setMetrics(normalizeMetrics(metricsData))
       setWorkerHealth(normalizeWorkerHealth(workerHealthData))
       const normalizedRouting = normalizeWorkerRouting(workerRoutingData)
@@ -3674,57 +3677,73 @@ export default function App() {
                 </div>
               </div>
             ) : null}
-            {selectedTaskView.execution_summary && selectedTaskView.execution_summary.steps.length > 0 && ['in_review', 'blocked', 'done'].includes(selectedTaskView.status) ? (
-              <div className="execution-summary-box">
-                <p className="field-label">Execution summary</p>
-                <p className="execution-summary-meta">
-                  {selectedTaskView.execution_summary.run_summary}
-                  {selectedTaskView.execution_summary.started_at ? ` · started ${new Date(selectedTaskView.execution_summary.started_at).toLocaleString()}` : ''}
-                  {selectedTaskView.execution_summary.finished_at ? ` · finished ${new Date(selectedTaskView.execution_summary.finished_at).toLocaleString()}` : ''}
-                </p>
-                {selectedTaskView.execution_summary.steps.map((step) => {
-                  const isOk = step.status === 'ok' || step.status === 'completed' || step.status === 'done'
-                  const stepKey = `${selectedTaskView.execution_summary!.run_id}-${step.step}`
-                  const isExpanded = expandedSummarySteps.has(stepKey)
-                  const summaryText = step.summary || ''
-                  const needsTruncation = summaryText.length > 500
-                  const displayText = !isExpanded && needsTruncation ? summaryText.slice(0, 500) + '...' : summaryText
-                  return (
-                    <div key={step.step} className="execution-step-row">
-                      <div className="execution-step-header">
-                        <span className={`execution-step-icon ${isOk ? 'step-ok' : 'step-error'}`}>{isOk ? '\u2713' : '\u2717'}</span>
-                        <span className="execution-step-name">{humanizeLabel(step.step)}</span>
-                        <span className={`status-pill status-pill-inline ${isOk ? 'status-done' : 'status-failed'}`}>{step.status}</span>
-                        {step.open_counts && Object.keys(step.open_counts).length > 0 ? (
-                          <span className="execution-step-counts">
-                            {Object.entries(step.open_counts).map(([sev, count]) => `${count} ${sev}`).join(', ')}
-                          </span>
-                        ) : null}
-                        {step.commit ? <span className="execution-step-commit" title={step.commit}>{step.commit.slice(0, 8)}</span> : null}
-                      </div>
-                      {displayText ? (
-                        <pre className="execution-step-summary">{displayText}</pre>
-                      ) : null}
-                      {needsTruncation ? (
-                        <button
-                          className="link-button"
-                          onClick={() => {
-                            setExpandedSummarySteps((prev) => {
-                              const next = new Set(prev)
-                              if (next.has(stepKey)) next.delete(stepKey)
-                              else next.add(stepKey)
-                              return next
-                            })
-                          }}
-                        >
-                          {isExpanded ? 'Show less' : 'Read more'}
-                        </button>
-                      ) : null}
-                    </div>
-                  )
-                })}
-              </div>
-            ) : null}
+            {selectedTaskView.execution_summary && selectedTaskView.execution_summary.steps.length > 0 && ['in_review', 'blocked', 'done'].includes(selectedTaskView.status) ? (() => {
+              const sumStep = selectedTaskView.execution_summary!.steps.find((s) => s.step === 'summary' || s.step === 'summarize')
+              const otherSteps = selectedTaskView.execution_summary!.steps.filter((s) => s.step !== 'summary' && s.step !== 'summarize')
+              return (
+                <div className="execution-summary-box">
+                  <p className="field-label">Execution summary</p>
+                  {sumStep?.summary ? (
+                    <RenderedMarkdown content={sumStep.summary} className="execution-summary-prose" />
+                  ) : (
+                    <p className="execution-summary-meta">
+                      {selectedTaskView.execution_summary!.run_summary}
+                    </p>
+                  )}
+                  {(otherSteps.length > 0 || selectedTaskView.execution_summary!.started_at) ? (
+                    <details className="execution-details-collapse">
+                      <summary className="execution-details-toggle">Step details</summary>
+                      <p className="execution-summary-meta">
+                        {selectedTaskView.execution_summary!.run_summary}
+                        {selectedTaskView.execution_summary!.started_at ? ` · started ${new Date(selectedTaskView.execution_summary!.started_at).toLocaleString()}` : ''}
+                        {selectedTaskView.execution_summary!.finished_at ? ` · finished ${new Date(selectedTaskView.execution_summary!.finished_at).toLocaleString()}` : ''}
+                      </p>
+                      {otherSteps.map((step) => {
+                        const isOk = step.status === 'ok' || step.status === 'completed' || step.status === 'done'
+                        const stepKey = `${selectedTaskView.execution_summary!.run_id}-${step.step}`
+                        const isExpanded = expandedSummarySteps.has(stepKey)
+                        const summaryText = step.summary || ''
+                        const needsTruncation = summaryText.length > 500
+                        const displayText = !isExpanded && needsTruncation ? summaryText.slice(0, 500) + '...' : summaryText
+                        return (
+                          <div key={step.step} className="execution-step-row">
+                            <div className="execution-step-header">
+                              <span className={`execution-step-icon ${isOk ? 'step-ok' : 'step-error'}`}>{isOk ? '\u2713' : '\u2717'}</span>
+                              <span className="execution-step-name">{humanizeLabel(step.step)}</span>
+                              <span className={`status-pill status-pill-inline ${isOk ? 'status-done' : 'status-failed'}`}>{step.status}</span>
+                              {step.open_counts && Object.keys(step.open_counts).length > 0 ? (
+                                <span className="execution-step-counts">
+                                  {Object.entries(step.open_counts).map(([sev, count]) => `${count} ${sev}`).join(', ')}
+                                </span>
+                              ) : null}
+                              {step.commit ? <span className="execution-step-commit" title={step.commit}>{step.commit.slice(0, 8)}</span> : null}
+                            </div>
+                            {displayText ? (
+                              <pre className="execution-step-summary">{displayText}</pre>
+                            ) : null}
+                            {needsTruncation ? (
+                              <button
+                                className="link-button"
+                                onClick={() => {
+                                  setExpandedSummarySteps((prev) => {
+                                    const next = new Set(prev)
+                                    if (next.has(stepKey)) next.delete(stepKey)
+                                    else next.add(stepKey)
+                                    return next
+                                  })
+                                }}
+                              >
+                                {isExpanded ? 'Show less' : 'Read more'}
+                              </button>
+                            ) : null}
+                          </div>
+                        )
+                      })}
+                    </details>
+                  ) : null}
+                </div>
+              )
+            })() : null}
             {selectedTaskView.error?.trim() ? (() => {
               const stderrTail = (stderrHistory || '').trim()
               const logTail = (stdoutHistory || '').trim()
@@ -4203,7 +4222,30 @@ export default function App() {
               </div>
             </div>
           ))}
-          {executionBatches.length === 0 ? <p className="empty">No execution batches available.</p> : null}
+          {executionBatches.length === 0 && executionCompleted.length === 0 ? <p className="empty">No tasks.</p> : null}
+          {executionCompleted.length > 0 ? (
+            <div style={{ marginTop: '0.5rem' }}>
+              <p className="field-label section-heading">Completed ({executionCompleted.length})</p>
+              <div className="wave-card wave-card-completed">
+                <div className="wave-tasks">
+                  {executionCompleted.map((taskId, i) => {
+                    const task = taskById.get(taskId)
+                    const label = task?.title || taskId
+                    const status = task?.status || ''
+                    return (
+                      <span key={`completed-${taskId}`} className="wave-task-item">
+                        {i > 0 ? <span className="wave-sep">|</span> : null}
+                        <span className="wave-task-content">
+                          <button className="link-button" onClick={() => handleTaskSelect(taskId, 'logs')}>{label}</button>
+                          {status ? <span className={`status-pill status-pill-inline ${statusPillClass(status)}`}>{humanizeLabel(status)}</span> : null}
+                        </span>
+                      </span>
+                    )
+                  })}
+                </div>
+              </div>
+            </div>
+          ) : null}
         </div>
         <div className="list-stack">
           <p className="field-label section-heading">Runtime metrics</p>
@@ -5190,7 +5232,7 @@ export default function App() {
       <main className="main-content">{renderRoute()}</main>
 
       {selectedTaskId && selectedTaskView && modalExplicitRef.current && !modalDismissedRef.current ? (
-        <div className="modal-scrim" role="dialog" aria-modal="true" aria-label="Task detail" onClick={(event) => { if (event.target === event.currentTarget) { modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') } }} onKeyDown={(event) => { if (event.key === 'Escape') { modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') } }}>
+        <div className="modal-scrim modal-scrim-task-detail" role="dialog" aria-modal="true" aria-label="Task detail" onClick={(event) => { if (event.target === event.currentTarget) { modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') } }} onKeyDown={(event) => { if (event.key === 'Escape') { modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') } }}>
           <div className="modal-card task-detail-modal">
             <header className="task-detail-modal-head">
               <div className="task-detail-modal-head-row">

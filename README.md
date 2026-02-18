@@ -27,7 +27,7 @@ Execution runs under enforced coding standards and a continuous review-and-fix c
 
 ```bash
 python -m pip install -e ".[server]"
-agent-orchestrator server --project-dir /absolute/path/to/your/repo
+agent-orchestrator server
 ```
 
 Backend runs at `http://localhost:8080` by default.

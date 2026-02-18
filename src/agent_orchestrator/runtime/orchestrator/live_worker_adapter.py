@@ -101,6 +101,32 @@ _LANGUAGE_MARKERS: list[tuple[str, str]] = [
 ]
 
 
+_DEFAULT_PROJECT_COMMANDS: dict[str, dict[str, str]] = {
+    "python": {
+        "test": "pytest",
+        "lint": "ruff check .",
+        "typecheck": "mypy .",
+    },
+    "typescript": {
+        "test": "npx vitest run 2>/dev/null || npm test",
+        "lint": "npx eslint . 2>/dev/null || true",
+        "typecheck": "npx tsc --noEmit",
+    },
+    "javascript": {
+        "test": "npm test",
+        "lint": "npx eslint . 2>/dev/null || true",
+    },
+    "go": {
+        "test": "go test ./...",
+        "lint": "golangci-lint run 2>/dev/null || true",
+    },
+    "rust": {
+        "test": "cargo test",
+        "lint": "cargo clippy -- -D warnings 2>/dev/null || true",
+    },
+}
+
+
 def detect_project_languages(project_dir: Path) -> list[str]:
     """Return all detected project languages based on marker files.
 
@@ -195,7 +221,10 @@ _CATEGORY_INSTRUCTIONS: dict[str, str] = {
         "IMPORTANT: If this change affects user-facing behavior, CLI usage,\n"
         "configuration, setup instructions, or API surface, you MUST update\n"
         "README.md and any relevant documentation files to reflect the changes.\n"
-        "This is an explicit instruction, not a suggestion."
+        "This is an explicit instruction, not a suggestion.\n"
+        "If previous review cycle history is shown below, preserve all fixes\n"
+        "applied in prior cycles. Do not revert or reimplement from scratch —\n"
+        "make targeted, incremental fixes only."
     ),
     "verification": (
         "Run the project's test, lint, and type-check commands for the following\n"
@@ -209,6 +238,17 @@ _CATEGORY_INSTRUCTIONS: dict[str, str] = {
         "Evaluate every acceptance criterion explicitly. Provide concrete\n"
         "evidence tied to files and diffs — do not speculate. Do not down-rank\n"
         "findings.\n"
+        "SCOPE: Only flag issues introduced or directly affected by THIS task's\n"
+        "changes. Pre-existing issues in unchanged code are out of scope.\n"
+        "Missing project-wide tooling (e.g. linter configs not present before\n"
+        "this task) is out of scope unless the task description requires it.\n"
+        "CONSISTENCY: If previous review cycles are shown below, do not\n"
+        "contradict earlier decisions. Do not reverse an approach you\n"
+        "previously accepted unless new evidence of a critical defect emerged.\n"
+        "Focus on remaining open issues.\n"
+        "CONVERGENCE: Each cycle must move closer to approval. Do not raise\n"
+        "new low-severity or cosmetic findings after the first cycle unless\n"
+        "they concern code changed since the last review.\n"
         "If the change affects user-facing behavior, CLI usage, configuration,\n"
         "or API surface, verify that README.md and relevant documentation were\n"
         "updated. Raise a medium-severity finding if documentation is stale or\n"
@@ -466,6 +506,30 @@ def build_step_prompt(
                 line_ = finding.get("line", "")
                 loc = f" ({file_}:{line_})" if file_ else ""
                 parts.append(f"  - [{sev}] {summary}{loc}")
+
+    # Include review history for review and fix steps
+    review_history = task.metadata.get("review_history") if isinstance(task.metadata, dict) else None
+    if review_history and isinstance(review_history, list):
+        parts.append("")
+        parts.append("## Previous review cycle history")
+        parts.append(
+            "IMPORTANT: Do NOT contradict decisions from prior cycles. "
+            "Do NOT re-raise findings that were already resolved. "
+            "Do NOT undo fixes applied in response to earlier findings."
+        )
+        for cycle_entry in review_history:
+            if not isinstance(cycle_entry, dict):
+                continue
+            attempt_num = cycle_entry.get("attempt", "?")
+            decision = cycle_entry.get("decision", "?")
+            parts.append(f"  Cycle {attempt_num} — decision: {decision}")
+            for cf in cycle_entry.get("findings", []):
+                if not isinstance(cf, dict):
+                    continue
+                sev = cf.get("severity", "?")
+                summ = cf.get("summary", "")
+                st = cf.get("status", "open")
+                parts.append(f"    - [{sev}] {summ} (status: {st})")
 
     # Include plan context for task generation
     plan_for_generation = task.metadata.get("plan_for_generation") if isinstance(task.metadata, dict) else None
@@ -756,6 +820,17 @@ class LiveWorkerAdapter:
             lang: cmds for lang, cmds in raw_commands.items()
             if isinstance(cmds, dict)
         } or None
+        # Fill in defaults for detected languages with no configured commands
+        if langs:
+            if project_commands is None:
+                project_commands = {}
+            for lang in langs:
+                if lang not in project_commands:
+                    defaults = _DEFAULT_PROJECT_COMMANDS.get(lang)
+                    if defaults:
+                        project_commands[lang] = dict(defaults)
+            if not project_commands:
+                project_commands = None
         prompt = build_step_prompt(
             task=task, step=step, attempt=attempt,
             is_codex=(spec.type in {"codex", "claude"}), project_languages=langs or None,
@@ -855,11 +930,17 @@ class LiveWorkerAdapter:
         formatter_prompt = (
             "You are a CI results classifier.\n\n"
             "Given the verification output below, respond with ONLY a JSON object:\n"
-            '{"status": "pass|fail", "summary": "one-line summary of results"}\n\n'
+            '{"status": "pass|fail|skip", "summary": "one-line summary of results"}\n\n'
             "Rules:\n"
-            '- Use "fail" if ANY test, lint, or type-check command failed or was '
-            "not found (e.g. missing ESLint, no test files, non-zero exit codes).\n"
-            '- Use "pass" only if every check succeeded.\n\n'
+            '- Use "fail" if a test, lint, or type-check command ran and '
+            "produced failures (non-zero exit code from an actual check run).\n"
+            '- Use "skip" if a command was not found, a tool is not installed, '
+            "no test files exist, or a config file is missing (e.g. missing ESLint "
+            "config, no pytest found). These are pre-existing environment gaps, "
+            "not test failures.\n"
+            '- Use "pass" if every check that ran succeeded.\n'
+            '- If some checks passed and others were skipped (tool not found), '
+            'use "pass" — skipped checks are not failures.\n\n'
             "Verification output:\n"
             "---\n"
             f"{response_text[:8000]}\n"
