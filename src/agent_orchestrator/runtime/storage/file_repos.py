@@ -183,6 +183,12 @@ class FileRunRepository(RunRepository):
             with self._repo._lock:
                 return self._repo._load()
 
+    def get(self, run_id: str) -> Optional[RunRecord]:
+        for run in self.list():
+            if run.id == run_id:
+                return run
+        return None
+
     def upsert(self, run: RunRecord) -> RunRecord:
         with self._repo._thread_lock:
             with self._repo._lock:

@@ -34,6 +34,10 @@ class RunRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def get(self, run_id: str) -> Optional[RunRecord]:
+        raise NotImplementedError
+
+    @abstractmethod
     def upsert(self, run: RunRecord) -> RunRecord:
         raise NotImplementedError
 

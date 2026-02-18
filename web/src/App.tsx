@@ -38,6 +38,24 @@ type TaskRecord = {
   metadata?: Record<string, unknown>
   human_blocking_issues?: HumanBlockingIssue[]
   error?: string | null
+  execution_summary?: ExecutionSummary | null
+}
+
+type ExecutionStepSummary = {
+  step: string
+  status: string
+  summary: string
+  open_counts?: Record<string, number>
+  commit?: string
+}
+
+type ExecutionSummary = {
+  run_id: string
+  run_status: string
+  run_summary: string
+  started_at: string | null
+  finished_at: string | null
+  steps: ExecutionStepSummary[]
 }
 
 type BoardResponse = {
@@ -1313,6 +1331,7 @@ export default function App() {
   const [taskDiff, setTaskDiff] = useState<{ commit: string | null; files: { path: string; changes: string }[]; diff: string; stat: string } | null>(null)
   const [taskDiffLoading, setTaskDiffLoading] = useState(false)
   const [boardCompact, setBoardCompact] = useState(false)
+  const [expandedSummarySteps, setExpandedSummarySteps] = useState<Set<string>>(new Set())
   const [pipelineHighlightStatus, setPipelineHighlightStatus] = useState('')
   useEffect(() => {
     if (!pipelineHighlightStatus) return
@@ -3653,6 +3672,57 @@ export default function App() {
                     )
                   })}
                 </div>
+              </div>
+            ) : null}
+            {selectedTaskView.execution_summary && selectedTaskView.execution_summary.steps.length > 0 && ['in_review', 'blocked', 'done'].includes(selectedTaskView.status) ? (
+              <div className="execution-summary-box">
+                <p className="field-label">Execution summary</p>
+                <p className="execution-summary-meta">
+                  {selectedTaskView.execution_summary.run_summary}
+                  {selectedTaskView.execution_summary.started_at ? ` · started ${new Date(selectedTaskView.execution_summary.started_at).toLocaleString()}` : ''}
+                  {selectedTaskView.execution_summary.finished_at ? ` · finished ${new Date(selectedTaskView.execution_summary.finished_at).toLocaleString()}` : ''}
+                </p>
+                {selectedTaskView.execution_summary.steps.map((step) => {
+                  const isOk = step.status === 'ok' || step.status === 'completed' || step.status === 'done'
+                  const stepKey = `${selectedTaskView.execution_summary!.run_id}-${step.step}`
+                  const isExpanded = expandedSummarySteps.has(stepKey)
+                  const summaryText = step.summary || ''
+                  const needsTruncation = summaryText.length > 500
+                  const displayText = !isExpanded && needsTruncation ? summaryText.slice(0, 500) + '...' : summaryText
+                  return (
+                    <div key={step.step} className="execution-step-row">
+                      <div className="execution-step-header">
+                        <span className={`execution-step-icon ${isOk ? 'step-ok' : 'step-error'}`}>{isOk ? '\u2713' : '\u2717'}</span>
+                        <span className="execution-step-name">{humanizeLabel(step.step)}</span>
+                        <span className={`status-pill status-pill-inline ${isOk ? 'status-done' : 'status-failed'}`}>{step.status}</span>
+                        {step.open_counts && Object.keys(step.open_counts).length > 0 ? (
+                          <span className="execution-step-counts">
+                            {Object.entries(step.open_counts).map(([sev, count]) => `${count} ${sev}`).join(', ')}
+                          </span>
+                        ) : null}
+                        {step.commit ? <span className="execution-step-commit" title={step.commit}>{step.commit.slice(0, 8)}</span> : null}
+                      </div>
+                      {displayText ? (
+                        <pre className="execution-step-summary">{displayText}</pre>
+                      ) : null}
+                      {needsTruncation ? (
+                        <button
+                          className="link-button"
+                          onClick={() => {
+                            setExpandedSummarySteps((prev) => {
+                              const next = new Set(prev)
+                              if (next.has(stepKey)) next.delete(stepKey)
+                              else next.add(stepKey)
+                              return next
+                            })
+                          }}
+                        >
+                          {isExpanded ? 'Show less' : 'Read more'}
+                        </button>
+                      ) : null}
+                    </div>
+                  )
+                })}
               </div>
             ) : null}
             {selectedTaskView.error?.trim() ? (() => {

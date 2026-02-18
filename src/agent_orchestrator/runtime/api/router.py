@@ -329,10 +329,66 @@ def _normalize_human_blocking_issues(value: Any) -> list[dict[str, str]]:
     return out[:20]
 
 
-def _task_payload(task: Task) -> dict[str, Any]:
+def _build_execution_summary(task: Task, container: "Container") -> Optional[dict[str, Any]]:
+    """Build execution summary from the latest RunRecord's step data."""
+    if task.status not in ("in_review", "blocked", "done"):
+        return None
+    if not task.run_ids:
+        return None
+    # Find the latest run
+    run = None
+    for run_id in reversed(task.run_ids):
+        run = container.runs.get(run_id)
+        if run:
+            break
+    if not run or not run.steps:
+        return None
+    steps: list[dict[str, Any]] = []
+    for step_data in run.steps:
+        if not isinstance(step_data, dict):
+            continue
+        step_status = str(step_data.get("status") or "unknown")
+        if step_status == "skipped":
+            continue
+        entry: dict[str, Any] = {
+            "step": str(step_data.get("step") or "unknown"),
+            "status": step_status,
+            "summary": str(step_data.get("summary") or ""),
+        }
+        if step_data.get("open_counts") and isinstance(step_data["open_counts"], dict):
+            entry["open_counts"] = step_data["open_counts"]
+        if step_data.get("commit"):
+            entry["commit"] = str(step_data["commit"])
+        steps.append(entry)
+    if not steps:
+        return None
+    # Derive a human-readable run summary
+    status_labels = {
+        "in_review": "Awaiting human review",
+        "blocked": "Blocked",
+        "done": "Completed",
+        "error": "Failed",
+        "running": "Running",
+    }
+    run_summary = status_labels.get(run.status) or status_labels.get(task.status) or run.status
+    return {
+        "run_id": run.id,
+        "run_status": run.status,
+        "run_summary": run_summary,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "steps": steps,
+    }
+
+
+def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[str, Any]:
     payload = task.to_dict()
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
     payload["human_blocking_issues"] = _normalize_human_blocking_issues(metadata.get("human_blocking_issues"))
+    if container is not None:
+        summary = _build_execution_summary(task, container)
+        if summary is not None:
+            payload["execution_summary"] = summary
     return payload
 
 
@@ -974,7 +1030,7 @@ def create_router(
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, container)}
 
     @router.get("/tasks/{task_id}/diff")
     async def get_task_diff(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1178,7 +1234,7 @@ def create_router(
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.updated", entity_id=task.id, payload={"status": task.status})
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, container)}
 
     @router.post("/tasks/{task_id}/transition")
     async def transition_task(task_id: str, body: TransitionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1198,7 +1254,7 @@ def create_router(
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.transitioned", entity_id=task.id, payload={"status": task.status})
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, container)}
 
     @router.post("/tasks/{task_id}/run")
     async def run_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1243,7 +1299,7 @@ def create_router(
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.retry", entity_id=task.id, payload={"retry_count": task.retry_count})
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, container)}
 
     @router.post("/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1254,7 +1310,7 @@ def create_router(
         task.status = "cancelled"
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.cancelled", entity_id=task.id, payload={})
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, container)}
 
     @router.post("/tasks/{task_id}/approve-gate")
     async def approve_gate(task_id: str, body: ApproveGateRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1271,7 +1327,7 @@ def create_router(
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.gate_approved", entity_id=task.id, payload={"gate": cleared_gate})
-        return {"task": _task_payload(task), "cleared_gate": cleared_gate}
+        return {"task": _task_payload(task, container), "cleared_gate": cleared_gate}
 
     @router.post("/tasks/{task_id}/dependencies")
     async def add_dependency(task_id: str, body: AddDependencyRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1287,7 +1343,7 @@ def create_router(
         container.tasks.upsert(task)
         container.tasks.upsert(blocker)
         bus.emit(channel="tasks", event_type="task.dependency_added", entity_id=task.id, payload={"depends_on": body.depends_on})
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, container)}
 
     @router.delete("/tasks/{task_id}/dependencies/{dep_id}")
     async def remove_dependency(task_id: str, dep_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1302,7 +1358,7 @@ def create_router(
             blocker.blocks = [item for item in blocker.blocks if item != task.id]
             container.tasks.upsert(blocker)
         bus.emit(channel="tasks", event_type="task.dependency_removed", entity_id=task.id, payload={"dep_id": dep_id})
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, container)}
 
     @router.post("/tasks/analyze-dependencies")
     async def analyze_dependencies(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1340,7 +1396,7 @@ def create_router(
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.dep_analysis_reset", entity_id=task.id, payload={})
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, container)}
 
     @router.get("/tasks/{task_id}/plan")
     async def get_task_plan(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1910,7 +1966,7 @@ def create_router(
         task.metadata["last_review_approval"] = {"ts": now_iso(), "guidance": body.guidance}
         container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={})
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, container)}
 
     @router.post("/review/{task_id}/request-changes")
     async def request_review_changes(task_id: str, body: ReviewActionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1925,7 +1981,7 @@ def create_router(
         task.metadata["retry_from_step"] = "implement"
         container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.changes_requested", entity_id=task.id, payload={"guidance": body.guidance})
-        return {"task": _task_payload(task)}
+        return {"task": _task_payload(task, container)}
 
     @router.get("/orchestrator/status")
     async def orchestrator_status(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
