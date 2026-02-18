@@ -912,6 +912,21 @@ class LiveWorkerAdapter:
                 project_dir=project_dir,
             )
 
+        # 7. For codex/claude task generation steps that fell through with no
+        #    generated_tasks, run a lightweight LLM formatter to extract them.
+        if (
+            category == "task_generation"
+            and spec.type in {"codex", "claude"}
+            and result.response_text
+            and step_result.status == "ok"
+            and step_result.generated_tasks is None
+        ):
+            step_result = self._parse_task_generation_output(
+                spec=spec,
+                response_text=result.response_text,
+                project_dir=project_dir,
+            )
+
         return step_result
 
     # ------------------------------------------------------------------
@@ -1036,6 +1051,68 @@ class LiveWorkerAdapter:
         findings = parsed.get("findings")
         if isinstance(findings, list):
             return StepResult(status="ok", findings=findings)
+
+        return StepResult(status="ok", summary=response_text[:500])
+
+    # ------------------------------------------------------------------
+    # Task-generation-output formatter (codex / claude)
+    # ------------------------------------------------------------------
+
+    def _parse_task_generation_output(
+        self,
+        *,
+        spec: Any,
+        response_text: str,
+        project_dir: Path,
+    ) -> StepResult:
+        """Use a short LLM call to extract structured tasks from freeform generation output."""
+        formatter_prompt = (
+            "You are a task-list extractor.\n\n"
+            "Given the task generation output below, respond with ONLY a JSON object:\n"
+            '{"tasks": [{"title": "string", "description": "string", '
+            '"task_type": "feature|bugfix|research|chore", '
+            '"priority": "P0|P1|P2|P3", '
+            '"depends_on": []}]}\n\n'
+            "Rules:\n"
+            "- Extract every distinct task/subtask mentioned in the output.\n"
+            "- Each task must have at least title and description.\n"
+            "- Use depends_on as zero-based indices into the tasks array to express ordering.\n"
+            "- Return an empty tasks array only if the output truly contains no tasks.\n\n"
+            "Task generation output:\n"
+            "---\n"
+            f"{response_text[:12000]}\n"
+            "---"
+        )
+
+        fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
+        progress_path = fmt_run_dir / "progress.json"
+        try:
+            fmt_result = run_worker(
+                spec=spec,
+                prompt=formatter_prompt,
+                project_dir=project_dir,
+                run_dir=fmt_run_dir,
+                timeout_seconds=90,
+                heartbeat_seconds=30,
+                heartbeat_grace_seconds=60,
+                progress_path=progress_path,
+            )
+        except Exception:
+            logger.debug("Task generation formatter call failed; returning default ok")
+            return StepResult(status="ok", summary=response_text[:500])
+
+        parsed = _extract_json(fmt_result.response_text or "")
+        if not isinstance(parsed, dict):
+            logger.debug("Task generation formatter returned unparseable output")
+            return StepResult(status="ok", summary=response_text[:500])
+
+        tasks = (
+            parsed.get("tasks")
+            or parsed.get("subtasks")
+            or parsed.get("items")
+        )
+        if isinstance(tasks, list):
+            return StepResult(status="ok", generated_tasks=tasks)
 
         return StepResult(status="ok", summary=response_text[:500])
 

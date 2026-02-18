@@ -2901,7 +2901,6 @@ export default function App() {
         setSelectedQuickActionDetail(resp.quick_action)
       }
       setQuickPrompt('')
-      setWorkOpen(false)
       await reloadAll()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to submit quick action')

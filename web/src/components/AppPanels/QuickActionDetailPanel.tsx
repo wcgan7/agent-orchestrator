@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import { humanizeLabel } from '../../ui/labels'
 
 type QuickActionRecord = {
@@ -41,6 +42,15 @@ function KindBadge({ kind }: { kind?: string | null }): JSX.Element | null {
   return <span className="badge">{label}</span>
 }
 
+function RunningBanner(): JSX.Element {
+  return (
+    <div className="info-banner" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+      <span className="spinner" aria-hidden="true" />
+      <span>Running — output will appear when complete</span>
+    </div>
+  )
+}
+
 export function QuickActionDetailPanel({
   quickActions,
   selectedQuickActionId,
@@ -52,6 +62,18 @@ export function QuickActionDetailPanel({
   onRefreshQuickActionDetail,
   onRetryLoadQuickActionDetail,
 }: QuickActionDetailPanelProps): JSX.Element {
+  const detailRef = useRef<HTMLDivElement>(null)
+
+  // Auto-scroll to detail section when a quick action is selected
+  useEffect(() => {
+    if (selectedQuickActionId && detailRef.current) {
+      detailRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }, [selectedQuickActionId])
+
+  const isActive = selectedQuickActionDetail != null &&
+    (selectedQuickActionDetail.status === 'queued' || selectedQuickActionDetail.status === 'running')
+
   return (
     <div className="form-stack">
       <div className="list-stack">
@@ -80,7 +102,7 @@ export function QuickActionDetailPanel({
         {quickActions.length === 0 ? <p className="empty">No quick actions yet.</p> : null}
       </div>
       {selectedQuickActionId ? (
-        <div className="preview-box">
+        <div className="preview-box" ref={detailRef}>
           <p className="field-label">Quick action detail</p>
           {selectedQuickActionLoading ? <p>Loading quick action...</p> : null}
           {selectedQuickActionError ? (
@@ -93,6 +115,7 @@ export function QuickActionDetailPanel({
             <div className="form-stack">
               <p className="task-meta">ID: {selectedQuickActionDetail.id}</p>
               <p className="task-meta">Status: <StatusIndicator status={selectedQuickActionDetail.status} /></p>
+              {isActive ? <RunningBanner /> : null}
               {selectedQuickActionDetail.kind ? (
                 <p className="task-meta">Kind: <KindBadge kind={selectedQuickActionDetail.kind} /></p>
               ) : null}

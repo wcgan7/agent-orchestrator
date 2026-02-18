@@ -615,7 +615,8 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
                 "high": _coerce_int(quality_gate.get("high"), 0, minimum=0),
                 "medium": _coerce_int(quality_gate.get("medium"), 0, minimum=0),
                 "low": _coerce_int(quality_gate.get("low"), 0, minimum=0),
-            }
+            },
+            "dependency_policy": str(defaults.get("dependency_policy") or "prudent") if str(defaults.get("dependency_policy") or "prudent") in ("permissive", "prudent", "strict") else "prudent",
         },
         "workers": {
             "default": workers_default,
@@ -2043,8 +2044,11 @@ def create_router(
             quality_gate_cfg = dict(defaults_cfg.get("quality_gate") or {})
             quality_gate_cfg.update(incoming_quality_gate)
             defaults_cfg["quality_gate"] = quality_gate_cfg
+            dep_policy = str(incoming_defaults.get("dependency_policy") or "").strip()
+            if dep_policy in ("permissive", "prudent", "strict"):
+                defaults_cfg["dependency_policy"] = dep_policy
             cfg["defaults"] = defaults_cfg
-            touched_sections.append("defaults.quality_gate")
+            touched_sections.append("defaults")
 
         if body.workers is not None:
             workers_cfg = dict(cfg.get("workers") or {})

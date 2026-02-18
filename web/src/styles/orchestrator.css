@@ -1168,6 +1168,29 @@ textarea {
   font-weight: 600;
 }
 
+.info-banner {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--color-surface-100, #f0f4f8);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--color-text-secondary, #555);
+}
+
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 .modal-scrim {
   position: fixed;
   inset: 0;
