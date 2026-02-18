@@ -49,6 +49,25 @@ def _needs_archive(base: Path) -> bool:
     return _schema_version(base / "config.yaml") != 3
 
 
+def _ensure_gitignored(project_dir: Path) -> None:
+    """Add .agent_orchestrator/ to the project's .gitignore if not already present."""
+    gitignore = project_dir / ".gitignore"
+    entry = ".agent_orchestrator/"
+    if gitignore.exists():
+        content = gitignore.read_text(encoding="utf-8")
+        for line in content.splitlines():
+            stripped = line.strip()
+            if stripped == entry or stripped == ".agent_orchestrator":
+                return
+        # Ensure we start on a new line
+        if content and not content.endswith("\n"):
+            content += "\n"
+        content += f"\n# Agent Orchestrator runtime data\n{entry}\n"
+        gitignore.write_text(content, encoding="utf-8")
+    else:
+        gitignore.write_text(f"# Agent Orchestrator runtime data\n{entry}\n", encoding="utf-8")
+
+
 def ensure_state_root(project_dir: Path) -> Path:
     base = project_dir / ".agent_orchestrator"
     state_root = base
@@ -59,6 +78,7 @@ def ensure_state_root(project_dir: Path) -> Path:
         base.mkdir(parents=True, exist_ok=True)
 
     state_root.mkdir(parents=True, exist_ok=True)
+    _ensure_gitignored(project_dir)
 
     for file_name in STATE_FILES.values():
         target = state_root / file_name

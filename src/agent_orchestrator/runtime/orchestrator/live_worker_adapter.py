@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -14,7 +15,7 @@ from ...pipelines.registry import PipelineRegistry
 from ...workers.config import get_workers_runtime_config, resolve_worker_for_step
 from ...workers.diagnostics import test_worker
 from ...workers.run import WorkerRunResult, run_worker
-from ..domain.models import Task, now_iso
+from ..domain.models import RunRecord, Task, now_iso
 from ..storage.container import Container
 from .worker_adapter import StepResult
 
@@ -98,6 +99,32 @@ _LANGUAGE_MARKERS: list[tuple[str, str]] = [
     ("go.mod", "go"),
     ("Cargo.toml", "rust"),
 ]
+
+
+_DEFAULT_PROJECT_COMMANDS: dict[str, dict[str, str]] = {
+    "python": {
+        "test": "pytest",
+        "lint": "ruff check .",
+        "typecheck": "mypy .",
+    },
+    "typescript": {
+        "test": "npx vitest run 2>/dev/null || npm test",
+        "lint": "npx eslint . 2>/dev/null || true",
+        "typecheck": "npx tsc --noEmit",
+    },
+    "javascript": {
+        "test": "npm test",
+        "lint": "npx eslint . 2>/dev/null || true",
+    },
+    "go": {
+        "test": "go test ./...",
+        "lint": "golangci-lint run 2>/dev/null || true",
+    },
+    "rust": {
+        "test": "cargo test",
+        "lint": "cargo clippy -- -D warnings 2>/dev/null || true",
+    },
+}
 
 
 def detect_project_languages(project_dir: Path) -> list[str]:
@@ -194,7 +221,10 @@ _CATEGORY_INSTRUCTIONS: dict[str, str] = {
         "IMPORTANT: If this change affects user-facing behavior, CLI usage,\n"
         "configuration, setup instructions, or API surface, you MUST update\n"
         "README.md and any relevant documentation files to reflect the changes.\n"
-        "This is an explicit instruction, not a suggestion."
+        "This is an explicit instruction, not a suggestion.\n"
+        "If previous review cycle history is shown below, preserve all fixes\n"
+        "applied in prior cycles. Do not revert or reimplement from scratch —\n"
+        "make targeted, incremental fixes only."
     ),
     "verification": (
         "Run the project's test, lint, and type-check commands for the following\n"
@@ -208,6 +238,17 @@ _CATEGORY_INSTRUCTIONS: dict[str, str] = {
         "Evaluate every acceptance criterion explicitly. Provide concrete\n"
         "evidence tied to files and diffs — do not speculate. Do not down-rank\n"
         "findings.\n"
+        "SCOPE: Only flag issues introduced or directly affected by THIS task's\n"
+        "changes. Pre-existing issues in unchanged code are out of scope.\n"
+        "Missing project-wide tooling (e.g. linter configs not present before\n"
+        "this task) is out of scope unless the task description requires it.\n"
+        "CONSISTENCY: If previous review cycles are shown below, do not\n"
+        "contradict earlier decisions. Do not reverse an approach you\n"
+        "previously accepted unless new evidence of a critical defect emerged.\n"
+        "Focus on remaining open issues.\n"
+        "CONVERGENCE: Each cycle must move closer to approval. Do not raise\n"
+        "new low-severity or cosmetic findings after the first cycle unless\n"
+        "they concern code changed since the last review.\n"
         "If the change affects user-facing behavior, CLI usage, configuration,\n"
         "or API surface, verify that README.md and relevant documentation were\n"
         "updated. Raise a medium-severity finding if documentation is stale or\n"
@@ -465,6 +506,30 @@ def build_step_prompt(
                 line_ = finding.get("line", "")
                 loc = f" ({file_}:{line_})" if file_ else ""
                 parts.append(f"  - [{sev}] {summary}{loc}")
+
+    # Include review history for review and fix steps
+    review_history = task.metadata.get("review_history") if isinstance(task.metadata, dict) else None
+    if review_history and isinstance(review_history, list):
+        parts.append("")
+        parts.append("## Previous review cycle history")
+        parts.append(
+            "IMPORTANT: Do NOT contradict decisions from prior cycles. "
+            "Do NOT re-raise findings that were already resolved. "
+            "Do NOT undo fixes applied in response to earlier findings."
+        )
+        for cycle_entry in review_history:
+            if not isinstance(cycle_entry, dict):
+                continue
+            attempt_num = cycle_entry.get("attempt", "?")
+            decision = cycle_entry.get("decision", "?")
+            parts.append(f"  Cycle {attempt_num} — decision: {decision}")
+            for cf in cycle_entry.get("findings", []):
+                if not isinstance(cf, dict):
+                    continue
+                sev = cf.get("severity", "?")
+                summ = cf.get("summary", "")
+                st = cf.get("status", "open")
+                parts.append(f"    - [{sev}] {summ} (status: {st})")
 
     # Include plan context for task generation
     plan_for_generation = task.metadata.get("plan_for_generation") if isinstance(task.metadata, dict) else None
@@ -755,6 +820,17 @@ class LiveWorkerAdapter:
             lang: cmds for lang, cmds in raw_commands.items()
             if isinstance(cmds, dict)
         } or None
+        # Fill in defaults for detected languages with no configured commands
+        if langs:
+            if project_commands is None:
+                project_commands = {}
+            for lang in langs:
+                if lang not in project_commands:
+                    defaults = _DEFAULT_PROJECT_COMMANDS.get(lang)
+                    if defaults:
+                        project_commands[lang] = dict(defaults)
+            if not project_commands:
+                project_commands = None
         prompt = build_step_prompt(
             task=task, step=step, attempt=attempt,
             is_codex=(spec.type in {"codex", "claude"}), project_languages=langs or None,
@@ -836,6 +912,21 @@ class LiveWorkerAdapter:
                 project_dir=project_dir,
             )
 
+        # 7. For codex/claude task generation steps that fell through with no
+        #    generated_tasks, run a lightweight LLM formatter to extract them.
+        if (
+            category == "task_generation"
+            and spec.type in {"codex", "claude"}
+            and result.response_text
+            and step_result.status == "ok"
+            and step_result.generated_tasks is None
+        ):
+            step_result = self._parse_task_generation_output(
+                spec=spec,
+                response_text=result.response_text,
+                project_dir=project_dir,
+            )
+
         return step_result
 
     # ------------------------------------------------------------------
@@ -854,11 +945,17 @@ class LiveWorkerAdapter:
         formatter_prompt = (
             "You are a CI results classifier.\n\n"
             "Given the verification output below, respond with ONLY a JSON object:\n"
-            '{"status": "pass|fail", "summary": "one-line summary of results"}\n\n'
+            '{"status": "pass|fail|skip", "summary": "one-line summary of results"}\n\n'
             "Rules:\n"
-            '- Use "fail" if ANY test, lint, or type-check command failed or was '
-            "not found (e.g. missing ESLint, no test files, non-zero exit codes).\n"
-            '- Use "pass" only if every check succeeded.\n\n'
+            '- Use "fail" if a test, lint, or type-check command ran and '
+            "produced failures (non-zero exit code from an actual check run).\n"
+            '- Use "skip" if a command was not found, a tool is not installed, '
+            "no test files exist, or a config file is missing (e.g. missing ESLint "
+            "config, no pytest found). These are pre-existing environment gaps, "
+            "not test failures.\n"
+            '- Use "pass" if every check that ran succeeded.\n'
+            '- If some checks passed and others were skipped (tool not found), '
+            'use "pass" — skipped checks are not failures.\n\n'
             "Verification output:\n"
             "---\n"
             f"{response_text[:8000]}\n"
@@ -954,6 +1051,68 @@ class LiveWorkerAdapter:
         findings = parsed.get("findings")
         if isinstance(findings, list):
             return StepResult(status="ok", findings=findings)
+
+        return StepResult(status="ok", summary=response_text[:500])
+
+    # ------------------------------------------------------------------
+    # Task-generation-output formatter (codex / claude)
+    # ------------------------------------------------------------------
+
+    def _parse_task_generation_output(
+        self,
+        *,
+        spec: Any,
+        response_text: str,
+        project_dir: Path,
+    ) -> StepResult:
+        """Use a short LLM call to extract structured tasks from freeform generation output."""
+        formatter_prompt = (
+            "You are a task-list extractor.\n\n"
+            "Given the task generation output below, respond with ONLY a JSON object:\n"
+            '{"tasks": [{"title": "string", "description": "string", '
+            '"task_type": "feature|bugfix|research|chore", '
+            '"priority": "P0|P1|P2|P3", '
+            '"depends_on": []}]}\n\n'
+            "Rules:\n"
+            "- Extract every distinct task/subtask mentioned in the output.\n"
+            "- Each task must have at least title and description.\n"
+            "- Use depends_on as zero-based indices into the tasks array to express ordering.\n"
+            "- Return an empty tasks array only if the output truly contains no tasks.\n\n"
+            "Task generation output:\n"
+            "---\n"
+            f"{response_text[:12000]}\n"
+            "---"
+        )
+
+        fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
+        progress_path = fmt_run_dir / "progress.json"
+        try:
+            fmt_result = run_worker(
+                spec=spec,
+                prompt=formatter_prompt,
+                project_dir=project_dir,
+                run_dir=fmt_run_dir,
+                timeout_seconds=90,
+                heartbeat_seconds=30,
+                heartbeat_grace_seconds=60,
+                progress_path=progress_path,
+            )
+        except Exception:
+            logger.debug("Task generation formatter call failed; returning default ok")
+            return StepResult(status="ok", summary=response_text[:500])
+
+        parsed = _extract_json(fmt_result.response_text or "")
+        if not isinstance(parsed, dict):
+            logger.debug("Task generation formatter returned unparseable output")
+            return StepResult(status="ok", summary=response_text[:500])
+
+        tasks = (
+            parsed.get("tasks")
+            or parsed.get("subtasks")
+            or parsed.get("items")
+        )
+        if isinstance(tasks, list):
+            return StepResult(status="ok", generated_tasks=tasks)
 
         return StepResult(status="ok", summary=response_text[:500])
 
@@ -1065,3 +1224,127 @@ class LiveWorkerAdapter:
         # For planning, implementation, reporting — extract summary
         summary = parsed.get("summary") or parsed.get("plan")
         return StepResult(status="ok", summary=str(summary) if summary else None)
+
+    # ------------------------------------------------------------------
+    # Run summary generator
+    # ------------------------------------------------------------------
+
+    def _run_summarize_call(
+        self,
+        *,
+        spec: Any,
+        task: Task,
+        run: RunRecord,
+        project_dir: Path,
+    ) -> str:
+        """Use a short LLM call to produce a human-readable execution summary."""
+        # Build step log section
+        step_lines: list[str] = []
+        for entry in run.steps:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("step", "?")
+            status = entry.get("status", "?")
+            line = f"- {name}: {status}"
+            summary = entry.get("summary")
+            if summary:
+                line += f" — {str(summary)[:200]}"
+            open_counts = entry.get("open_counts")
+            if isinstance(open_counts, dict):
+                line += f" (findings: {open_counts})"
+            step_lines.append(line)
+
+        # Get git diff stat
+        diff_stat = ""
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--stat", "HEAD~1"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                diff_stat = result.stdout.strip()[:4000]
+        except Exception:
+            pass
+
+        parts = [
+            "You are a delivery summary writer.",
+            "",
+            f"Task: {task.title}",
+        ]
+        if task.description:
+            parts.append(f"Description: {task.description[:500]}")
+        parts.append(f"Type: {task.task_type}")
+        parts.append("")
+        parts.append("## Execution log")
+        parts.extend(step_lines or ["(no steps recorded)"])
+
+        if diff_stat:
+            parts.append("")
+            parts.append("## Git diff stat")
+            parts.append(diff_stat)
+
+        if task.error:
+            parts.append("")
+            parts.append(f"## Error: {task.error}")
+
+        parts.append("")
+        parts.append(
+            "Given the execution log and diff stat above, produce a concise summary "
+            "of what was implemented, what tests/checks passed or failed, and what "
+            "requires human attention. You have access to the project files — read "
+            "specific changed files if you need more detail about the implementation. "
+            'Respond with ONLY a JSON object: {"summary": "markdown text"}'
+        )
+
+        prompt = "\n".join(parts)
+
+        fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
+        progress_path = fmt_run_dir / "progress.json"
+        try:
+            fmt_result = run_worker(
+                spec=spec,
+                prompt=prompt,
+                project_dir=project_dir,
+                run_dir=fmt_run_dir,
+                timeout_seconds=120,
+                heartbeat_seconds=30,
+                heartbeat_grace_seconds=90,
+                progress_path=progress_path,
+            )
+        except Exception:
+            logger.debug("Summarize call failed; returning fallback")
+            return "Summary generation failed"
+
+        parsed = _extract_json(fmt_result.response_text or "")
+        if isinstance(parsed, dict):
+            summary = parsed.get("summary")
+            if summary:
+                return str(summary)
+
+        # Fall back to raw text if JSON parsing failed
+        raw = (fmt_result.response_text or "").strip()
+        return raw[:2000] if raw else "Summary generation failed"
+
+    def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path) -> str:
+        """Produce a worker-generated summary for a completed run."""
+        try:
+            cfg = self._container.config.load()
+            runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
+            spec = resolve_worker_for_step(runtime, "summarize")
+            available, reason = test_worker(spec)
+            if not available:
+                logger.debug("Summary worker not available: %s", reason)
+                return ""
+        except Exception:
+            logger.debug("Cannot resolve worker for summarize step")
+            return ""
+
+        return self._run_summarize_call(
+            spec=spec,
+            task=task,
+            run=run,
+            project_dir=project_dir,
+        )

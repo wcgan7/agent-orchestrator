@@ -1168,6 +1168,29 @@ textarea {
   font-weight: 600;
 }
 
+.info-banner {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--color-surface-100, #f0f4f8);
+  border-radius: 6px;
+  font-size: 0.85rem;
+  color: var(--color-text-secondary, #555);
+}
+
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 .modal-scrim {
   position: fixed;
   inset: 0;
@@ -1743,9 +1766,17 @@ textarea {
   }
 
   .task-detail-modal {
-    width: 96vw;
-    max-height: 100vh;
+    width: 100vw;
+    height: 100dvh;
+    max-height: 100dvh;
     border-radius: 0;
+    padding: 0;
+    border: 0;
+  }
+
+  .modal-scrim-task-detail {
+    padding: 0;
+    place-items: stretch;
   }
 
   .task-detail-modal-body .detail-card {
@@ -1863,6 +1894,11 @@ textarea {
   grid-template-columns: auto 1fr;
   gap: 0.8rem;
   align-items: center;
+}
+
+.wave-card-completed {
+  opacity: 0.7;
+  grid-template-columns: 1fr;
 }
 
 .wave-label {
@@ -2140,4 +2176,124 @@ textarea {
 .diff-line-meta {
   color: var(--color-text-secondary);
   font-weight: 600;
+}
+
+/* Execution summary */
+.execution-summary-box {
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-secondary);
+}
+
+.execution-summary-meta {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  margin-bottom: 0.5rem;
+}
+
+.execution-summary-prose {
+  font-size: 0.85rem;
+  line-height: 1.6;
+  color: var(--color-text-primary);
+  margin-bottom: 0.5rem;
+}
+
+.execution-summary-prose p {
+  margin: 0.3rem 0;
+}
+
+.execution-summary-prose ul,
+.execution-summary-prose ol {
+  margin: 0.25rem 0;
+  padding-left: 1.4rem;
+}
+
+.execution-summary-prose code {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.8rem;
+  background: var(--color-bg-tertiary, rgba(0,0,0,0.04));
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+}
+
+.execution-details-collapse {
+  margin-top: 0.5rem;
+  border-top: 1px solid var(--color-border);
+  padding-top: 0.35rem;
+}
+
+.execution-details-toggle {
+  font-size: 0.78rem;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.execution-details-toggle:hover {
+  color: var(--color-text-primary);
+}
+
+.execution-step-row {
+  padding: 0.5rem 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.execution-step-row:first-of-type {
+  border-top: none;
+}
+
+.execution-step-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.execution-step-icon {
+  font-weight: 700;
+  font-size: 0.9rem;
+}
+
+.execution-step-icon.step-ok {
+  color: #16a34a;
+}
+
+.execution-step-icon.step-error {
+  color: #dc2626;
+}
+
+.execution-step-name {
+  font-weight: 600;
+  font-size: 0.85rem;
+}
+
+.execution-step-counts {
+  font-size: 0.76rem;
+  color: var(--color-text-secondary);
+}
+
+.execution-step-commit {
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.76rem;
+  color: var(--color-primary-600);
+  background: var(--color-bg-tertiary, rgba(0,0,0,0.04));
+  padding: 0.1rem 0.35rem;
+  border-radius: 4px;
+}
+
+.execution-step-summary {
+  margin: 0.35rem 0 0;
+  padding: 0;
+  background: none;
+  border-radius: 0;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-text-primary);
+  line-height: 1.5;
+  max-height: 20rem;
+  overflow: auto;
 }
