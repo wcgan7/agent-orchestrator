@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import subprocess
 import tempfile
 from dataclasses import replace
 from pathlib import Path
@@ -14,7 +15,7 @@ from ...pipelines.registry import PipelineRegistry
 from ...workers.config import get_workers_runtime_config, resolve_worker_for_step
 from ...workers.diagnostics import test_worker
 from ...workers.run import WorkerRunResult, run_worker
-from ..domain.models import Task, now_iso
+from ..domain.models import RunRecord, Task, now_iso
 from ..storage.container import Container
 from .worker_adapter import StepResult
 
@@ -1065,3 +1066,127 @@ class LiveWorkerAdapter:
         # For planning, implementation, reporting — extract summary
         summary = parsed.get("summary") or parsed.get("plan")
         return StepResult(status="ok", summary=str(summary) if summary else None)
+
+    # ------------------------------------------------------------------
+    # Run summary generator
+    # ------------------------------------------------------------------
+
+    def _run_summarize_call(
+        self,
+        *,
+        spec: Any,
+        task: Task,
+        run: RunRecord,
+        project_dir: Path,
+    ) -> str:
+        """Use a short LLM call to produce a human-readable execution summary."""
+        # Build step log section
+        step_lines: list[str] = []
+        for entry in run.steps:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("step", "?")
+            status = entry.get("status", "?")
+            line = f"- {name}: {status}"
+            summary = entry.get("summary")
+            if summary:
+                line += f" — {str(summary)[:200]}"
+            open_counts = entry.get("open_counts")
+            if isinstance(open_counts, dict):
+                line += f" (findings: {open_counts})"
+            step_lines.append(line)
+
+        # Get git diff stat
+        diff_stat = ""
+        try:
+            result = subprocess.run(
+                ["git", "diff", "--stat", "HEAD~1"],
+                cwd=project_dir,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                diff_stat = result.stdout.strip()[:4000]
+        except Exception:
+            pass
+
+        parts = [
+            "You are a delivery summary writer.",
+            "",
+            f"Task: {task.title}",
+        ]
+        if task.description:
+            parts.append(f"Description: {task.description[:500]}")
+        parts.append(f"Type: {task.task_type}")
+        parts.append("")
+        parts.append("## Execution log")
+        parts.extend(step_lines or ["(no steps recorded)"])
+
+        if diff_stat:
+            parts.append("")
+            parts.append("## Git diff stat")
+            parts.append(diff_stat)
+
+        if task.error:
+            parts.append("")
+            parts.append(f"## Error: {task.error}")
+
+        parts.append("")
+        parts.append(
+            "Given the execution log and diff stat above, produce a concise summary "
+            "of what was implemented, what tests/checks passed or failed, and what "
+            "requires human attention. You have access to the project files — read "
+            "specific changed files if you need more detail about the implementation. "
+            'Respond with ONLY a JSON object: {"summary": "markdown text"}'
+        )
+
+        prompt = "\n".join(parts)
+
+        fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
+        progress_path = fmt_run_dir / "progress.json"
+        try:
+            fmt_result = run_worker(
+                spec=spec,
+                prompt=prompt,
+                project_dir=project_dir,
+                run_dir=fmt_run_dir,
+                timeout_seconds=120,
+                heartbeat_seconds=30,
+                heartbeat_grace_seconds=90,
+                progress_path=progress_path,
+            )
+        except Exception:
+            logger.debug("Summarize call failed; returning fallback")
+            return "Summary generation failed"
+
+        parsed = _extract_json(fmt_result.response_text or "")
+        if isinstance(parsed, dict):
+            summary = parsed.get("summary")
+            if summary:
+                return str(summary)
+
+        # Fall back to raw text if JSON parsing failed
+        raw = (fmt_result.response_text or "").strip()
+        return raw[:2000] if raw else "Summary generation failed"
+
+    def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path) -> str:
+        """Produce a worker-generated summary for a completed run."""
+        try:
+            cfg = self._container.config.load()
+            runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
+            spec = resolve_worker_for_step(runtime, "summarize")
+            available, reason = test_worker(spec)
+            if not available:
+                logger.debug("Summary worker not available: %s", reason)
+                return ""
+        except Exception:
+            logger.debug("Cannot resolve worker for summarize step")
+            return ""
+
+        return self._run_summarize_call(
+            spec=spec,
+            task=task,
+            run=run,
+            project_dir=project_dir,
+        )

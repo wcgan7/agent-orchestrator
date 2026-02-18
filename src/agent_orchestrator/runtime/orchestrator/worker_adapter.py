@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
-from ..domain.models import Task
+from ..domain.models import RunRecord, Task
 
 
 @dataclass
@@ -79,3 +79,6 @@ class DefaultWorkerAdapter:
                         fp.write_text(str(content), encoding="utf-8")
 
         return StepResult(status="ok")
+
+    def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path) -> str:
+        return ""

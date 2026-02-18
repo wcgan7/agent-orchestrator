@@ -1082,10 +1082,7 @@ class OrchestratorService:
         task.metadata["human_blocking_issues"] = issues
         self.container.tasks.upsert(task)
 
-        run.status = "blocked"
-        run.finished_at = now_iso()
-        run.summary = f"Blocked during {step}: human intervention required"
-        self.container.runs.upsert(run)
+        self._finalize_run(task, run, status="blocked", summary=f"Blocked during {step}: human intervention required")
 
         self.bus.emit(
             channel="tasks",
@@ -1148,6 +1145,34 @@ class OrchestratorService:
             entity_id=task.id,
             payload={"error": task.error},
         )
+
+    def _run_summarize_step(self, task: Task, run: RunRecord) -> None:
+        """Auto-inject a summarize step using a lightweight LLM call."""
+        fn = getattr(self.worker_adapter, "generate_run_summary", None)
+        if fn is None:
+            return
+        try:
+            worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
+            project_dir = Path(worktree_path) if worktree_path else self.container.project_dir
+            summary_text = fn(task=task, run=run, project_dir=project_dir)
+            if isinstance(summary_text, str) and summary_text.strip():
+                run.steps.append({
+                    "step": "summary",
+                    "status": "ok",
+                    "ts": now_iso(),
+                    "summary": summary_text,
+                })
+                self.container.runs.upsert(run)
+        except Exception:
+            logger.debug("Summarize step failed for task %s; skipping", task.id)
+
+    def _finalize_run(self, task: Task, run: RunRecord, *, status: str, summary: str) -> None:
+        """Run the summarize step, then set run status/summary/finished_at."""
+        self._run_summarize_step(task, run)
+        run.status = status
+        run.finished_at = now_iso()
+        run.summary = summary
+        self.container.runs.upsert(run)
 
     def _maybe_analyze_dependencies(self) -> None:
         """Run automatic dependency analysis on unanalyzed ready tasks."""
@@ -1406,10 +1431,7 @@ class OrchestratorService:
                     task.error = "No file changes detected after implementation"
                     task.current_step = last_phase1_step or "implement"
                     self.container.tasks.upsert(task)
-                    run.status = "blocked"
-                    run.finished_at = now_iso()
-                    run.summary = "Blocked: no changes produced by implementation steps"
-                    self.container.runs.upsert(run)
+                    self._finalize_run(task, run, status="blocked", summary="Blocked: no changes produced by implementation steps")
                     self.bus.emit(
                         channel="tasks", event_type="task.blocked",
                         entity_id=task.id, payload={"error": task.error},
@@ -1447,10 +1469,7 @@ class OrchestratorService:
                         task.pending_gate = None
                         task.current_step = "review"
                         self.container.tasks.upsert(task)
-                        run.status = "blocked"
-                        run.finished_at = now_iso()
-                        run.summary = "Blocked during review"
-                        self.container.runs.upsert(run)
+                        self._finalize_run(task, run, status="blocked", summary="Blocked during review")
                         self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
                         return
                     open_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
@@ -1534,10 +1553,7 @@ class OrchestratorService:
                     task.error = "Review attempt cap exceeded"
                     task.current_step = "review"
                     self.container.tasks.upsert(task)
-                    run.status = "blocked"
-                    run.finished_at = now_iso()
-                    run.summary = "Blocked due to unresolved review findings"
-                    self.container.runs.upsert(run)
+                    self._finalize_run(task, run, status="blocked", summary="Blocked due to unresolved review findings")
                     self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
                     return
 
@@ -1559,10 +1575,7 @@ class OrchestratorService:
                         task.status = "blocked"
                         task.error = "Commit failed (no changes to commit)"
                         self.container.tasks.upsert(task)
-                        run.status = "blocked"
-                        run.finished_at = now_iso()
-                        run.summary = "Blocked: commit produced no changes"
-                        self.container.runs.upsert(run)
+                        self._finalize_run(task, run, status="blocked", summary="Blocked: commit produced no changes")
                         self.bus.emit(
                             channel="tasks", event_type="task.blocked",
                             entity_id=task.id, payload={"error": task.error},
@@ -1582,10 +1595,7 @@ class OrchestratorService:
                     task.error = "Merge conflict could not be resolved automatically"
                     task.metadata["unmerged_branch"] = f"task-{task.id}"
                     self.container.tasks.upsert(task)
-                    run.status = "blocked"
-                    run.finished_at = now_iso()
-                    run.summary = "Blocked due to unresolved merge conflict"
-                    self.container.runs.upsert(run)
+                    self._finalize_run(task, run, status="blocked", summary="Blocked due to unresolved merge conflict")
                     self.bus.emit(
                         channel="tasks",
                         event_type="task.blocked",
@@ -1594,6 +1604,7 @@ class OrchestratorService:
                     )
                     return
 
+                self._run_summarize_step(task, run)
                 if task.approval_mode == "auto_approve":
                     task.status = "done"
                     task.current_step = None
@@ -1624,6 +1635,7 @@ class OrchestratorService:
                     )
                     worktree_dir = None  # prevent double-cleanup in finally
 
+                self._run_summarize_step(task, run)
                 task.status = "done"
                 task.current_step = None
                 run.status = "done"
