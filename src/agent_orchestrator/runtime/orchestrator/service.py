@@ -1154,6 +1154,8 @@ class OrchestratorService:
         try:
             worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
             project_dir = Path(worktree_path) if worktree_path else self.container.project_dir
+            if not project_dir.is_dir():
+                project_dir = self.container.project_dir
             summary_text = fn(task=task, run=run, project_dir=project_dir)
             if isinstance(summary_text, str) and summary_text.strip():
                 run.steps.append({
