@@ -15,6 +15,7 @@ from ...workers.config import get_workers_runtime_config, resolve_worker_for_ste
 from ..domain.models import PlanRefineJob, PlanRevision, ReviewCycle, ReviewFinding, RunRecord, Task, now_iso
 from ..events.bus import EventBus
 from ..storage.container import Container
+from ...worker import WorkerCancelledError
 from .live_worker_adapter import _VERIFY_STEPS
 from .worker_adapter import DefaultWorkerAdapter, StepResult, WorkerAdapter
 
@@ -923,7 +924,10 @@ class OrchestratorService:
         return result
 
     def _run_non_review_step(self, task: Task, run: RunRecord, step: str, attempt: int = 1) -> bool:
-        result = self.worker_adapter.run_step(task=task, step=step, attempt=attempt)
+        try:
+            result = self.worker_adapter.run_step(task=task, step=step, attempt=attempt)
+        except WorkerCancelledError:
+            raise self._Cancelled()
         step_log: dict[str, Any] = {"step": step, "status": result.status, "ts": now_iso(), "summary": result.summary}
         if result.human_blocking_issues:
             step_log["human_blocking_issues"] = result.human_blocking_issues
@@ -1073,7 +1077,10 @@ class OrchestratorService:
         return created_ids
 
     def _findings_from_result(self, task: Task, review_attempt: int) -> tuple[list[ReviewFinding], StepResult]:
-        result = self.worker_adapter.run_step(task=task, step="review", attempt=review_attempt)
+        try:
+            result = self.worker_adapter.run_step(task=task, step="review", attempt=review_attempt)
+        except WorkerCancelledError:
+            raise self._Cancelled()
         raw_findings = list(result.findings or [])
         findings: list[ReviewFinding] = []
         for idx, finding in enumerate(raw_findings):
@@ -1340,9 +1347,41 @@ class OrchestratorService:
                 payload={"from": from_id, "to": to_id, "reason": reason},
             )
 
+    class _Cancelled(Exception):
+        """Raised when a task is cancelled mid-execution."""
+
+    def _check_cancelled(self, task: Task) -> None:
+        """Re-read task from storage and raise _Cancelled if user cancelled it."""
+        fresh = self.container.tasks.get(task.id)
+        if fresh and fresh.status == "cancelled":
+            raise self._Cancelled()
+
     def _execute_task(self, task: Task) -> None:
         try:
             self._execute_task_inner(task)
+        except self._Cancelled:
+            logger.info("Task %s was cancelled by user", task.id)
+            # Ensure the persisted status stays cancelled
+            fresh = self.container.tasks.get(task.id)
+            if fresh:
+                if fresh.status != "cancelled":
+                    fresh.status = "cancelled"
+                    self.container.tasks.upsert(fresh)
+                # Finalize any active run
+                for run_id in reversed(fresh.run_ids):
+                    run = self.container.runs.get(run_id)
+                    if run and run.status == "in_progress":
+                        run.status = "cancelled"
+                        run.finished_at = now_iso()
+                        run.summary = "Cancelled by user"
+                        self.container.runs.upsert(run)
+                        break
+                self.bus.emit(
+                    channel="tasks",
+                    event_type="task.cancelled",
+                    entity_id=fresh.id,
+                    payload={"status": "cancelled"},
+                )
         except Exception:
             logger.exception("Unexpected error executing task %s", task.id)
             task.status = "blocked"
@@ -1411,6 +1450,7 @@ class OrchestratorService:
                         run.steps.append({"step": step, "status": "skipped", "ts": now_iso()})
                         self.container.runs.upsert(run)
                         continue
+                self._check_cancelled(task)
                 task.current_step = step
                 self.container.tasks.upsert(task)
                 gate_name = self._GATE_MAPPING.get(step)
@@ -1468,6 +1508,7 @@ class OrchestratorService:
                     return
 
             # Phase 2: Review loop (only if template has "review")
+            self._check_cancelled(task)
             if has_review and retry_from != "commit":
                 gate_name = self._GATE_MAPPING.get("review")
                 if gate_name and should_gate(mode, gate_name):
@@ -1479,6 +1520,7 @@ class OrchestratorService:
                 review_passed = False
 
                 while review_attempt < max_review_attempts:
+                    self._check_cancelled(task)
                     review_attempt += 1
                     task.current_step = "review"
                     if review_attempt > 1:
@@ -1594,6 +1636,7 @@ class OrchestratorService:
                     return
 
             # Phase 3: Commit (only if template has "commit")
+            self._check_cancelled(task)
             if has_commit:
                 task.current_step = "commit"
                 self.container.tasks.upsert(task)

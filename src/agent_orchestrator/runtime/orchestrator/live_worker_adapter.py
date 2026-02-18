@@ -14,6 +14,7 @@ from typing import Any
 from ...pipelines.registry import PipelineRegistry
 from ...workers.config import get_workers_runtime_config, resolve_worker_for_step
 from ...workers.diagnostics import test_worker
+from ...worker import WorkerCancelledError
 from ...workers.run import WorkerRunResult, run_worker
 from ..domain.models import RunRecord, Task, now_iso
 from ..storage.container import Container
@@ -856,6 +857,11 @@ class LiveWorkerAdapter:
         }
         task.metadata["active_logs"] = log_meta
         self._container.tasks.upsert(task)
+
+        def _check_task_cancelled() -> bool:
+            fresh = self._container.tasks.get(task.id)
+            return fresh is not None and fresh.status == "cancelled"
+
         try:
             result = run_worker(
                 spec=spec,
@@ -866,7 +872,10 @@ class LiveWorkerAdapter:
                 heartbeat_seconds=heartbeat_seconds,
                 heartbeat_grace_seconds=heartbeat_grace_seconds,
                 progress_path=progress_path,
+                is_cancelled=_check_task_cancelled,
             )
+        except WorkerCancelledError:
+            raise  # Let the orchestrator handle cancellation
         except Exception as exc:
             return StepResult(status="error", summary=f"Worker execution failed: {exc}")
         finally:

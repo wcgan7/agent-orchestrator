@@ -48,6 +48,10 @@ def _latest_mtime(paths: list[Path]) -> Optional[datetime]:
     return latest
 
 
+class WorkerCancelledError(Exception):
+    """Raised when a worker is cancelled mid-execution."""
+
+
 def _run_codex_worker(
     command: str,
     prompt: str,
@@ -59,6 +63,7 @@ def _run_codex_worker(
     progress_path: Path,
     expected_run_id: Optional[str] = None,
     on_spawn: Optional[Callable[[int], None]] = None,
+    is_cancelled: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     prompt_path = run_dir / "prompt.txt"
     prompt_path.write_text(prompt)
@@ -166,6 +171,16 @@ def _run_codex_worker(
             except subprocess.TimeoutExpired:
                 process.kill()
             break
+
+        if is_cancelled and is_cancelled():
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+            stdout_thread.join(timeout=5)
+            stderr_thread.join(timeout=5)
+            raise WorkerCancelledError("Task cancelled by user")
 
         try:
             process.wait(timeout=poll_interval)
