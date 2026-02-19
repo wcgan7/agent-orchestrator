@@ -923,6 +923,45 @@ class OrchestratorService:
                 break
         return result
 
+    _VERIFY_OUTPUT_TAIL_CHARS = 8000
+
+    def _capture_verify_output(self, task: Task) -> None:
+        """Read the tail of the verify step's stdout/stderr and stash it in metadata.
+
+        This gives ``implement_fix`` concrete test/lint output to work with,
+        not just the terse ``task.error`` summary.
+        """
+        last_logs = task.metadata.get("last_logs") if isinstance(task.metadata, dict) else None
+        if not isinstance(last_logs, dict):
+            return
+        limit = self._VERIFY_OUTPUT_TAIL_CHARS
+        parts: list[str] = []
+        for key, label in (("stdout_path", "stdout"), ("stderr_path", "stderr")):
+            raw = last_logs.get(key)
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            try:
+                p = Path(raw)
+                if not p.is_file():
+                    continue
+                size = p.stat().st_size
+                if size <= 0:
+                    continue
+                # Read only the tail to keep prompt size bounded.
+                read_bytes = min(size, limit * 4)
+                with open(p, "rb") as fh:
+                    if read_bytes < size:
+                        fh.seek(size - read_bytes)
+                    text = fh.read(read_bytes).decode("utf-8", errors="replace")
+                tail = text[-limit:] if len(text) > limit else text
+                if tail.strip():
+                    parts.append(f"--- {label} (last {len(tail)} chars) ---")
+                    parts.append(tail.strip())
+            except Exception:
+                continue
+        if parts:
+            task.metadata["verify_output"] = "\n".join(parts)
+
     def _run_non_review_step(self, task: Task, run: RunRecord, step: str, attempt: int = 1) -> bool:
         try:
             result = self.worker_adapter.run_step(task=task, step=step, attempt=attempt)
@@ -1463,9 +1502,10 @@ class OrchestratorService:
                     if step in _VERIFY_STEPS:
                         fixed = False
                         for fix_attempt in range(1, max_verify_fix_attempts + 1):
-                            # Stash the failure summary so implement_fix sees it.
+                            # Stash the failure summary and log output so implement_fix sees it.
                             task.status = "in_progress"
                             task.metadata["verify_failure"] = task.error
+                            self._capture_verify_output(task)
                             task.error = None
                             task.retry_count += 1
                             self.container.tasks.upsert(task)
@@ -1479,6 +1519,7 @@ class OrchestratorService:
                             if not self._run_non_review_step(task, run, "implement_fix", attempt=fix_attempt + 1):
                                 return
                             task.metadata.pop("verify_failure", None)
+                            task.metadata.pop("verify_output", None)
                             task.current_step = step
                             self.container.tasks.upsert(task)
                             if self._run_non_review_step(task, run, step, attempt=fix_attempt + 1):
@@ -1601,6 +1642,7 @@ class OrchestratorService:
                         for vfix in range(1, max_verify_fix_attempts + 1):
                             task.status = "in_progress"
                             task.metadata["verify_failure"] = task.error
+                            self._capture_verify_output(task)
                             task.error = None
                             task.retry_count += 1
                             self.container.tasks.upsert(task)
@@ -1614,6 +1656,7 @@ class OrchestratorService:
                             if not self._run_non_review_step(task, run, "implement_fix", attempt=vfix + 1):
                                 return
                             task.metadata.pop("verify_failure", None)
+                            task.metadata.pop("verify_output", None)
                             task.current_step = "verify"
                             self.container.tasks.upsert(task)
                             if self._run_non_review_step(task, run, "verify", attempt=vfix + 1):
