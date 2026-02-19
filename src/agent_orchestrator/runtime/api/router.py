@@ -37,6 +37,7 @@ class CreateTaskRequest(BaseModel):
     source: str = "manual"
     worker_model: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    project_commands: Optional[dict[str, dict[str, str]]] = None
 
 
 class UpdateTaskRequest(BaseModel):
@@ -52,6 +53,7 @@ class UpdateTaskRequest(BaseModel):
     dependency_policy: Optional[str] = None
     worker_model: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
+    project_commands: Optional[dict[str, dict[str, str]]] = None
 
 
 class TransitionRequest(BaseModel):
@@ -330,6 +332,16 @@ def _normalize_human_blocking_issues(value: Any) -> list[dict[str, str]]:
     return out[:20]
 
 
+def _iso_delta_seconds(start: str, end: str) -> Optional[float]:
+    """Compute elapsed seconds between two ISO-8601 timestamps."""
+    try:
+        s = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        e = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        return max((e - s).total_seconds(), 0.0)
+    except (ValueError, TypeError):
+        return None
+
+
 def _build_execution_summary(task: Task, container: "Container") -> Optional[dict[str, Any]]:
     """Build execution summary from the latest RunRecord's step data."""
     if task.status not in ("in_review", "blocked", "done"):
@@ -360,6 +372,10 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
             entry["open_counts"] = step_data["open_counts"]
         if step_data.get("commit"):
             entry["commit"] = str(step_data["commit"])
+        started_at_raw = step_data.get("started_at")
+        ts_raw = step_data.get("ts")
+        if isinstance(started_at_raw, str) and isinstance(ts_raw, str):
+            entry["duration_seconds"] = _iso_delta_seconds(started_at_raw, ts_raw)
         steps.append(entry)
     if not steps:
         return None
@@ -372,12 +388,14 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
         "running": "Running",
     }
     run_summary = status_labels.get(run.status) or status_labels.get(task.status) or run.status
+    run_duration = _iso_delta_seconds(run.started_at, run.finished_at) if run.started_at and run.finished_at else None
     return {
         "run_id": run.id,
         "run_status": run.status,
         "run_summary": run_summary,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
+        "duration_seconds": run_duration,
         "steps": steps,
     }
 
@@ -386,6 +404,8 @@ def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[s
     payload = task.to_dict()
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
     payload["human_blocking_issues"] = _normalize_human_blocking_issues(metadata.get("human_blocking_issues"))
+    raw_actions = metadata.get("human_review_actions")
+    payload["human_review_actions"] = list(raw_actions) if isinstance(raw_actions, list) else []
     if container is not None:
         summary = _build_execution_summary(task, container)
         if summary is not None:
@@ -977,6 +997,7 @@ def create_router(
             source=body.source,
             worker_model=(str(body.worker_model).strip() if body.worker_model else None),
             metadata=body.metadata,
+            project_commands=(body.project_commands if body.project_commands else None),
         )
         if body.status in ("backlog", "queued"):
             task.status = body.status
@@ -1238,6 +1259,8 @@ def create_router(
                 status_code=400,
                 detail="Task status cannot be changed via PATCH. Use /transition, /retry, /cancel, or review actions.",
             )
+        if "project_commands" in updates and not updates["project_commands"]:
+            updates["project_commands"] = None
         for key, value in updates.items():
             setattr(task, key, value)
         task.updated_at = now_iso()
@@ -1294,12 +1317,16 @@ def create_router(
         task.metadata = task.metadata if isinstance(task.metadata, dict) else {}
         task.metadata.pop("human_blocking_issues", None)
         guidance = (body.guidance if body else None) or ""
+        ts = now_iso()
         if guidance.strip() or previous_error.strip():
             task.metadata["retry_guidance"] = {
-                "ts": now_iso(),
+                "ts": ts,
                 "guidance": guidance.strip(),
                 "previous_error": previous_error.strip(),
             }
+        if guidance.strip():
+            history_list: list = task.metadata.setdefault("human_review_actions", [])
+            history_list.append({"action": "retry", "ts": ts, "guidance": guidance.strip(), "previous_error": previous_error.strip()})
         start_from = (body.start_from_step if body else None) or ""
         if start_from.strip():
             task.metadata["retry_from_step"] = start_from.strip()
@@ -1406,6 +1433,15 @@ def create_router(
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.dep_analysis_reset", entity_id=task.id, payload={})
         return {"task": _task_payload(task, container)}
+
+    @router.get("/tasks/{task_id}/workdoc")
+    async def get_task_workdoc(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        orchestrator = resolve_orchestrator(project_dir)
+        return orchestrator.get_workdoc(task_id)
 
     @router.get("/tasks/{task_id}/plan")
     async def get_task_plan(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1756,8 +1792,47 @@ def create_router(
                 "human_blocking_issues": task_issues,
             }
         ]
+        # Inject human review actions from task metadata so they survive event-log eviction.
+        # Only dedup approve/request_changes (clean 1:1 with history entries).
+        # Retry events are NOT deduped because task.retry fires for all retries
+        # but human_review_actions only records guided retries.
+        injected_review_types: set[str] = set()
+        action_type_map = {"approve": "task.approved", "request_changes": "task.changes_requested", "retry": "task.retry_with_guidance"}
+        dedup_types = {"task.approved", "task.changes_requested"}
+        raw_review_actions = task.metadata.get("human_review_actions") if isinstance(task.metadata, dict) else None
+        if isinstance(raw_review_actions, list):
+            for idx, entry in enumerate(raw_review_actions):
+                if not isinstance(entry, dict):
+                    continue
+                action = str(entry.get("action") or "")
+                ts = str(entry.get("ts") or task.created_at)
+                guidance = str(entry.get("guidance") or "")
+                previous_error = str(entry.get("previous_error") or "")
+                event_type_label = action_type_map.get(action, f"task.{action}")
+                if event_type_label in dedup_types:
+                    injected_review_types.add(event_type_label)
+                details = guidance
+                if previous_error:
+                    details = f"{guidance}\n\nPrevious error: {previous_error}" if guidance else f"Previous error: {previous_error}"
+                events.append(
+                    {
+                        "id": f"review-action-{task.id}-{idx}",
+                        "type": event_type_label,
+                        "timestamp": ts,
+                        "actor": "human",
+                        "actor_type": "human",
+                        "summary": {"approve": "Approved", "request_changes": "Changes requested", "retry": "Retry with guidance"}.get(action, action),
+                        "details": details,
+                    }
+                )
+
         for event in container.events.list_recent(limit=2000):
             if event.get("entity_id") != task_id:
+                continue
+            # Deduplicate: skip event-log entries whose type was already injected
+            # from human_review_actions (the authoritative source).
+            event_type = str(event.get("type") or "")
+            if event_type in injected_review_types:
                 continue
             payload = event.get("payload")
             payload_dict = payload if isinstance(payload, dict) else {}
@@ -2005,9 +2080,12 @@ def create_router(
         if task.status != "in_review":
             raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review")
         task.status = "done"
-        task.metadata["last_review_approval"] = {"ts": now_iso(), "guidance": body.guidance}
+        ts = now_iso()
+        task.metadata["last_review_approval"] = {"ts": ts, "guidance": body.guidance}
+        history: list = task.metadata.setdefault("human_review_actions", [])
+        history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
         container.tasks.upsert(task)
-        bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={})
+        bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={"guidance": body.guidance or ""})
         return {"task": _task_payload(task, container)}
 
     @router.post("/review/{task_id}/request-changes")
@@ -2019,8 +2097,11 @@ def create_router(
         if task.status != "in_review":
             raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review")
         task.status = "queued"
-        task.metadata["requested_changes"] = {"ts": now_iso(), "guidance": body.guidance}
+        ts = now_iso()
+        task.metadata["requested_changes"] = {"ts": ts, "guidance": body.guidance}
         task.metadata["retry_from_step"] = "implement"
+        history: list = task.metadata.setdefault("human_review_actions", [])
+        history.append({"action": "request_changes", "ts": ts, "guidance": body.guidance or ""})
         container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.changes_requested", entity_id=task.id, payload={"guidance": body.guidance})
         return {"task": _task_payload(task, container)}

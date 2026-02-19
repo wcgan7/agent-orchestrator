@@ -9,7 +9,7 @@ import './styles/orchestrator.css'
 
 type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
 type CreateTab = 'task' | 'import' | 'quick'
-type TaskDetailTab = 'overview' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
+type TaskDetailTab = 'overview' | 'plan' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
 type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition'
 
 type TaskRecord = {
@@ -37,8 +37,17 @@ type TaskRecord = {
   quality_gate?: Record<string, number>
   metadata?: Record<string, unknown>
   human_blocking_issues?: HumanBlockingIssue[]
+  human_review_actions?: ReviewAction[]
   error?: string | null
   execution_summary?: ExecutionSummary | null
+  project_commands?: Record<string, Record<string, string>> | null
+}
+
+type ReviewAction = {
+  action: 'approve' | 'request_changes' | 'retry'
+  ts: string
+  guidance: string
+  previous_error?: string
 }
 
 type ExecutionStepSummary = {
@@ -47,6 +56,7 @@ type ExecutionStepSummary = {
   summary: string
   open_counts?: Record<string, number>
   commit?: string
+  duration_seconds?: number | null
 }
 
 type ExecutionSummary = {
@@ -55,6 +65,7 @@ type ExecutionSummary = {
   run_summary: string
   started_at: string | null
   finished_at: string | null
+  duration_seconds?: number | null
   steps: ExecutionStepSummary[]
 }
 
@@ -1001,6 +1012,17 @@ function toLocaleTimestamp(value?: string | null): string {
   return parsed.toLocaleString()
 }
 
+function formatDuration(seconds: number | null | undefined): string {
+  if (seconds == null || seconds < 0) return ''
+  if (seconds < 60) return `${Math.round(seconds)}s`
+  const m = Math.floor(seconds / 60)
+  const s = Math.round(seconds % 60)
+  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`
+  const h = Math.floor(m / 60)
+  const rm = m % 60
+  return rm > 0 ? `${h}h ${rm}m` : `${h}h`
+}
+
 function inferProjectId(projectDir: string): string {
   const normalized = projectDir.trim().replace(/[\\/]+$/, '')
   if (!normalized) return ''
@@ -1318,6 +1340,7 @@ export default function App() {
   const [planJobLoading, setPlanJobLoading] = useState(false)
   const [planRefineStdout, setPlanRefineStdout] = useState('')
   const [planningWorkerTab, setPlanningWorkerTab] = useState<'plan' | 'manual'>('plan')
+  const [planTabMode, setPlanTabMode] = useState<'view' | 'edit' | 'refine'>('view')
   const [planSavingManual, setPlanSavingManual] = useState(false)
   const [planCommitting, setPlanCommitting] = useState(false)
   const [planGenerateLoading, setPlanGenerateLoading] = useState(false)
@@ -1352,6 +1375,7 @@ export default function App() {
   const [editTaskApprovalMode, setEditTaskApprovalMode] = useState<'human_review' | 'auto_approve'>('human_review')
   const [editTaskHitlMode, setEditTaskHitlMode] = useState('autopilot')
   const [editTaskDependencyPolicy, setEditTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
+  const [editTaskProjectCommands, setEditTaskProjectCommands] = useState('')
 
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskDescription, setNewTaskDescription] = useState('')
@@ -1365,6 +1389,7 @@ export default function App() {
   const [newTaskParentId, setNewTaskParentId] = useState('')
   const [newTaskPipelineTemplate, setNewTaskPipelineTemplate] = useState('')
   const [newTaskMetadata, setNewTaskMetadata] = useState('')
+  const [newTaskProjectCommands, setNewTaskProjectCommands] = useState('')
   const [newTaskWorkerModel, setNewTaskWorkerModel] = useState('')
   const [collaborationModes, setCollaborationModes] = useState<CollaborationMode[]>(DEFAULT_COLLABORATION_MODES)
   const [newDependencyId, setNewDependencyId] = useState('')
@@ -1432,6 +1457,7 @@ export default function App() {
   const [quickActionStderrOffset, setQuickActionStderrOffset] = useState(0)
   const [reviewGuidance, setReviewGuidance] = useState('')
   const [retryFromStep, setRetryFromStep] = useState('')
+  const [showAllActivity, setShowAllActivity] = useState(false)
   const [logViewStep, setLogViewStep] = useState('')
   const logViewStepRef = useRef('')
 
@@ -1498,7 +1524,18 @@ export default function App() {
   }, [selectedTaskId])
 
   useEffect(() => {
-    setTaskDetailTab(taskSelectTabRef.current || 'overview')
+    const explicitTab = taskSelectTabRef.current
+    if (!explicitTab && selectedTaskId) {
+      // Auto-switch to plan tab when task is paused at before_implement gate
+      const matchedTask = Object.values(board.columns).flat().find((t) => t.id === selectedTaskId)
+      if (matchedTask?.pending_gate === 'before_implement' && matchedTask.task_type !== 'plan') {
+        setTaskDetailTab('plan')
+      } else {
+        setTaskDetailTab('overview')
+      }
+    } else {
+      setTaskDetailTab(explicitTab || 'overview')
+    }
     taskSelectTabRef.current = undefined
     setTaskActionPending(null)
     setTaskActionDetail('')
@@ -1514,6 +1551,8 @@ export default function App() {
     setTaskDiffLoading(false)
     setReviewGuidance('')
     setRetryFromStep('')
+    setShowAllActivity(false)
+    setPlanTabMode('view')
   }, [selectedTaskId])
 
   useEffect(() => {
@@ -1783,6 +1822,7 @@ export default function App() {
       setEditTaskApprovalMode(task.approval_mode || 'human_review')
       setEditTaskHitlMode(task.hitl_mode || 'autopilot')
       setEditTaskDependencyPolicy(task.dependency_policy || 'prudent')
+      setEditTaskProjectCommands(task.project_commands ? JSON.stringify(task.project_commands, null, 2) : '')
       if (task.status === 'blocked' && task.current_step) {
         setRetryFromStep(task.current_step)
       }
@@ -2854,6 +2894,16 @@ export default function App() {
         return
       }
     }
+    let parsedProjectCommands: Record<string, Record<string, string>> | undefined
+    if (newTaskProjectCommands.trim()) {
+      try {
+        parsedProjectCommands = parseProjectCommands(newTaskProjectCommands)
+        if (Object.keys(parsedProjectCommands).length === 0) parsedProjectCommands = undefined
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Invalid project commands JSON')
+        return
+      }
+    }
     const parsedPipelineTemplate = newTaskPipelineTemplate
       .split(',')
       .map((item) => item.trim())
@@ -2876,6 +2926,7 @@ export default function App() {
           parent_id: newTaskParentId.trim() || undefined,
           pipeline_template: parsedPipelineTemplate.length > 0 ? parsedPipelineTemplate : undefined,
           metadata: parsedMetadata,
+          project_commands: parsedProjectCommands,
           status: statusOverride || 'queued',
         }),
       })
@@ -2896,6 +2947,7 @@ export default function App() {
     setNewTaskParentId('')
     setNewTaskPipelineTemplate('')
     setNewTaskMetadata('')
+    setNewTaskProjectCommands('')
     setNewTaskWorkerModel('')
     setWorkOpen(false)
     await reloadAll()
@@ -3134,11 +3186,11 @@ export default function App() {
     }
   }
 
-  async function saveManualPlanRevision(taskId: string): Promise<void> {
+  async function saveManualPlanRevision(taskId: string): Promise<string | undefined> {
     const manualContent = planManualContent.trim()
     if (!manualContent) {
       setPlanActionError('Manual revision content is required.')
-      return
+      return undefined
     }
     setPlanSavingManual(true)
     setPlanActionMessage('')
@@ -3158,8 +3210,10 @@ export default function App() {
       setSelectedPlanRevisionId(resp.revision.id)
       setPlanActionMessage('Manual plan revision saved.')
       await loadTaskPlan(taskId)
+      return resp.revision.id
     } catch (err) {
       setPlanActionError(toErrorMessage('Failed to save manual plan revision', err))
+      return undefined
     } finally {
       setPlanSavingManual(false)
     }
@@ -3236,6 +3290,19 @@ export default function App() {
   }
 
   async function saveTaskEdits(taskId: string): Promise<void> {
+    let pcPayload: Record<string, Record<string, string>> | undefined
+    if (editTaskProjectCommands.trim()) {
+      try {
+        const parsed = parseProjectCommands(editTaskProjectCommands)
+        pcPayload = Object.keys(parsed).length > 0 ? parsed : {}
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Invalid project commands JSON')
+        return
+      }
+    } else if (selectedTaskDetail?.project_commands) {
+      // Field was cleared — send empty object to signal removal
+      pcPayload = {}
+    }
     await runTaskMutation(
       'save',
       async () => {
@@ -3251,6 +3318,7 @@ export default function App() {
             approval_mode: editTaskApprovalMode,
             hitl_mode: editTaskHitlMode,
             dependency_policy: editTaskDependencyPolicy,
+            project_commands: pcPayload,
           }),
         })
         await reloadAll()
@@ -3516,6 +3584,29 @@ export default function App() {
     )
   }
 
+  async function approveTask(taskId: string): Promise<void> {
+    await runTaskMutation(
+      'transition',
+      async () => {
+        await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/review/${taskId}/approve`, projectDir), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ guidance: reviewGuidance.trim() || undefined }),
+        })
+        setReviewGuidance('')
+        await reloadAll()
+        if (selectedTaskIdRef.current === taskId) {
+          await loadTaskDetail(taskId)
+        }
+      },
+      {
+        successMessage: 'Task approved.',
+        errorPrefix: 'Failed to approve task',
+        detail: 'done',
+      },
+    )
+  }
+
   async function requestChanges(taskId: string): Promise<void> {
     await runTaskMutation(
       'transition',
@@ -3640,6 +3731,12 @@ export default function App() {
   })
   const hasUnresolvedBlockers = unresolvedBlockers.length > 0
   const showViewPlan = isPlanTask && selectedTaskView?.status === 'done'
+  const showPlanTab = selectedTaskView && selectedTaskView.task_type !== 'plan' && (
+    (selectedTaskPlan?.revisions?.length ?? 0) > 0 ||
+    selectedTaskView.pending_gate === 'before_implement'
+  )
+  // Guard: if the Plan tab is selected but no longer visible, fall back to overview.
+  const effectiveTaskDetailTab = (taskDetailTab === 'plan' && !showPlanTab) ? 'overview' : taskDetailTab
 
   const taskDetailContent = selectedTaskView ? (
       <div className="detail-card">
@@ -3647,12 +3744,21 @@ export default function App() {
         <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}</p>
         <div className="detail-tabs" role="tablist" aria-label="Task detail sections">
           <button
-            className={`detail-tab ${taskDetailTab === 'overview' ? 'is-active' : ''}`}
-            aria-pressed={taskDetailTab === 'overview'}
+            className={`detail-tab ${effectiveTaskDetailTab === 'overview' ? 'is-active' : ''}`}
+            aria-pressed={effectiveTaskDetailTab === 'overview'}
             onClick={() => setTaskDetailTab('overview')}
           >
             Overview
           </button>
+          {showPlanTab ? (
+            <button
+              className={`detail-tab ${effectiveTaskDetailTab === 'plan' ? 'is-active' : ''}`}
+              aria-pressed={effectiveTaskDetailTab === 'plan'}
+              onClick={() => setTaskDetailTab('plan')}
+            >
+              Plan
+            </button>
+          ) : null}
           <button
             className={`detail-tab ${taskDetailTab === 'logs' ? 'is-active' : ''}`}
             aria-pressed={taskDetailTab === 'logs'}
@@ -3691,7 +3797,7 @@ export default function App() {
             </button>
           ) : null}
         </div>
-        {taskDetailTab === 'overview' ? (
+        {effectiveTaskDetailTab === 'overview' ? (
           <div className="task-detail-section-body">
             {selectedTaskView.description ? <RenderedMarkdown content={selectedTaskView.description} className="task-desc" /> : <p className="task-desc">No description.</p>}
             <p className="field-label">
@@ -3750,6 +3856,7 @@ export default function App() {
                       <summary className="execution-details-toggle">Step details</summary>
                       <p className="execution-summary-meta">
                         {selectedTaskView.execution_summary!.run_summary}
+                        {formatDuration(selectedTaskView.execution_summary!.duration_seconds) ? ` · ${formatDuration(selectedTaskView.execution_summary!.duration_seconds)}` : ''}
                         {selectedTaskView.execution_summary!.started_at ? ` · started ${new Date(selectedTaskView.execution_summary!.started_at).toLocaleString()}` : ''}
                         {selectedTaskView.execution_summary!.finished_at ? ` · finished ${new Date(selectedTaskView.execution_summary!.finished_at).toLocaleString()}` : ''}
                       </p>
@@ -3766,6 +3873,7 @@ export default function App() {
                               <span className={`execution-step-icon ${isOk ? 'step-ok' : 'step-error'}`}>{isOk ? '\u2713' : '\u2717'}</span>
                               <span className="execution-step-name">{humanizeLabel(step.step)}</span>
                               <span className={`status-pill status-pill-inline ${isOk ? 'status-done' : 'status-failed'}`}>{step.status}</span>
+                              {formatDuration(step.duration_seconds) ? <span className="execution-step-duration">{formatDuration(step.duration_seconds)}</span> : null}
                               {step.open_counts && Object.keys(step.open_counts).length > 0 ? (
                                 <span className="execution-step-counts">
                                   {Object.entries(step.open_counts).map(([sev, count]) => `${count} ${sev}`).join(', ')}
@@ -3799,6 +3907,25 @@ export default function App() {
                 </div>
               )
             })() : null}
+            {Array.isArray(selectedTaskView.human_review_actions) && selectedTaskView.human_review_actions.length > 0 ? (
+              <div className="review-history-box">
+                <p className="review-history-header">Review history</p>
+                {selectedTaskView.human_review_actions.map((entry, idx) => {
+                  const actionLabel = entry.action === 'approve' ? 'Approved' : entry.action === 'request_changes' ? 'Changes requested' : entry.action === 'retry' ? 'Retry with guidance' : entry.action
+                  const badgeClass = entry.action === 'approve' ? 'status-done' : entry.action === 'request_changes' ? 'status-review' : 'status-blocked'
+                  return (
+                    <div className="review-history-entry" key={`review-action-${idx}`}>
+                      <div className="review-history-entry-head">
+                        <span className={`status-pill status-pill-inline ${badgeClass}`}>{actionLabel}</span>
+                        <span className="review-history-ts">{toLocaleTimestamp(entry.ts) || '-'}</span>
+                      </div>
+                      {entry.guidance ? <RenderedMarkdown content={entry.guidance} className="review-history-guidance" /> : null}
+                      {entry.previous_error ? <pre className="review-history-error">{entry.previous_error}</pre> : null}
+                    </div>
+                  )
+                })}
+              </div>
+            ) : null}
             {selectedTaskView.error?.trim() ? (() => {
               const stderrTail = (stderrHistory || '').trim()
               const logTail = (stdoutHistory || '').trim()
@@ -3821,7 +3948,20 @@ export default function App() {
                 </div>
               )
             })() : null}
-            {selectedTaskView.pending_gate ? (
+            {selectedTaskView.pending_gate === 'before_implement' ? (
+              <div className="preview-box plan-gate-banner">
+                <p className="field-label">
+                  Plan ready for review.{' '}
+                  <button className="link-button" onClick={() => setTaskDetailTab('plan')}>
+                    View and edit the plan
+                  </button>{' '}
+                  before approving.
+                </p>
+                <button className="button button-primary" onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}>
+                  Approve gate
+                </button>
+              </div>
+            ) : selectedTaskView.pending_gate ? (
               <div className="preview-box">
                 <p className="field-label">
                   Pending gate: <strong>{humanizeLabel(selectedTaskView.pending_gate)}</strong>
@@ -3855,6 +3995,151 @@ export default function App() {
             ) : null}
           </div>
         ) : null}
+        {effectiveTaskDetailTab === 'plan' ? (() => {
+          const planRevisions = selectedTaskPlan?.revisions || []
+          const selectedPlanRevision = selectedPlanRevisionId
+            ? (planRevisions.find((r) => r.id === selectedPlanRevisionId) || null)
+            : null
+          const latestPlanRevision = selectedTaskPlan?.latest_revision_id
+            ? (planRevisions.find((r) => r.id === selectedTaskPlan.latest_revision_id) || null)
+            : null
+          const effectiveRevision = selectedPlanRevision || latestPlanRevision
+          const planContent = (effectiveRevision?.content || selectedTaskPlan?.latest?.content || '').trim()
+          const isRefining = !!(selectedTaskPlan?.active_refine_job
+            && (selectedTaskPlan.active_refine_job.status === 'queued' || selectedTaskPlan.active_refine_job.status === 'running'))
+          return (
+            <div className="task-detail-section-body">
+              {selectedTaskView.pending_gate === 'before_implement' ? (
+                <div className="preview-box plan-gate-banner">
+                  <p className="field-label">Plan ready for review. Approve to proceed with implementation.</p>
+                  <button className="button button-primary" onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}>
+                    Approve gate
+                  </button>
+                </div>
+              ) : null}
+              <div className="plan-tab-mode-switcher">
+                <button className={`button ${planTabMode === 'view' ? 'is-active' : ''}`} onClick={() => setPlanTabMode('view')}>View</button>
+                <button className={`button ${planTabMode === 'edit' ? 'is-active' : ''}`} onClick={() => {
+                  if (planTabMode !== 'edit') {
+                    const text = planContent
+                    const seeded = planManualSeedRef.current
+                    const wasSeeded = seeded.taskId === selectedTaskView.id && seeded.workerText.trim().length > 0
+                    const sameAsSeeded = wasSeeded && planManualContent.trim() === seeded.workerText.trim()
+                    if (!planManualContent.trim() || sameAsSeeded) {
+                      setPlanManualContent(text)
+                      planManualSeedRef.current = { taskId: selectedTaskView.id, workerText: text }
+                    }
+                  }
+                  setPlanTabMode('edit')
+                }}>Edit</button>
+                <button className={`button ${planTabMode === 'refine' ? 'is-active' : ''}`} onClick={() => setPlanTabMode('refine')}>Refine</button>
+              </div>
+              {planActionMessage ? <p className="field-label" style={{ color: 'var(--color-success, #5cb85c)' }}>{planActionMessage}</p> : null}
+              {planActionError ? <p className="field-label" style={{ color: 'var(--color-danger, #d9534f)' }}>{planActionError}</p> : null}
+              {planTabMode === 'view' ? (
+                <div className="form-stack">
+                  {planRevisions.length > 1 ? (
+                    <>
+                      <label className="field-label" htmlFor="plan-tab-revision-selector">Revision</label>
+                      <select
+                        id="plan-tab-revision-selector"
+                        value={selectedPlanRevisionId}
+                        onChange={(e) => setSelectedPlanRevisionId(e.target.value)}
+                      >
+                        <option value="">(latest)</option>
+                        {planRevisions.map((rev) => (
+                          <option key={rev.id} value={rev.id}>
+                            {rev.id} · {humanizeLabel(rev.source)} · {rev.status}
+                          </option>
+                        ))}
+                      </select>
+                    </>
+                  ) : null}
+                  {planContent ? (
+                    <div className="preview-box">
+                      {effectiveRevision ? (
+                        <p className="task-meta">
+                          {humanizeLabel(effectiveRevision.source)}
+                          {effectiveRevision.step ? ` · ${humanizeLabel(effectiveRevision.step)}` : ''}
+                          {' · '}{humanizeLabel(effectiveRevision.status)}
+                        </p>
+                      ) : null}
+                      <RenderedMarkdown content={planContent} className="plan-content-field" />
+                    </div>
+                  ) : (
+                    <p className="empty">No plan content yet.</p>
+                  )}
+                </div>
+              ) : null}
+              {planTabMode === 'edit' ? (
+                <div className="form-stack">
+                  <textarea
+                    className="plan-content-field"
+                    rows={20}
+                    value={planManualContent}
+                    onChange={(e) => setPlanManualContent(e.target.value)}
+                    placeholder="Edit plan text."
+                  />
+                  <div className="plan-tab-commit-bar">
+                    <button
+                      className="button button-primary"
+                      disabled={planSavingManual || planCommitting || !planManualContent.trim()}
+                      onClick={async () => {
+                        const newRevId = await saveManualPlanRevision(selectedTaskView.id)
+                        if (newRevId) {
+                          await commitPlanRevision(selectedTaskView.id, newRevId)
+                        }
+                      }}
+                    >
+                      {planSavingManual || planCommitting ? 'Saving...' : 'Save & commit'}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {planTabMode === 'refine' ? (
+                <div className="form-stack">
+                  {isRefining ? (
+                    <div className="refine-banner">
+                      <span className="refine-banner-dot" />
+                      <span>Refining plan...</span>
+                    </div>
+                  ) : null}
+                  <label className="field-label" htmlFor="plan-tab-refine-feedback">Request changes from worker</label>
+                  <div className="planning-refine-inline">
+                    <input
+                      id="plan-tab-refine-feedback"
+                      value={planRefineFeedback}
+                      onChange={(e) => setPlanRefineFeedback(e.target.value)}
+                      placeholder="Describe what should change in the plan."
+                    />
+                    <button
+                      className="button"
+                      onClick={() => void refineTaskPlan(selectedTaskView.id)}
+                      disabled={planJobLoading || isRefining || !planRefineFeedback.trim()}
+                    >
+                      {planJobLoading || isRefining ? 'Refining...' : 'Refine'}
+                    </button>
+                  </div>
+                  <div className="preview-box">
+                    <p className="field-label">Worker output{isRefining ? ' (live)' : ''}</p>
+                    <pre className="task-log-output plan-content-field planning-worker-output">{planRefineStdout || ' '}</pre>
+                  </div>
+                  {!isRefining && planRevisions.length > 0 ? (
+                    <div className="plan-tab-commit-bar">
+                      <button
+                        className="button button-primary"
+                        disabled={planCommitting || (!selectedPlanRevisionId && !selectedTaskPlan?.latest_revision_id)}
+                        onClick={() => void commitPlanRevision(selectedTaskView.id, selectedPlanRevisionId || selectedTaskPlan?.latest_revision_id || '')}
+                      >
+                        {planCommitting ? 'Committing...' : 'Commit this revision'}
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          )
+        })() : null}
         {taskDetailTab === 'configuration' ? (
           <div className="task-detail-section-body">
               <div className="form-stack">
@@ -3909,6 +4194,33 @@ export default function App() {
                   {(configLocked ? (selectedTaskView.dependency_policy || 'prudent') : editTaskDependencyPolicy) === 'prudent' && 'Prefer existing deps. Only add new ones when manual implementation would be unreliable or complex.'}
                   {(configLocked ? (selectedTaskView.dependency_policy || 'prudent') : editTaskDependencyPolicy) === 'strict' && 'No new dependencies allowed. Work only with what is already installed.'}
                 </p>
+                <label className="field-label">Project commands override</label>
+                {configLocked ? (
+                  selectedTaskView.project_commands && Object.keys(selectedTaskView.project_commands).length > 0 ? (
+                    <pre className="task-meta" style={{ whiteSpace: 'pre-wrap', fontSize: '0.85em' }}>{JSON.stringify(selectedTaskView.project_commands, null, 2)}</pre>
+                  ) : (
+                    <p className="task-meta">Not set (using global defaults)</p>
+                  )
+                ) : (
+                  <div className="json-editor-group">
+                    <textarea
+                      className="json-editor-textarea"
+                      rows={6}
+                      value={editTaskProjectCommands}
+                      onChange={(event) => setEditTaskProjectCommands(event.target.value)}
+                      placeholder={PROJECT_COMMANDS_EXAMPLE}
+                      disabled={taskActionPending === 'save'}
+                    />
+                    <div className="inline-actions">
+                      <button type="button" className="button button-xs"
+                        onClick={() => handleFormatJsonField('Project commands', editTaskProjectCommands, setEditTaskProjectCommands)}
+                      >Format</button>
+                      <button type="button" className="button button-xs"
+                        onClick={() => setEditTaskProjectCommands('')}
+                      >Clear</button>
+                    </div>
+                  </div>
+                )}
                 {!configLocked ? (
                   <div className="inline-actions">
                     <button
@@ -4026,7 +4338,7 @@ export default function App() {
           <div className="task-detail-section-body">
             <div className="list-stack">
               {collaborationLoading ? <p className="field-label">Loading activity...</p> : null}
-              {collaborationTimeline.slice(0, 8).map((event) => (
+              {(showAllActivity ? collaborationTimeline : collaborationTimeline.slice(0, 8)).map((event) => (
                 <div className="row-card timeline-event-card" key={event.id}>
                   <div>
                     <p className="task-title">{event.summary || humanizeLabel(event.type)}</p>
@@ -4043,6 +4355,11 @@ export default function App() {
                   ) : null}
                 </div>
               ))}
+              {collaborationTimeline.length > 8 ? (
+                <button className="link-button" onClick={() => setShowAllActivity((prev) => !prev)}>
+                  {showAllActivity ? 'Show fewer' : `Show all (${collaborationTimeline.length}) events`}
+                </button>
+              ) : null}
               {collaborationTimeline.length === 0 && !collaborationLoading ? <p className="empty">No activity for this task yet.</p> : null}
               {collaborationError ? <p className="error-banner">{collaborationError}</p> : null}
             </div>
@@ -5375,7 +5692,7 @@ export default function App() {
                 ) : null}
                 {taskStatus === 'in_review' ? (
                   <>
-                    <button className="button button-primary" onClick={() => void transitionTask(selectedTaskView.id, 'done')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'done' ? 'Approving...' : 'Approve'}</button>
+                    <button className="button button-primary" onClick={() => void approveTask(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'done' ? 'Approving...' : 'Approve'}</button>
                     <input
                       className="review-guidance-input"
                       value={reviewGuidance}
@@ -5539,6 +5856,15 @@ export default function App() {
                         value={newTaskWorkerModel}
                         onChange={(event) => setNewTaskWorkerModel(event.target.value)}
                         placeholder="gpt-5-codex"
+                      />
+                      <label className="field-label" htmlFor="task-project-commands">Project commands override (optional)</label>
+                      <textarea
+                        id="task-project-commands"
+                        className="json-editor-textarea"
+                        rows={4}
+                        value={newTaskProjectCommands}
+                        onChange={(event) => setNewTaskProjectCommands(event.target.value)}
+                        placeholder={PROJECT_COMMANDS_EXAMPLE}
                       />
                       <label className="field-label" htmlFor="task-metadata">Metadata JSON object (optional)</label>
                       <textarea

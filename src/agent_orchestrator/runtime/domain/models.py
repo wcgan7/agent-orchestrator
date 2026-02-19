@@ -120,6 +120,7 @@ class Task:
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
     metadata: dict[str, Any] = field(default_factory=dict)
+    project_commands: Optional[dict[str, dict[str, str]]] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -142,6 +143,12 @@ class Task:
         payload["pipeline_template"] = list(data.get("pipeline_template") or [])
         payload["quality_gate"] = dict(data.get("quality_gate") or {"critical": 0, "high": 0, "medium": 0, "low": 0})
         payload["metadata"] = dict(data.get("metadata") or {})
+        raw_pc = data.get("project_commands")
+        payload["project_commands"] = (
+            {k: dict(v) for k, v in raw_pc.items() if isinstance(v, dict) and v}
+            if isinstance(raw_pc, dict) and raw_pc
+            else None
+        )
         payload["hitl_mode"] = str(data.get("hitl_mode") or "autopilot")
         raw_dep_policy = str(data.get("dependency_policy") or "prudent")
         payload["dependency_policy"] = raw_dep_policy if raw_dep_policy in ("permissive", "prudent", "strict") else "prudent"

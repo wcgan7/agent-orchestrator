@@ -892,9 +892,8 @@ def test_implementation_prompt_includes_python_standards() -> None:
         task=task, step="implement", attempt=1, is_codex=True,
         project_languages=["python"],
     )
-    assert "Language standards" in prompt
-    assert "Python" in prompt
-    assert "ruff" in prompt
+    assert "Style guidelines" in prompt
+    assert "Python defaults" in prompt
 
 
 def test_review_prompt_includes_typescript_standards() -> None:
@@ -903,9 +902,8 @@ def test_review_prompt_includes_typescript_standards() -> None:
         task=task, step="review", attempt=1, is_codex=True,
         project_languages=["typescript"],
     )
-    assert "Language standards" in prompt
-    assert "TypeScript" in prompt
-    assert "tsc" in prompt
+    assert "Style guidelines" in prompt
+    assert "TypeScript defaults" in prompt
 
 
 def test_prompt_no_language_when_none() -> None:
@@ -913,7 +911,7 @@ def test_prompt_no_language_when_none() -> None:
     prompt = build_step_prompt(
         task=task, step="implement", attempt=1, is_codex=True, project_languages=None,
     )
-    assert "Language standards" not in prompt
+    assert "Python defaults" not in prompt
 
 
 def test_language_not_injected_for_planning() -> None:
@@ -922,20 +920,18 @@ def test_language_not_injected_for_planning() -> None:
         task=task, step="plan", attempt=1, is_codex=True,
         project_languages=["python"],
     )
-    assert "Language standards" not in prompt
+    assert "Style guidelines" not in prompt
 
 
 def test_mixed_language_prompt_includes_all_standards() -> None:
-    """Full-stack repo: both Python and TypeScript standards are injected."""
+    """Full-stack repo: both Python and TypeScript defaults are injected."""
     task = _make_task()
     prompt = build_step_prompt(
         task=task, step="implement", attempt=1, is_codex=True,
         project_languages=["python", "typescript"],
     )
-    assert "Language standards \u2014 Python" in prompt
-    assert "Language standards \u2014 TypeScript" in prompt
-    assert "ruff" in prompt
-    assert "tsc" in prompt
+    assert "Python defaults" in prompt
+    assert "TypeScript defaults" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -1104,14 +1100,14 @@ def test_single_language_omits_subheading() -> None:
 
 
 def test_commands_not_injected_for_review() -> None:
-    """Review step gets language standards but not project commands."""
+    """Review step gets style guidelines but not project commands."""
     task = _make_task()
     prompt = build_step_prompt(
         task=task, step="review", attempt=1, is_codex=True,
         project_languages=["python"],
         project_commands={"python": {"test": "pytest"}},
     )
-    assert "Language standards" in prompt
+    assert "Style guidelines" in prompt
     assert "Project commands" not in prompt
 
 
@@ -1286,3 +1282,53 @@ class TestStepOutputInjection:
         assert "## Output from prior 'plan' step" in prompt
         assert "Fix the bug." in prompt
         assert "Missing null check" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Workdoc prompt instructions
+# ---------------------------------------------------------------------------
+
+
+class TestWorkdocPromptInstructions:
+    def test_prompt_includes_workdoc_instructions_for_plan(self) -> None:
+        task = _make_task()
+        prompt = build_step_prompt(task=task, step="plan", attempt=1, is_codex=True)
+        assert "## Working Document" in prompt
+        assert "## Plan" in prompt
+        assert ".workdoc.md" in prompt
+
+    def test_prompt_includes_workdoc_instructions_for_implement(self) -> None:
+        task = _make_task()
+        prompt = build_step_prompt(task=task, step="implement", attempt=1, is_codex=True)
+        assert "## Working Document" in prompt
+        assert "## Implementation Log" in prompt
+        assert ".workdoc.md" in prompt
+
+    def test_prompt_includes_workdoc_instructions_for_verify(self) -> None:
+        task = _make_task()
+        prompt = build_step_prompt(task=task, step="verify", attempt=1, is_codex=True)
+        assert "## Working Document" in prompt
+        assert "## Verification Results" in prompt
+
+    def test_prompt_includes_workdoc_instructions_for_implement_fix(self) -> None:
+        task = _make_task()
+        prompt = build_step_prompt(task=task, step="implement_fix", attempt=1, is_codex=True)
+        assert "## Working Document" in prompt
+        assert "## Fix Log" in prompt
+
+    def test_prompt_includes_workdoc_instructions_for_review(self) -> None:
+        task = _make_task()
+        prompt = build_step_prompt(task=task, step="review", attempt=1, is_codex=True)
+        assert "## Working Document" in prompt
+        assert "Do NOT modify" in prompt
+
+    def test_prompt_no_workdoc_for_scan(self) -> None:
+        task = _make_task()
+        prompt = build_step_prompt(task=task, step="scan", attempt=1, is_codex=True)
+        assert "## Working Document" not in prompt
+
+    def test_prompt_no_workdoc_for_plan_refine(self) -> None:
+        """plan_refine doesn't go through _run_non_review_step so should not get workdoc instructions."""
+        task = _make_task()
+        prompt = build_step_prompt(task=task, step="plan_refine", attempt=1, is_codex=True)
+        assert "## Working Document" not in prompt

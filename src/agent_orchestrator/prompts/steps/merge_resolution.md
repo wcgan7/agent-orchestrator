@@ -1,0 +1,1 @@
+Resolve the merge conflicts in the following files. Both tasks' objectives must be fulfilled in the resolution.

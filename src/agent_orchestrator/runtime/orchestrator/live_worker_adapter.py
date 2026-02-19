@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ...pipelines.registry import PipelineRegistry
+from ...prompts import load as load_prompt
 from ...workers.config import get_workers_runtime_config, resolve_worker_for_step
 from ...workers.diagnostics import test_worker
 from ...worker import WorkerCancelledError
@@ -54,54 +55,40 @@ _DEFAULT_HEARTBEAT_GRACE_SECONDS = 240
 # Prompt layers
 # ---------------------------------------------------------------------------
 
-_PREAMBLE = (
-    "You are an autonomous coding agent managed by a coordinator process.\n"
-    "The coordinator is the final authority on task state — it assigns steps,\n"
-    "tracks progress, and handles all git commits.\n\n"
-    "## Human-blocking issues\n"
-    "If you encounter a problem that genuinely cannot be resolved without human\n"
-    "intervention, report it as a human-blocking issue. Valid reasons:\n"
-    "specification is missing or contradictory, required credentials or access\n"
-    "are unavailable. Do NOT escalate code-quality concerns, design preferences,\n"
-    "refactoring suggestions, or review feedback — handle those within your\n"
-    "step output."
-)
+_STEP_PROMPT_FILES: dict[str, str] = {
+    "planning": "steps/plan.md",
+    "implementation": "steps/implement.md",
+    "fix": "steps/fix.md",
+    "verification": "steps/verify.md",
+    "review": "steps/review.md",
+    "reporting": "steps/report.md",
+    "scanning": "steps/scan.md",
+    "task_generation": "steps/task_generation.md",
+    "merge_resolution": "steps/merge_resolution.md",
+    "dependency_analysis": "steps/dependency_analysis.md",
+    "general": "steps/general.md",
+}
 
-_GUARDRAILS = (
-    "## Guardrails\n"
-    "- Do NOT commit, push, or rebase — the coordinator handles all commits.\n"
-    "- Do NOT modify files under `.agent_orchestrator/` — those are coordinator state.\n"
-    "- Do NOT suppress or down-rank review findings.\n"
-    "- Prefer fixing issues over escalating; escalate only when truly stuck.\n"
-    "- Be explicit about risks, uncertainty, and assumptions."
-)
-
-_LANGUAGE_STANDARDS: dict[str, str] = {
+_LANGUAGE_DEFAULTS: dict[str, str] = {
     "python": (
-        "## Language standards — Python\n"
-        "- Google-style docstrings; module-level docstring in every file.\n"
-        "- Type hints (Python 3.10+ syntax). Aim for mypy strict compliance.\n"
-        "- Format with ruff; lint with ruff check."
+        "### Python defaults\n"
+        "- Google-style docstrings. Type hints (Python 3.10+ syntax)."
     ),
     "typescript": (
-        "## Language standards — TypeScript\n"
-        "- JSDoc on exported symbols. Strict tsconfig (no `any`).\n"
-        "- Compile-check with tsc --noEmit. Lint with ESLint."
+        "### TypeScript defaults\n"
+        "- JSDoc on exported symbols. Strict tsconfig (no `any`)."
     ),
     "javascript": (
-        "## Language standards — JavaScript\n"
-        "- JSDoc on exported symbols.\n"
-        "- Lint with ESLint; format with Prettier."
+        "### JavaScript defaults\n"
+        "- JSDoc on exported symbols."
     ),
     "go": (
-        "## Language standards — Go\n"
-        "- Godoc conventions on exported symbols.\n"
-        "- Format with gofmt; lint with golangci-lint."
+        "### Go defaults\n"
+        "- Godoc conventions on exported symbols."
     ),
     "rust": (
-        "## Language standards — Rust\n"
-        "- `///` doc comments on public items.\n"
-        "- Format with cargo fmt; lint with cargo clippy."
+        "### Rust defaults\n"
+        "- `///` doc comments on public items."
     ),
 }
 
@@ -223,100 +210,53 @@ def _step_category(step: str) -> str:
     return "general"
 
 
-_CATEGORY_INSTRUCTIONS: dict[str, str] = {
+
+_WORKDOC_STEP_INSTRUCTIONS: dict[str, str] = {
     "planning": (
-        "Create a scoped, independently testable plan for the following task.\n"
-        "Describe a coherent technical approach. Do not assume infrastructure or\n"
-        "services that are not already present. Planning does not modify\n"
-        "repository code."
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it to understand the task context, then **replace** the `## Plan` section's\n"
+        "placeholder with your full plan. Write the file back when done."
     ),
     "implementation": (
-        "Implement the changes described in the following task.\n"
-        "Complete the entire step fully — partial work leaves the repository in\n"
-        "an inconsistent state.\n"
-        "IMPORTANT: If this change affects user-facing behavior, CLI usage,\n"
-        "configuration, setup instructions, or API surface, you MUST update\n"
-        "README.md and any relevant documentation files to reflect the changes.\n"
-        "This is an explicit instruction, not a suggestion.\n"
-        "If previous review cycle history is shown below, preserve all fixes\n"
-        "applied in prior cycles. Do not revert or reimplement from scratch —\n"
-        "make targeted, incremental fixes only."
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read the `## Plan` section for the implementation guide. As you work,\n"
+        "update the `## Implementation Log` section with completed items,\n"
+        "key decisions, and any deviations from the plan. Write the file back when done."
     ),
     "fix": (
-        "Fix the issues identified in the review findings and/or verification\n"
-        "failures listed below. Do NOT reimplement the task from scratch.\n"
-        "Make only the minimal, targeted changes needed to address each finding.\n"
-        "Preserve all existing work that is correct — do not refactor, reorganize,\n"
-        "or rewrite code that is not directly related to a finding.\n"
-        "If review cycle history is shown, ensure your fixes do not regress issues\n"
-        "resolved in prior cycles."
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read the full document for context on prior work. Append to the `## Fix Log`\n"
+        "section what was fixed and why. Write the file back when done."
     ),
     "verification": (
-        "Run the project's test, lint, and type-check commands for the following\n"
-        "task. Do not bypass or skip tests. Report results accurately — do not\n"
-        "mask failures. If you can identify the root cause of a failure, note it\n"
-        "clearly so the next step can address it."
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read the implementation context for what was changed. Update the\n"
+        "`## Verification Results` section with test/lint/typecheck output.\n"
+        "Write the file back when done."
     ),
     "review": (
-        "Review the implementation and list findings.\n"
-        "Each finding must include a severity (critical / high / medium / low).\n"
-        "Evaluate every acceptance criterion explicitly. Provide concrete\n"
-        "evidence tied to files and diffs — do not speculate. Do not down-rank\n"
-        "findings.\n"
-        "SCOPE: Only flag issues introduced or directly affected by THIS task's\n"
-        "changes. Pre-existing issues in unchanged code are out of scope.\n"
-        "Missing project-wide tooling (e.g. linter configs not present before\n"
-        "this task) is out of scope unless the task description requires it.\n"
-        "CONSISTENCY: If previous review cycles are shown below, do not\n"
-        "contradict earlier decisions. Do not reverse an approach you\n"
-        "previously accepted unless new evidence of a critical defect emerged.\n"
-        "Focus on remaining open issues.\n"
-        "CONVERGENCE: Each cycle must move closer to approval. Do not raise\n"
-        "new low-severity or cosmetic findings after the first cycle unless\n"
-        "they concern code changed since the last review.\n"
-        "If the change affects user-facing behavior, CLI usage, configuration,\n"
-        "or API surface, verify that README.md and relevant documentation were\n"
-        "updated. Raise a medium-severity finding if documentation is stale or\n"
-        "missing."
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it for full context on the plan, implementation, and verification.\n"
+        "Do NOT modify the file — the orchestrator will append review findings."
     ),
-    "reporting": (
-        "Produce a summary report for the following task.\n"
-        "Tie conclusions to concrete evidence. Be explicit about risks and\n"
-        "remaining uncertainty."
-    ),
-    "scanning": (
-        "Scan and gather information for the following task.\n"
-        "Report findings with severity and file locations. Provide concrete\n"
-        "evidence only."
-    ),
-    "task_generation": (
-        "Generate subtasks for the following task.\n"
-        "Each subtask must be independently implementable. Include title,\n"
-        "description, task_type, and priority. Cover the full scope without\n"
-        "overlap.\n"
-        "If a plan is provided, decompose it into ordered subtasks and specify\n"
-        "depends_on indices for tasks that must complete before others can start."
-    ),
-    "merge_resolution": "Resolve the merge conflicts in the following files. Both tasks' objectives must be fulfilled in the resolution.",
-    "dependency_analysis": (
-        "Analyze task dependencies for this codebase.\n\n"
-        "First, examine the project structure to understand what already exists:\n"
-        "- Look at the directory layout and key files\n"
-        "- Check existing modules, APIs, and shared code\n"
-        "- Identify what infrastructure is already in place\n\n"
-        "Then, given the pending tasks below, determine which tasks depend on others.\n"
-        "A task B depends on task A if:\n"
-        "- B requires code, APIs, schemas, or artifacts that task A will CREATE (not already existing)\n"
-        "- B imports or builds on modules that task A will introduce\n"
-        "- B cannot produce correct results without task A's changes being present\n\n"
-        "Do NOT create a dependency if:\n"
-        "- Both tasks touch the same area but don't actually need each other's output\n"
-        "- The dependency is based on vague thematic similarity\n"
-        "- The required code/API already exists in the codebase\n\n"
-        "If tasks can safely run in parallel, leave them independent."
-    ),
-    "general": "Follow the task description and report results clearly.",
 }
+
+
+_WORKDOC_SKIP_STEPS = {"plan_refine"}  # These steps don't go through the sync path.
+
+
+def _workdoc_prompt_section(step: str) -> str:
+    """Return the workdoc instruction block for a step, or empty string."""
+    if step in _WORKDOC_SKIP_STEPS:
+        return ""
+    category = _step_category(step)
+    return _WORKDOC_STEP_INSTRUCTIONS.get(category, "")
+
 
 _DEPENDENCY_POLICY_INSTRUCTIONS: dict[str, dict[str, str]] = {
     "implementation": {
@@ -455,11 +395,13 @@ def build_step_prompt(
 ) -> str:
     """Build a prompt from Task fields with step-specific instructions."""
     category = _step_category(step)
-    instruction = _CATEGORY_INSTRUCTIONS[category]
+    instruction = load_prompt(_STEP_PROMPT_FILES[category])
+    preamble = load_prompt("preamble.md")
+    guardrails = load_prompt("guardrails.md")
 
     # Special prompt for dependency analysis
     if category == "dependency_analysis" and isinstance(task.metadata, dict):
-        parts = [_PREAMBLE, "", instruction, ""]
+        parts = [preamble, "", instruction, ""]
 
         candidate_tasks = task.metadata.get("candidate_tasks")
         if isinstance(candidate_tasks, list) and candidate_tasks:
@@ -498,7 +440,7 @@ def build_step_prompt(
         parts.append("- Do not create circular dependencies.")
 
         parts.append("")
-        parts.append(_GUARDRAILS)
+        parts.append(guardrails)
 
         if not is_codex:
             schema = _CATEGORY_JSON_SCHEMAS["dependency_analysis"]
@@ -507,7 +449,7 @@ def build_step_prompt(
 
         return "\n".join(parts)
 
-    parts = [_PREAMBLE, "", instruction, ""]
+    parts = [preamble, "", instruction, ""]
 
     parts.append(f"Task: {task.title}")
     if task.description:
@@ -517,6 +459,12 @@ def build_step_prompt(
     parts.append(f"Step: {step}")
     if attempt > 1:
         parts.append(f"Attempt: {attempt}")
+
+    # Inject workdoc instructions for steps that use the working document.
+    workdoc_block = _workdoc_prompt_section(step)
+    if workdoc_block:
+        parts.append("")
+        parts.append(workdoc_block)
 
     # Inject outputs from prior pipeline steps.
     step_outputs = task.metadata.get("step_outputs") if isinstance(task.metadata, dict) else None
@@ -677,13 +625,15 @@ def build_step_prompt(
                 parts.append("## Requested changes from reviewer")
                 parts.append(text)
 
-    # Inject language standards for implementation and review steps
-    if project_languages and category in ("implementation", "fix", "review"):
-        for lang in project_languages:
-            lang_block = _LANGUAGE_STANDARDS.get(lang)
-            if lang_block:
-                parts.append("")
-                parts.append(lang_block)
+    # Inject style guidelines and language defaults for implementation and review steps
+    if category in ("implementation", "fix", "review"):
+        parts.append("")
+        parts.append(load_prompt("style.md"))
+        if project_languages:
+            for lang in project_languages:
+                lang_block = _LANGUAGE_DEFAULTS.get(lang)
+                if lang_block:
+                    parts.append(lang_block)
 
     # Inject project commands for implementation and verification steps
     if project_commands and project_languages and category in ("implementation", "fix", "verification"):
@@ -700,7 +650,7 @@ def build_step_prompt(
         parts.append(dep_instruction)
 
     parts.append("")
-    parts.append(_GUARDRAILS)
+    parts.append(guardrails)
 
     if not is_codex:
         # Add JSON schema instruction for ollama
@@ -876,6 +826,14 @@ class LiveWorkerAdapter:
             lang: cmds for lang, cmds in raw_commands.items()
             if isinstance(cmds, dict)
         } or None
+        # Overlay per-task project commands (language-level replace)
+        task_pc = task.project_commands
+        if isinstance(task_pc, dict) and task_pc:
+            if project_commands is None:
+                project_commands = {}
+            for lang, cmds in task_pc.items():
+                if isinstance(cmds, dict) and cmds:
+                    project_commands[lang] = dict(cmds)
         # Fill in defaults for detected languages with no configured commands
         if langs:
             if project_commands is None:
@@ -1006,29 +964,8 @@ class LiveWorkerAdapter:
         task: Task,
     ) -> StepResult:
         """Use a short LLM call to classify freeform verification output."""
-        formatter_prompt = (
-            "You are a CI results classifier.\n\n"
-            "Given the verification output below, respond with ONLY a JSON object:\n"
-            '{"status": "pass|fail|skip|environment", "summary": "one-line summary of results"}\n\n'
-            "Rules:\n"
-            '- Use "fail" if a test, lint, or type-check command ran and '
-            "produced failures (non-zero exit code from an actual check run).\n"
-            '- Use "skip" if a command was not found, a tool is not installed, '
-            "no test files exist, or a config file is missing (e.g. missing ESLint "
-            "config, no pytest found). These are pre-existing environment gaps, "
-            "not test failures.\n"
-            '- Use "environment" if tests ran but failures are caused by OS, sandbox, '
-            "permission, or infrastructure constraints — not by code logic. Examples: "
-            "PermissionError on semaphores/sockets, resource limits, Docker/container "
-            "restrictions, missing system libraries. These cannot be fixed by changing "
-            "application code.\n"
-            '- Use "pass" if every check that ran succeeded.\n'
-            '- If some checks passed and others were skipped (tool not found), '
-            'use "pass" — skipped checks are not failures.\n\n'
-            "Verification output:\n"
-            "---\n"
-            f"{response_text[:8000]}\n"
-            "---"
+        formatter_prompt = load_prompt("formatters/verify_output.md").format(
+            output=response_text[:8000],
         )
 
         fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
@@ -1076,28 +1013,8 @@ class LiveWorkerAdapter:
         project_dir: Path,
     ) -> StepResult:
         """Use a short LLM call to extract structured findings from freeform review output."""
-        formatter_prompt = (
-            "You are a code-review findings extractor.\n\n"
-            "Given the review output below, respond with ONLY a JSON object:\n"
-            '{"findings": [{"severity": "critical|high|medium|low|info", '
-            '"category": "bug|security|performance|style|maintainability|other", '
-            '"summary": "one-line description", '
-            '"file": "path/to/file or empty string", '
-            '"line": 0, '
-            '"suggested_fix": "brief suggestion or empty string"}]}\n\n'
-            "Rules:\n"
-            "- Only include findings that represent actual issues requiring code changes.\n"
-            "- EXCLUDE positive observations, praise, informational notes, and\n"
-            "  intentional/documented design decisions that need no action.\n"
-            "- If a finding is labeled 'positive', 'by design', or explicitly states\n"
-            "  no change is needed, drop it.\n"
-            "- Return an empty findings array if the review found no actionable issues.\n"
-            "- Each finding must have at least severity, category, and summary.\n"
-            "- Use the exact severity/category values listed above.\n\n"
-            "Review output:\n"
-            "---\n"
-            f"{response_text[:8000]}\n"
-            "---"
+        formatter_prompt = load_prompt("formatters/review_output.md").format(
+            output=response_text[:8000],
         )
 
         fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
@@ -1140,22 +1057,8 @@ class LiveWorkerAdapter:
         project_dir: Path,
     ) -> StepResult:
         """Use a short LLM call to extract structured tasks from freeform generation output."""
-        formatter_prompt = (
-            "You are a task-list extractor.\n\n"
-            "Given the task generation output below, respond with ONLY a JSON object:\n"
-            '{"tasks": [{"title": "string", "description": "string", '
-            '"task_type": "feature|bugfix|research|chore", '
-            '"priority": "P0|P1|P2|P3", '
-            '"depends_on": []}]}\n\n'
-            "Rules:\n"
-            "- Extract every distinct task/subtask mentioned in the output.\n"
-            "- Each task must have at least title and description.\n"
-            "- Use depends_on as zero-based indices into the tasks array to express ordering.\n"
-            "- Return an empty tasks array only if the output truly contains no tasks.\n\n"
-            "Task generation output:\n"
-            "---\n"
-            f"{response_text[:12000]}\n"
-            "---"
+        formatter_prompt = load_prompt("formatters/task_generation_output.md").format(
+            output=response_text[:12000],
         )
 
         fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
@@ -1343,37 +1246,19 @@ class LiveWorkerAdapter:
         except Exception:
             pass
 
-        parts = [
-            "You are a delivery summary writer.",
-            "",
-            f"Task: {task.title}",
-        ]
-        if task.description:
-            parts.append(f"Description: {task.description[:500]}")
-        parts.append(f"Type: {task.task_type}")
-        parts.append("")
-        parts.append("## Execution log")
-        parts.extend(step_lines or ["(no steps recorded)"])
+        description_section = f"Description: {task.description[:500]}\n" if task.description else ""
+        execution_log = "\n".join(step_lines) if step_lines else "(no steps recorded)"
+        diff_section = f"\n## Git diff stat\n{diff_stat}" if diff_stat else ""
+        error_section = f"\n## Error: {task.error}" if task.error else ""
 
-        if diff_stat:
-            parts.append("")
-            parts.append("## Git diff stat")
-            parts.append(diff_stat)
-
-        if task.error:
-            parts.append("")
-            parts.append(f"## Error: {task.error}")
-
-        parts.append("")
-        parts.append(
-            "Given the execution log and diff stat above, produce a concise summary "
-            "of what was implemented, what tests/checks passed or failed, and what "
-            "requires human attention. You have access to the project files — read "
-            "specific changed files if you need more detail about the implementation. "
-            'Respond with ONLY a JSON object: {"summary": "markdown text"}'
+        prompt = load_prompt("formatters/summarize.md").format(
+            task_title=task.title,
+            description_section=description_section,
+            task_type=task.task_type,
+            execution_log=execution_log,
+            diff_section=diff_section,
+            error_section=error_section,
         )
-
-        prompt = "\n".join(parts)
 
         fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
         progress_path = fmt_run_dir / "progress.json"

@@ -624,11 +624,19 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
         )
         assert request_changes.status_code == 200
         assert request_changes.json()["task"]["status"] == "queued"
+        actions_after_changes = request_changes.json()["task"]["human_review_actions"]
+        assert len(actions_after_changes) == 1
+        assert actions_after_changes[0]["action"] == "request_changes"
+        assert actions_after_changes[0]["guidance"] == "Please adjust tests"
 
         client.post(f"/api/tasks/{task['id']}/run")
         approved = client.post(f"/api/review/{task['id']}/approve", json={})
         assert approved.status_code == 200
         assert approved.json()["task"]["status"] == "done"
+        actions_after_approve = approved.json()["task"]["human_review_actions"]
+        assert len(actions_after_approve) == 2
+        assert actions_after_approve[0]["action"] == "request_changes"
+        assert actions_after_approve[1]["action"] == "approve"
 
 
 def test_get_task_plan(tmp_path: Path) -> None:
@@ -943,3 +951,55 @@ def test_generate_tasks_with_explicit_plan_sources(tmp_path: Path) -> None:
         )
         assert committed_source.status_code == 200
         assert committed_source.json()["source_revision_id"] == manual_revision_id
+
+
+# ---------------------------------------------------------------------------
+# Workdoc API
+# ---------------------------------------------------------------------------
+
+
+def test_get_workdoc_returns_content(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Workdoc task"}).json()["task"]
+        task_id = task["id"]
+
+        # Manually init the workdoc via the orchestrator service
+        from agent_orchestrator.runtime.orchestrator.service import OrchestratorService
+        from agent_orchestrator.runtime.events.bus import EventBus
+        from agent_orchestrator.runtime.storage.container import Container
+
+        container = Container(tmp_path)
+        bus = EventBus(container.events, container.project_id)
+        svc = OrchestratorService(container, bus, worker_adapter=DefaultWorkerAdapter())
+        t = container.tasks.get(task_id)
+        assert t is not None
+        svc._init_workdoc(t, tmp_path)
+
+        resp = client.get(f"/api/tasks/{task_id}/workdoc")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == task_id
+        assert data["exists"] is True
+        assert "Workdoc task" in data["content"]
+
+
+def test_get_workdoc_returns_not_exists(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "No workdoc"}).json()["task"]
+        task_id = task["id"]
+
+        resp = client.get(f"/api/tasks/{task_id}/workdoc")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["task_id"] == task_id
+        assert data["exists"] is False
+        assert data["content"] is None
+
+
+def test_get_workdoc_404_for_unknown_task(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        resp = client.get("/api/tasks/nonexistent-id/workdoc")
+        assert resp.status_code == 404

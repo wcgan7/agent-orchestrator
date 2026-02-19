@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -599,6 +600,9 @@ class OrchestratorService:
                 self.container.plan_revisions.upsert(revision)
         task.metadata["latest_plan_revision_id"] = revision_id
         task.metadata["committed_plan_revision_id"] = revision_id
+        # Sync committed plan text to step_outputs so implement step uses it.
+        so = task.metadata.setdefault("step_outputs", {})
+        so["plan"] = (target.content or "")[:20_000]
         self.container.tasks.upsert(task)
         self.bus.emit(
             channel="tasks",
@@ -676,6 +680,231 @@ class OrchestratorService:
             text=True,
         )
         return worktree_dir
+
+    # ------------------------------------------------------------------
+    # Working Document (workdoc) helpers
+    # ------------------------------------------------------------------
+
+    # Maps step names to (heading, placeholder_step) pairs.
+    # placeholder_step is the step name used in the template placeholder text.
+    _WORKDOC_SECTION_MAP: dict[str, tuple[str, str]] = {
+        "plan": ("## Plan", "plan"),
+        "analyze": ("## Plan", "plan"),
+        "implement": ("## Implementation Log", "implement"),
+        "prototype": ("## Implementation Log", "implement"),
+        "implement_fix": ("## Fix Log", None),  # placeholder uses different wording
+        "verify": ("## Verification Results", "verify"),
+        "benchmark": ("## Verification Results", "verify"),
+        "reproduce": ("## Verification Results", "verify"),
+    }
+
+    _WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Plan
+
+_Pending: will be populated by the plan step._
+
+## Implementation Log
+
+_Pending: will be populated by the implement step._
+
+## Verification Results
+
+_Pending: will be populated by the verify step._
+
+## Review Findings
+
+_Pending: will be populated by the review step._
+
+## Fix Log
+
+_Pending: will be populated as needed._
+"""
+
+    def _workdoc_canonical_path(self, task_id: str) -> Path:
+        return self.container.state_root / "workdocs" / f"{task_id}.md"
+
+    @staticmethod
+    def _workdoc_worktree_path(project_dir: Path) -> Path:
+        return project_dir / ".workdoc.md"
+
+    def _init_workdoc(self, task: Task, project_dir: Path) -> Path:
+        """Render the workdoc template, write canonical + worktree copies.
+
+        .workdoc.md is already gitignored by bootstrap (_ensure_gitignored).
+        """
+        workdocs_dir = self.container.state_root / "workdocs"
+        workdocs_dir.mkdir(parents=True, exist_ok=True)
+
+        canonical = self._workdoc_canonical_path(task.id)
+        # Use safe substitution to avoid KeyError if task fields contain braces.
+        content = (
+            self._WORKDOC_TEMPLATE
+            .replace("{title}", task.title)
+            .replace("{task_id}", task.id)
+            .replace("{task_type}", task.task_type)
+            .replace("{priority}", task.priority)
+            .replace("{created_at}", task.created_at)
+            .replace("{description}", task.description or "(no description)")
+        )
+        canonical.write_text(content, encoding="utf-8")
+
+        worktree_copy = self._workdoc_worktree_path(project_dir)
+        shutil.copy2(str(canonical), str(worktree_copy))
+
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        task.metadata["workdoc_path"] = str(canonical)
+        return canonical
+
+    @staticmethod
+    def _cleanup_workdoc_for_commit(project_dir: Path) -> None:
+        """Remove the worktree .workdoc.md before commit so git add -A won't stage it."""
+        workdoc = project_dir / ".workdoc.md"
+        if workdoc.exists():
+            workdoc.unlink()
+
+    def _refresh_workdoc(self, task: Task, project_dir: Path) -> None:
+        """Copy canonical workdoc to worktree so the worker sees the latest version."""
+        canonical = self._workdoc_canonical_path(task.id)
+        if not canonical.exists():
+            return
+        worktree_copy = self._workdoc_worktree_path(project_dir)
+        shutil.copy2(str(canonical), str(worktree_copy))
+
+    def _sync_workdoc(self, task: Task, step: str, project_dir: Path, summary: str | None) -> None:
+        """Post-step sync: accept worker changes or fallback-append summary."""
+        canonical = self._workdoc_canonical_path(task.id)
+        if not canonical.exists():
+            return
+        worktree_copy = self._workdoc_worktree_path(project_dir)
+        if not worktree_copy.exists():
+            return
+
+        canonical_text = canonical.read_text(encoding="utf-8")
+        worktree_text = worktree_copy.read_text(encoding="utf-8")
+
+        changed = False
+        if worktree_text != canonical_text:
+            # Worker updated the file — accept as new canonical
+            canonical.write_text(worktree_text, encoding="utf-8")
+            changed = True
+        elif summary and summary.strip():
+            # Fallback: append summary under the step's heading
+            section = self._WORKDOC_SECTION_MAP.get(step)
+            if not section:
+                return
+            heading, placeholder_step = section
+            if placeholder_step:
+                placeholder = f"_Pending: will be populated by the {placeholder_step} step._"
+            else:
+                placeholder = "_Pending: will be populated as needed._"
+            trimmed = summary.strip()
+            if placeholder in canonical_text:
+                updated = canonical_text.replace(placeholder, trimmed, 1)
+            else:
+                # Append under the heading
+                idx = canonical_text.find(heading)
+                if idx == -1:
+                    return
+                # Find the end of the heading line
+                newline_after = canonical_text.find("\n", idx)
+                if newline_after == -1:
+                    updated = canonical_text + "\n\n" + trimmed
+                else:
+                    # Find the next heading (## ) or end of file
+                    rest = canonical_text[newline_after + 1:]
+                    next_heading = re.search(r"^## ", rest, re.MULTILINE)
+                    if next_heading:
+                        insert_pos = newline_after + 1 + next_heading.start()
+                        updated = canonical_text[:insert_pos] + trimmed + "\n\n" + canonical_text[insert_pos:]
+                    else:
+                        updated = canonical_text.rstrip() + "\n\n" + trimmed + "\n"
+            canonical.write_text(updated, encoding="utf-8")
+            worktree_copy.write_text(updated, encoding="utf-8")
+            changed = True
+
+        if changed:
+            self.bus.emit(
+                channel="tasks",
+                event_type="workdoc.updated",
+                entity_id=task.id,
+                payload={"step": step},
+            )
+
+    def _sync_workdoc_review(self, task: Task, cycle: ReviewCycle, project_dir: Path) -> None:
+        """Append review cycle findings to the workdoc."""
+        canonical = self._workdoc_canonical_path(task.id)
+        if not canonical.exists():
+            return
+
+        text = canonical.read_text(encoding="utf-8")
+
+        lines: list[str] = [
+            f"### Review Cycle {cycle.attempt} — {cycle.decision}",
+        ]
+        for f in cycle.findings:
+            if f.file and f.line:
+                loc = f" ({f.file}:{f.line})"
+            elif f.file:
+                loc = f" ({f.file})"
+            else:
+                loc = ""
+            lines.append(f"- **[{f.severity}]** {f.summary}{loc}")
+        block = "\n".join(lines)
+
+        placeholder = "_Pending: will be populated by the review step._"
+        if placeholder in text:
+            updated = text.replace(placeholder, block, 1)
+        else:
+            heading = "## Review Findings"
+            idx = text.find(heading)
+            if idx == -1:
+                updated = text.rstrip() + "\n\n" + heading + "\n\n" + block + "\n"
+            else:
+                next_heading = re.search(r"^## ", text[idx + len(heading):], re.MULTILINE)
+                if next_heading:
+                    insert_pos = idx + len(heading) + next_heading.start()
+                    updated = text[:insert_pos] + block + "\n\n" + text[insert_pos:]
+                else:
+                    updated = text.rstrip() + "\n\n" + block + "\n"
+
+        canonical.write_text(updated, encoding="utf-8")
+        worktree_copy = self._workdoc_worktree_path(project_dir)
+        if worktree_copy.exists():
+            worktree_copy.write_text(updated, encoding="utf-8")
+
+        self.bus.emit(
+            channel="tasks",
+            event_type="workdoc.updated",
+            entity_id=task.id,
+            payload={"step": "review", "cycle": cycle.attempt},
+        )
+
+    def _step_project_dir(self, task: Task) -> Path:
+        """Return the effective project dir for a task (worktree or main)."""
+        worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
+        return Path(worktree_path) if worktree_path else self.container.project_dir
+
+    def get_workdoc(self, task_id: str) -> dict[str, Any]:
+        """Read canonical workdoc for a task. Returns {task_id, content, exists}."""
+        canonical = self._workdoc_canonical_path(task_id)
+        if canonical.exists():
+            return {"task_id": task_id, "content": canonical.read_text(encoding="utf-8"), "exists": True}
+        return {"task_id": task_id, "content": None, "exists": False}
 
     def _merge_and_cleanup(self, task: Task, worktree_dir: Path) -> None:
         branch = f"task-{task.id}"
@@ -963,11 +1192,20 @@ class OrchestratorService:
             task.metadata["verify_output"] = "\n".join(parts)
 
     def _run_non_review_step(self, task: Task, run: RunRecord, step: str, attempt: int = 1) -> bool:
+        # Refresh workdoc before each step so the worker sees the latest version.
+        step_project_dir = self._step_project_dir(task)
+        self._refresh_workdoc(task, step_project_dir)
+
+        step_started = now_iso()
         try:
             result = self.worker_adapter.run_step(task=task, step=step, attempt=attempt)
         except WorkerCancelledError:
             raise self._Cancelled()
-        step_log: dict[str, Any] = {"step": step, "status": result.status, "ts": now_iso(), "summary": result.summary}
+
+        # Post-step workdoc sync (before other bookkeeping that may upsert task).
+        self._sync_workdoc(task, step, step_project_dir, result.summary)
+
+        step_log: dict[str, Any] = {"step": step, "status": result.status, "ts": now_iso(), "started_at": step_started, "summary": result.summary}
         if result.human_blocking_issues:
             step_log["human_blocking_issues"] = result.human_blocking_issues
         # Preserve log file paths so historical step logs can be retrieved.
@@ -1239,12 +1477,14 @@ class OrchestratorService:
             project_dir = Path(worktree_path) if worktree_path else self.container.project_dir
             if not project_dir.is_dir():
                 project_dir = self.container.project_dir
+            summary_started = now_iso()
             summary_text = fn(task=task, run=run, project_dir=project_dir)
             if isinstance(summary_text, str) and summary_text.strip():
                 run.steps.append({
                     "step": "summary",
                     "status": "ok",
                     "ts": now_iso(),
+                    "started_at": summary_started,
                     "summary": summary_text,
                 })
                 self.container.runs.upsert(run)
@@ -1445,6 +1685,9 @@ class OrchestratorService:
                 task.metadata["worktree_dir"] = str(worktree_dir)
                 self.container.tasks.upsert(task)
 
+            workdoc_dir = worktree_dir if worktree_dir else self.container.project_dir
+            self._init_workdoc(task, workdoc_dir)
+
             task_branch = f"task-{task.id}" if worktree_dir else self._ensure_branch()
             run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), branch=task_branch)
             run.steps = []
@@ -1546,6 +1789,8 @@ class OrchestratorService:
             # Guard: block if implementation produced no file changes
             if has_commit:
                 impl_dir = worktree_dir or self.container.project_dir
+                # Remove worktree workdoc before checking — it's not a real change.
+                self._cleanup_workdoc_for_commit(impl_dir)
                 if not self._has_uncommitted_changes(impl_dir):
                     task.status = "blocked"
                     task.error = "No file changes detected after implementation"
@@ -1579,6 +1824,7 @@ class OrchestratorService:
                     else:
                         task.metadata.pop("review_history", None)
                     self.container.tasks.upsert(task)
+                    review_started = now_iso()
                     findings, review_result = self._findings_from_result(task, review_attempt)
                     if review_result.human_blocking_issues:
                         self._block_for_human_issues(
@@ -1610,7 +1856,8 @@ class OrchestratorService:
                         decision="changes_requested" if self._exceeds_quality_gate(task, findings) else "approved",
                     )
                     self.container.reviews.append(cycle)
-                    review_step_log: dict[str, Any] = {"step": "review", "status": cycle.decision, "ts": now_iso(), "open_counts": open_counts}
+                    self._sync_workdoc_review(task, cycle, worktree_dir or self.container.project_dir)
+                    review_step_log: dict[str, Any] = {"step": "review", "status": cycle.decision, "ts": now_iso(), "started_at": review_started, "open_counts": open_counts}
                     review_last_logs = task.metadata.get("last_logs") if isinstance(task.metadata, dict) else None
                     if isinstance(review_last_logs, dict):
                         for key in ("stdout_path", "stderr_path", "progress_path"):
@@ -1700,6 +1947,8 @@ class OrchestratorService:
                         self._abort_for_gate(task, run, "before_commit")
                         return
 
+                commit_started = now_iso()
+                self._cleanup_workdoc_for_commit(worktree_dir or self.container.project_dir)
                 commit_sha = self._commit_for_task(task, worktree_dir)
                 if not commit_sha:
                     # Only block when git is present — otherwise commit is a no-op
@@ -1715,7 +1964,7 @@ class OrchestratorService:
                             entity_id=task.id, payload={"error": task.error},
                         )
                         return
-                run.steps.append({"step": "commit", "status": "ok", "ts": now_iso(), "commit": commit_sha})
+                run.steps.append({"step": "commit", "status": "ok", "ts": now_iso(), "started_at": commit_started, "commit": commit_sha})
                 self.container.runs.upsert(run)
 
                 # Merge worktree branch back to run branch

@@ -2178,6 +2178,66 @@ textarea {
   font-weight: 600;
 }
 
+/* Review history */
+.review-history-box {
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-bg-secondary);
+}
+
+.review-history-header {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #264538;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  margin: 0 0 0.5rem;
+}
+
+.review-history-entry {
+  padding: 0.5rem 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.review-history-entry:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+
+.review-history-entry-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.review-history-ts {
+  font-size: 0.76rem;
+  color: var(--color-text-secondary);
+}
+
+.review-history-guidance {
+  margin-top: 0.3rem;
+  font-size: 0.84rem;
+  line-height: 1.5;
+  color: var(--color-text-primary);
+}
+
+.review-history-error {
+  margin: 0.3rem 0 0;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.8rem;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  background: #fdf0f0;
+  border-radius: 6px;
+  color: #8c2a2a;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 8rem;
+  overflow: auto;
+}
+
 /* Execution summary */
 .execution-summary-box {
   margin-top: 0.75rem;
@@ -2274,6 +2334,11 @@ textarea {
   color: var(--color-text-secondary);
 }
 
+.execution-step-duration {
+  font-size: 0.76rem;
+  color: var(--color-text-secondary);
+}
+
 .execution-step-commit {
   font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
   font-size: 0.76rem;
@@ -2296,4 +2361,27 @@ textarea {
   line-height: 1.5;
   max-height: 20rem;
   overflow: auto;
+}
+
+.plan-gate-banner {
+  border-left: 3px solid var(--color-warning-500);
+  background: var(--color-warning-50);
+}
+
+.plan-tab-mode-switcher {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.plan-tab-mode-switcher .button.is-active {
+  background: var(--color-primary-600);
+  color: var(--color-text-inverse);
+}
+
+.plan-tab-commit-bar {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+  margin-top: 0.75rem;
 }
