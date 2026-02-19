@@ -24,6 +24,8 @@ type QuickActionDetailPanelProps = {
   onPromoteQuickAction: (quickActionId: string) => void
   onRefreshQuickActionDetail: () => void
   onRetryLoadQuickActionDetail: () => void
+  liveStdout?: string
+  liveStderr?: string
 }
 
 function StatusIndicator({ status }: { status: string }): JSX.Element {
@@ -46,7 +48,7 @@ function RunningBanner(): JSX.Element {
   return (
     <div className="info-banner" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
       <span className="spinner" aria-hidden="true" />
-      <span>Running — output will appear when complete</span>
+      <span>Running — streaming live output</span>
     </div>
   )
 }
@@ -61,8 +63,11 @@ export function QuickActionDetailPanel({
   onPromoteQuickAction,
   onRefreshQuickActionDetail,
   onRetryLoadQuickActionDetail,
+  liveStdout,
+  liveStderr,
 }: QuickActionDetailPanelProps): JSX.Element {
   const detailRef = useRef<HTMLDivElement>(null)
+  const logEndRef = useRef<HTMLDivElement>(null)
 
   // Auto-scroll to detail section when a quick action is selected
   useEffect(() => {
@@ -71,8 +76,17 @@ export function QuickActionDetailPanel({
     }
   }, [selectedQuickActionId])
 
+  // Auto-scroll log output to bottom when new content arrives
+  useEffect(() => {
+    if (logEndRef.current) {
+      logEndRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+  }, [liveStdout, liveStderr])
+
   const isActive = selectedQuickActionDetail != null &&
     (selectedQuickActionDetail.status === 'queued' || selectedQuickActionDetail.status === 'running')
+
+  const hasLiveLogs = !!(liveStdout || liveStderr)
 
   return (
     <div className="form-stack">
@@ -127,10 +141,23 @@ export function QuickActionDetailPanel({
               {selectedQuickActionDetail.exit_code != null ? (
                 <p className="task-meta">Exit code: {selectedQuickActionDetail.exit_code}</p>
               ) : null}
-              {selectedQuickActionDetail.result_summary ? (
+              {isActive && hasLiveLogs ? (
+                <div>
+                  <p className="field-label">Live Output</p>
+                  <pre className="output-block" style={{ maxHeight: '400px', overflow: 'auto' }}>
+                    {liveStdout}
+                    {liveStderr ? `\n--- stderr ---\n${liveStderr}` : ''}
+                    <div ref={logEndRef} />
+                  </pre>
+                </div>
+              ) : isActive ? (
+                <p className="task-meta">Waiting for output...</p>
+              ) : selectedQuickActionDetail.result_summary ? (
                 <div>
                   <p className="field-label">Output</p>
-                  <pre className="output-block">{selectedQuickActionDetail.result_summary}</pre>
+                  <pre className="output-block" style={{ maxHeight: '400px', overflow: 'auto' }}>
+                    {hasLiveLogs ? liveStdout + (liveStderr ? `\n--- stderr ---\n${liveStderr}` : '') : selectedQuickActionDetail.result_summary}
+                  </pre>
                 </div>
               ) : (
                 <p className="task-meta">Result: -</p>

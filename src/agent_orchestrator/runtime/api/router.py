@@ -74,6 +74,7 @@ class PrdCommitRequest(BaseModel):
 
 class QuickActionRequest(BaseModel):
     prompt: str
+    timeout: Optional[int] = None
 
 
 class PromoteQuickActionRequest(BaseModel):
@@ -1913,7 +1914,10 @@ def create_router(
         pending_runs = [run for run in container.quick_actions.list() if run.status in {"queued", "running"}]
         if len(pending_runs) >= QUICK_ACTION_MAX_PENDING:
             raise HTTPException(status_code=429, detail="Too many pending quick actions; wait for active runs to finish.")
-        run = QuickActionRun(prompt=body.prompt, status="queued")
+        timeout_seconds: Optional[int] = None
+        if body.timeout is not None:
+            timeout_seconds = max(10, min(600, body.timeout))
+        run = QuickActionRun(prompt=body.prompt, status="queued", timeout_seconds=timeout_seconds)
         container.quick_actions.upsert(run)
         bus.emit(channel="quick_actions", event_type="quick_action.queued", entity_id=run.id, payload={"status": run.status})
 
@@ -1955,6 +1959,36 @@ def create_router(
         container.quick_actions.upsert(run)
         bus.emit(channel="quick_actions", event_type="quick_action.promoted", entity_id=run.id, payload={"task_id": task.id})
         return {"task": _task_payload(task), "already_promoted": False}
+
+    @router.get("/quick-actions/{quick_action_id}/logs")
+    async def get_quick_action_logs(
+        quick_action_id: str,
+        project_dir: Optional[str] = Query(None),
+        stdout_offset: int = Query(0),
+        stderr_offset: int = Query(0),
+        max_chars: int = Query(65536),
+    ) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        run = container.quick_actions.get(quick_action_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="Quick action not found")
+        max_chars = min(max(1024, max_chars), 262144)
+        max_bytes = max_chars * 2
+
+        stdout_path = _safe_state_path(run.stdout_path, container.state_root)
+        stderr_path = _safe_state_path(run.stderr_path, container.state_root)
+
+        stdout_text, new_stdout_offset, _ = _read_from_offset(stdout_path, stdout_offset, max_bytes)
+        stderr_text, new_stderr_offset, _ = _read_from_offset(stderr_path, stderr_offset, max_bytes)
+
+        return {
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "stdout_offset": new_stdout_offset,
+            "stderr_offset": new_stderr_offset,
+            "status": run.status,
+            "finished_at": run.finished_at,
+        }
 
     @router.get("/review-queue")
     async def review_queue(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:

@@ -17,7 +17,7 @@ from typing import Callable, Optional
 from loguru import logger
 
 from ..utils import _now_iso
-from ..worker import _run_codex_worker
+from ..worker import WorkerCancelledError, _run_codex_worker
 from .config import WorkerProviderSpec
 
 
@@ -264,6 +264,7 @@ def _run_ollama_generate(
     timeout_seconds: int,
     temperature: Optional[float] = None,
     num_ctx: Optional[int] = None,
+    is_cancelled: Optional[Callable[[], bool]] = None,
 ) -> WorkerRunResult:
     run_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = run_dir / "prompt.txt"
@@ -309,6 +310,9 @@ def _run_ollama_generate(
                     timed_out = True
                     err.write(f"[runner] Ollama timed out after {timeout_seconds}s\n")
                     break
+
+                if is_cancelled and is_cancelled():
+                    raise WorkerCancelledError("Task cancelled by user")
 
                 try:
                     line = resp.readline()
@@ -386,6 +390,7 @@ def run_worker(
     progress_path: Path,
     expected_run_id: Optional[str] = None,
     on_spawn: Optional[Callable[[int], None]] = None,
+    is_cancelled: Optional[Callable[[], bool]] = None,
 ) -> WorkerRunResult:
     """Run the selected provider and return a normalized run result."""
     if spec.type in {"codex", "claude"}:
@@ -403,6 +408,7 @@ def run_worker(
             progress_path=progress_path,
             expected_run_id=expected_run_id,
             on_spawn=on_spawn,
+            is_cancelled=is_cancelled,
         )
         stdout_text = _read_text(str(run_result.get("stdout_path") or ""))
         response_text = stdout_text
@@ -441,6 +447,7 @@ def run_worker(
             timeout_seconds=timeout_seconds,
             temperature=spec.temperature,
             num_ctx=spec.num_ctx,
+            is_cancelled=is_cancelled,
         )
         human_blocking_issues = _extract_human_blocking_issues(progress_path)
         if human_blocking_issues:

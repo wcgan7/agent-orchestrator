@@ -57,6 +57,15 @@ class QuickActionExecutor:
         run.kind = "shortcut"
         run.command = match.command
         project_dir = self._container.project_dir
+        timeout = run.timeout_seconds or 120
+
+        # Create log directory and files
+        run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
+        stdout_log = run_dir / "stdout.log"
+        stderr_log = run_dir / "stderr.log"
+        run.stdout_path = str(stdout_log)
+        run.stderr_path = str(stderr_log)
+        self._container.quick_actions.upsert(run)
 
         try:
             if _contains_unsafe_shell_tokens(match.command):
@@ -72,22 +81,38 @@ class QuickActionExecutor:
                 run.status = "failed"
                 raise RuntimeError("empty shortcut command")
 
-            result = subprocess.run(
-                command_parts,
-                shell=False,
-                capture_output=True,
-                text=True,
-                timeout=120,
-                cwd=str(project_dir),
-            )
-            output = (result.stdout + result.stderr).strip()
-            run.exit_code = result.returncode
+            with open(stdout_log, "wb") as stdout_fh, open(stderr_log, "wb") as stderr_fh:
+                proc = subprocess.Popen(
+                    command_parts,
+                    shell=False,
+                    stdout=stdout_fh,
+                    stderr=stderr_fh,
+                    cwd=str(project_dir),
+                )
+                try:
+                    proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=5)
+                    run.exit_code = -1
+                    run.result_summary = f"Command timed out after {timeout} seconds"
+                    run.status = "failed"
+                    run.finished_at = now_iso()
+                    self._container.quick_actions.upsert(run)
+                    self._bus.emit(
+                        channel="quick_actions",
+                        event_type="quick_action.failed",
+                        entity_id=run.id,
+                        payload={"status": run.status, "exit_code": run.exit_code},
+                    )
+                    return run
+
+            stdout_text = stdout_log.read_text(errors="replace").strip()
+            stderr_text = stderr_log.read_text(errors="replace").strip()
+            output = (stdout_text + "\n" + stderr_text).strip() if stderr_text else stdout_text
+            run.exit_code = proc.returncode
             run.result_summary = output[:_MAX_OUTPUT] if output else "(no output)"
-            run.status = "completed" if result.returncode == 0 else "failed"
-        except subprocess.TimeoutExpired:
-            run.exit_code = -1
-            run.result_summary = "Command timed out after 120 seconds"
-            run.status = "failed"
+            run.status = "completed" if proc.returncode == 0 else "failed"
         except RuntimeError:
             # result_summary/status are already set for rejected shortcut commands.
             pass
@@ -111,6 +136,7 @@ class QuickActionExecutor:
     def _execute_agent(self, run: QuickActionRun) -> QuickActionRun:
         """Dispatch to the workers subsystem (codex / ollama)."""
         run.kind = "agent"
+        timeout = run.timeout_seconds or 120
         try:
             cfg = self._container.config.load()
             runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
@@ -144,13 +170,16 @@ class QuickActionExecutor:
 
             run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
             progress_path = run_dir / "progress.json"
+            run.stdout_path = str(run_dir / "stdout.log")
+            run.stderr_path = str(run_dir / "stderr.log")
+            self._container.quick_actions.upsert(run)
 
             result = run_worker(
                 spec=spec,
                 prompt=run.prompt,
                 project_dir=self._container.project_dir,
                 run_dir=run_dir,
-                timeout_seconds=120,
+                timeout_seconds=timeout,
                 heartbeat_seconds=heartbeat_seconds,
                 heartbeat_grace_seconds=heartbeat_grace_seconds,
                 progress_path=progress_path,

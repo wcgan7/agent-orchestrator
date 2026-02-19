@@ -1420,11 +1420,16 @@ export default function App() {
   const [selectedImportJobErrorAt, setSelectedImportJobErrorAt] = useState('')
 
   const [quickPrompt, setQuickPrompt] = useState('')
+  const [quickTimeout, setQuickTimeout] = useState('')
   const [selectedQuickActionId, setSelectedQuickActionId] = useState('')
   const [selectedQuickActionDetail, setSelectedQuickActionDetail] = useState<QuickActionRecord | null>(null)
   const [selectedQuickActionLoading, setSelectedQuickActionLoading] = useState(false)
   const [selectedQuickActionError, setSelectedQuickActionError] = useState('')
   const [selectedQuickActionErrorAt, setSelectedQuickActionErrorAt] = useState('')
+  const [quickActionStdout, setQuickActionStdout] = useState('')
+  const [quickActionStderr, setQuickActionStderr] = useState('')
+  const [quickActionStdoutOffset, setQuickActionStdoutOffset] = useState(0)
+  const [quickActionStderrOffset, setQuickActionStderrOffset] = useState(0)
   const [reviewGuidance, setReviewGuidance] = useState('')
   const [retryFromStep, setRetryFromStep] = useState('')
   const [logViewStep, setLogViewStep] = useState('')
@@ -2455,7 +2460,58 @@ export default function App() {
   useEffect(() => {
     if (!selectedQuickActionId) return
     void loadQuickActionDetail(selectedQuickActionId)
+    // Reset log state when quick action changes
+    setQuickActionStdout('')
+    setQuickActionStderr('')
+    setQuickActionStdoutOffset(0)
+    setQuickActionStderrOffset(0)
   }, [selectedQuickActionId, projectDir])
+
+  // Poll logs for active quick actions
+  useEffect(() => {
+    if (!selectedQuickActionId) return
+    const detail = selectedQuickActionDetail
+    if (!detail) return
+    if (detail.status !== 'queued' && detail.status !== 'running') return
+
+    let stdoutOff = quickActionStdoutOffset
+    let stderrOff = quickActionStderrOffset
+    let cancelled = false
+
+    async function poll(): Promise<void> {
+      try {
+        const resp = await requestJson<{
+          stdout: string
+          stderr: string
+          stdout_offset: number
+          stderr_offset: number
+          status: string
+          finished_at: string | null
+        }>(buildApiUrl(`/api/quick-actions/${selectedQuickActionId}/logs?stdout_offset=${stdoutOff}&stderr_offset=${stderrOff}`, projectDir))
+        if (cancelled) return
+        if (resp.stdout) {
+          setQuickActionStdout((prev) => prev + resp.stdout)
+        }
+        if (resp.stderr) {
+          setQuickActionStderr((prev) => prev + resp.stderr)
+        }
+        stdoutOff = resp.stdout_offset
+        stderrOff = resp.stderr_offset
+        setQuickActionStdoutOffset(stdoutOff)
+        setQuickActionStderrOffset(stderrOff)
+        // If finished, refresh the detail to get final status
+        if (resp.finished_at) {
+          void loadQuickActionDetail(selectedQuickActionId)
+        }
+      } catch {
+        // Ignore transient fetch errors during polling
+      }
+    }
+
+    void poll()
+    const timer = window.setInterval(() => void poll(), 2_000)
+    return () => { cancelled = true; window.clearInterval(timer) }
+  }, [selectedQuickActionId, selectedQuickActionDetail?.status, projectDir])
 
   function toErrorMessage(prefix: string, err: unknown): string {
     const detail = err instanceof Error ? err.message : 'unknown error'
@@ -2894,7 +2950,7 @@ export default function App() {
       const resp = await requestJson<{ quick_action: QuickActionRecord }>(buildApiUrl('/api/quick-actions', projectDir), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: quickPrompt.trim() }),
+        body: JSON.stringify({ prompt: quickPrompt.trim(), ...(quickTimeout.trim() ? { timeout: parseInt(quickTimeout.trim(), 10) } : {}) }),
       })
       if (resp.quick_action) {
         setSelectedQuickActionId(resp.quick_action.id)
@@ -5527,7 +5583,11 @@ export default function App() {
                     <p className="hint">Quick Action is ephemeral. Promote explicitly if you want it on the board.</p>
                     <label className="field-label" htmlFor="quick-prompt">Prompt</label>
                     <textarea id="quick-prompt" rows={6} value={quickPrompt} onChange={(event) => setQuickPrompt(event.target.value)} required />
-                    <button className="button button-primary" type="submit">Run Quick Action</button>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <button className="button button-primary" type="submit">Run Quick Action</button>
+                      <label htmlFor="quick-timeout" className="field-label" style={{ margin: 0, whiteSpace: 'nowrap' }}>Timeout (s)</label>
+                      <input id="quick-timeout" type="number" min={10} max={600} step={10} placeholder="120" value={quickTimeout} onChange={(event) => setQuickTimeout(event.target.value)} style={{ width: '80px' }} />
+                    </div>
                   </form>
                   <QuickActionDetailPanel
                     quickActions={quickActions}
@@ -5539,6 +5599,8 @@ export default function App() {
                     onPromoteQuickAction={(quickActionId) => void promoteQuickAction(quickActionId)}
                     onRefreshQuickActionDetail={() => void loadQuickActionDetail(selectedQuickActionId)}
                     onRetryLoadQuickActionDetail={() => void loadQuickActionDetail(selectedQuickActionId)}
+                    liveStdout={quickActionStdout}
+                    liveStderr={quickActionStderr}
                   />
                 </div>
               ) : null}

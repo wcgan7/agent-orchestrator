@@ -192,12 +192,19 @@ class QuickActionRun:
     kind: Optional[str] = None
     command: Optional[str] = None
     exit_code: Optional[int] = None
+    stdout_path: Optional[str] = None
+    stderr_path: Optional[str] = None
+    timeout_seconds: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "QuickActionRun":
+        raw_exit = data.get("exit_code")
+        exit_code = int(raw_exit) if raw_exit is not None else None
+        raw_timeout = data.get("timeout_seconds")
+        timeout_seconds = int(raw_timeout) if raw_timeout is not None else None
         return cls(
             id=str(data.get("id") or _id("qrun")),
             prompt=str(data.get("prompt") or ""),
@@ -208,7 +215,10 @@ class QuickActionRun:
             promoted_task_id=data.get("promoted_task_id"),
             kind=data.get("kind"),
             command=data.get("command"),
-            exit_code=data.get("exit_code"),
+            exit_code=exit_code,
+            stdout_path=data.get("stdout_path"),
+            stderr_path=data.get("stderr_path"),
+            timeout_seconds=timeout_seconds,
         )
 
 

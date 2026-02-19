@@ -14,6 +14,7 @@ from typing import Any
 from ...pipelines.registry import PipelineRegistry
 from ...workers.config import get_workers_runtime_config, resolve_worker_for_step
 from ...workers.diagnostics import test_worker
+from ...worker import WorkerCancelledError
 from ...workers.run import WorkerRunResult, run_worker
 from ..domain.models import RunRecord, Task, now_iso
 from ..storage.container import Container
@@ -23,7 +24,8 @@ logger = logging.getLogger(__name__)
 
 # Step category mapping
 _PLANNING_STEPS = {"plan", "analyze", "plan_refine"}
-_IMPL_STEPS = {"implement", "implement_fix", "prototype"}
+_IMPL_STEPS = {"implement", "prototype"}
+_FIX_STEPS = {"implement_fix"}
 _VERIFY_STEPS = {"verify", "benchmark", "reproduce"}
 _REVIEW_STEPS = {"review"}
 _REPORT_STEPS = {"report", "summarize"}
@@ -190,6 +192,8 @@ def _step_category(step: str) -> str:
         return "planning"
     if step in _IMPL_STEPS:
         return "implementation"
+    if step in _FIX_STEPS:
+        return "fix"
     if step in _VERIFY_STEPS:
         return "verification"
     if step in _REVIEW_STEPS:
@@ -225,6 +229,15 @@ _CATEGORY_INSTRUCTIONS: dict[str, str] = {
         "If previous review cycle history is shown below, preserve all fixes\n"
         "applied in prior cycles. Do not revert or reimplement from scratch —\n"
         "make targeted, incremental fixes only."
+    ),
+    "fix": (
+        "Fix the issues identified in the review findings and/or verification\n"
+        "failures listed below. Do NOT reimplement the task from scratch.\n"
+        "Make only the minimal, targeted changes needed to address each finding.\n"
+        "Preserve all existing work that is correct — do not refactor, reorganize,\n"
+        "or rewrite code that is not directly related to a finding.\n"
+        "If review cycle history is shown, ensure your fixes do not regress issues\n"
+        "resolved in prior cycles."
     ),
     "verification": (
         "Run the project's test, lint, and type-check commands for the following\n"
@@ -592,12 +605,17 @@ def build_step_prompt(
                       "Ensure BOTH this task's and the other task(s)' objectives are preserved.")
 
     # Include verify failure context for fix steps.
-    if isinstance(task.metadata, dict) and category == "implementation":
+    if isinstance(task.metadata, dict) and category in ("implementation", "fix"):
         verify_failure = task.metadata.get("verify_failure")
         if verify_failure:
             parts.append("")
             parts.append("## Verification failure to fix")
             parts.append(f"  {verify_failure}")
+        verify_output = task.metadata.get("verify_output")
+        if isinstance(verify_output, str) and verify_output.strip():
+            parts.append("")
+            parts.append("## Verification output (test/lint/typecheck logs)")
+            parts.append(verify_output.strip())
 
     # Inject human feedback from previous review or retry.
     if isinstance(task.metadata, dict):
@@ -622,7 +640,7 @@ def build_step_prompt(
                 parts.append(text)
 
     # Inject language standards for implementation and review steps
-    if project_languages and category in ("implementation", "review"):
+    if project_languages and category in ("implementation", "fix", "review"):
         for lang in project_languages:
             lang_block = _LANGUAGE_STANDARDS.get(lang)
             if lang_block:
@@ -630,7 +648,7 @@ def build_step_prompt(
                 parts.append(lang_block)
 
     # Inject project commands for implementation and verification steps
-    if project_commands and project_languages and category in ("implementation", "verification"):
+    if project_commands and project_languages and category in ("implementation", "fix", "verification"):
         cmds_block = _format_project_commands(project_commands, project_languages)
         if cmds_block:
             parts.append("")
@@ -856,6 +874,11 @@ class LiveWorkerAdapter:
         }
         task.metadata["active_logs"] = log_meta
         self._container.tasks.upsert(task)
+
+        def _check_task_cancelled() -> bool:
+            fresh = self._container.tasks.get(task.id)
+            return fresh is not None and fresh.status == "cancelled"
+
         try:
             result = run_worker(
                 spec=spec,
@@ -866,7 +889,10 @@ class LiveWorkerAdapter:
                 heartbeat_seconds=heartbeat_seconds,
                 heartbeat_grace_seconds=heartbeat_grace_seconds,
                 progress_path=progress_path,
+                is_cancelled=_check_task_cancelled,
             )
+        except WorkerCancelledError:
+            raise  # Let the orchestrator handle cancellation
         except Exception as exc:
             return StepResult(status="error", summary=f"Worker execution failed: {exc}")
         finally:
