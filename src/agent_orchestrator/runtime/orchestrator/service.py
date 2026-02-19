@@ -1667,9 +1667,11 @@ class OrchestratorService:
 
                     task.metadata.pop("review_findings", None)
                     task.metadata.pop("review_history", None)
+                    task.metadata.pop("verify_environment_note", None)
 
                 if not review_passed:
                     task.metadata.pop("review_history", None)
+                    task.metadata.pop("verify_environment_note", None)
                     task.status = "blocked"
                     task.error = "Review attempt cap exceeded"
                     task.current_step = "review"

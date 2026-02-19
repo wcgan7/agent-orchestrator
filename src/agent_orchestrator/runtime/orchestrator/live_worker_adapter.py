@@ -544,6 +544,19 @@ def build_step_prompt(
                 st = cf.get("status", "open")
                 parts.append(f"    - [{sev}] {summ} (status: {st})")
 
+    # Surface verify environment notes to the reviewer
+    if category == "review" and isinstance(task.metadata, dict):
+        env_note = task.metadata.get("verify_environment_note")
+        if isinstance(env_note, str) and env_note.strip():
+            parts.append("")
+            parts.append("## Verification environment note")
+            parts.append(
+                "The verify step encountered failures caused by environment/infrastructure "
+                "constraints, not code defects. The pipeline proceeded without fix attempts. "
+                "Please assess whether this is acceptable for this task."
+            )
+            parts.append(f"  {env_note.strip()}")
+
     # Include plan context for task generation
     plan_for_generation = task.metadata.get("plan_for_generation") if isinstance(task.metadata, dict) else None
     if plan_for_generation and category == "task_generation":
@@ -971,7 +984,7 @@ class LiveWorkerAdapter:
         formatter_prompt = (
             "You are a CI results classifier.\n\n"
             "Given the verification output below, respond with ONLY a JSON object:\n"
-            '{"status": "pass|fail|skip", "summary": "one-line summary of results"}\n\n'
+            '{"status": "pass|fail|skip|environment", "summary": "one-line summary of results"}\n\n'
             "Rules:\n"
             '- Use "fail" if a test, lint, or type-check command ran and '
             "produced failures (non-zero exit code from an actual check run).\n"
@@ -979,6 +992,11 @@ class LiveWorkerAdapter:
             "no test files exist, or a config file is missing (e.g. missing ESLint "
             "config, no pytest found). These are pre-existing environment gaps, "
             "not test failures.\n"
+            '- Use "environment" if tests ran but failures are caused by OS, sandbox, '
+            "permission, or infrastructure constraints — not by code logic. Examples: "
+            "PermissionError on semaphores/sockets, resource limits, Docker/container "
+            "restrictions, missing system libraries. These cannot be fixed by changing "
+            "application code.\n"
             '- Use "pass" if every check that ran succeeded.\n'
             '- If some checks passed and others were skipped (tool not found), '
             'use "pass" — skipped checks are not failures.\n\n'
@@ -1014,6 +1032,11 @@ class LiveWorkerAdapter:
         summary = parsed.get("summary")
         if status_val == "fail":
             return StepResult(status="error", summary=str(summary) if summary else response_text[:500])
+        if status_val == "environment":
+            note = str(summary) if summary else response_text[:500]
+            if isinstance(task.metadata, dict):
+                task.metadata["verify_environment_note"] = note
+            return StepResult(status="ok", summary=note)
         return StepResult(status="ok", summary=str(summary) if summary else None)
 
     # ------------------------------------------------------------------
