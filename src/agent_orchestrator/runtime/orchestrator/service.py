@@ -1014,6 +1014,16 @@ class OrchestratorService:
             if refreshed and isinstance(refreshed.metadata, dict):
                 task.metadata = dict(refreshed.metadata)
 
+        # Store step output for downstream prompt injection.
+        if result.summary:
+            if not isinstance(task.metadata, dict):
+                task.metadata = {}
+            so = task.metadata.setdefault("step_outputs", {})
+            # Plan text already bounded at 20KB by _normalize_planning_text.
+            # Other outputs truncated to 4KB to prevent metadata bloat.
+            max_len = 20_000 if step == "plan" else 4_000
+            so[step] = result.summary[:max_len]
+
         # Handle generate_tasks: create child tasks from step output
         if step == "generate_tasks" and result.generated_tasks:
             self._create_child_tasks(task, result.generated_tasks)
@@ -1767,6 +1777,7 @@ class OrchestratorService:
                 self.bus.emit(channel="tasks", event_type="task.done", entity_id=task.id, payload={})
 
             task.error = None
+            task.metadata.pop("step_outputs", None)
             task.metadata.pop("worktree_dir", None)
             self.container.tasks.upsert(task)
             run.finished_at = now_iso()

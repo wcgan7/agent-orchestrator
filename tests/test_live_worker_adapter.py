@@ -1211,3 +1211,78 @@ def test_run_step_reads_project_commands_from_config(container: Container, adapt
     prompt = captured_prompt["text"]
     assert "## Project commands" in prompt
     assert ".venv/bin/pytest -x" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Step output injection in build_step_prompt
+# ---------------------------------------------------------------------------
+
+
+class TestStepOutputInjection:
+    """Tests for prior step output injection into build_step_prompt."""
+
+    def test_plan_output_injected_for_implementation(self) -> None:
+        task = _make_task(metadata={"step_outputs": {"plan": "Use adapter pattern."}})
+        prompt = build_step_prompt(task=task, step="implement", attempt=1, is_codex=True)
+        assert "## Output from prior 'plan' step" in prompt
+        assert "Use adapter pattern." in prompt
+
+    def test_analyze_and_plan_both_injected_for_implementation(self) -> None:
+        task = _make_task(metadata={
+            "step_outputs": {"analyze": "Found 3 modules.", "plan": "Refactor X."}
+        })
+        prompt = build_step_prompt(task=task, step="implement", attempt=1, is_codex=True)
+        assert "## Output from prior 'plan' step" in prompt
+        assert "## Output from prior 'analyze' step" in prompt
+        assert "Found 3 modules." in prompt
+        assert "Refactor X." in prompt
+
+    def test_verify_output_injected_for_review(self) -> None:
+        task = _make_task(metadata={"step_outputs": {"verify": "All tests pass."}})
+        prompt = build_step_prompt(task=task, step="review", attempt=1, is_codex=False)
+        assert "## Output from prior 'verify' step" in prompt
+        assert "All tests pass." in prompt
+
+    def test_all_outputs_injected_for_reporting(self) -> None:
+        task = _make_task(metadata={
+            "step_outputs": {"gather": "Data collected.", "analyze": "Results look good."}
+        })
+        prompt = build_step_prompt(task=task, step="report", attempt=1, is_codex=True)
+        assert "## Output from prior 'gather' step" in prompt
+        assert "## Output from prior 'analyze' step" in prompt
+
+    def test_plan_injected_for_task_generation(self) -> None:
+        task = _make_task(metadata={"step_outputs": {"plan": "Split into 3 subtasks."}})
+        prompt = build_step_prompt(task=task, step="generate_tasks", attempt=1, is_codex=True)
+        assert "## Output from prior 'plan' step" in prompt
+        assert "Split into 3 subtasks." in prompt
+
+    def test_no_injection_for_verification(self) -> None:
+        task = _make_task(metadata={"step_outputs": {"plan": "Some plan."}})
+        prompt = build_step_prompt(task=task, step="verify", attempt=1, is_codex=True)
+        assert "## Output from prior" not in prompt
+
+    def test_no_injection_for_planning(self) -> None:
+        task = _make_task(metadata={"step_outputs": {"gather": "Info gathered."}})
+        prompt = build_step_prompt(task=task, step="plan", attempt=1, is_codex=True)
+        assert "## Output from prior" not in prompt
+
+    def test_empty_values_skipped(self) -> None:
+        task = _make_task(metadata={"step_outputs": {"plan": "", "analyze": "   "}})
+        prompt = build_step_prompt(task=task, step="implement", attempt=1, is_codex=True)
+        assert "## Output from prior" not in prompt
+
+    def test_missing_step_outputs_no_crash(self) -> None:
+        task = _make_task(metadata={})
+        prompt = build_step_prompt(task=task, step="implement", attempt=1, is_codex=True)
+        assert "## Output from prior" not in prompt
+
+    def test_coexists_with_review_findings(self) -> None:
+        task = _make_task(metadata={
+            "step_outputs": {"plan": "Fix the bug."},
+            "review_findings": [{"severity": "high", "summary": "Missing null check"}],
+        })
+        prompt = build_step_prompt(task=task, step="implement_fix", attempt=1, is_codex=True)
+        assert "## Output from prior 'plan' step" in prompt
+        assert "Fix the bug." in prompt
+        assert "Missing null check" in prompt
