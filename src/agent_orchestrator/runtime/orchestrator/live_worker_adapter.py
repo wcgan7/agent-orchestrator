@@ -33,6 +33,18 @@ _SCAN_STEPS = {"scan", "scan_deps", "scan_code", "gather"}
 _TASK_GEN_STEPS = {"generate_tasks", "diagnose"}
 _MERGE_RESOLVE_STEPS = {"resolve_merge"}
 _DEP_ANALYSIS_STEPS = {"analyze_deps"}
+
+# Which prior step outputs each category should receive in its prompt.
+# None = inject all available outputs (for reporting/summarize steps).
+_STEP_OUTPUT_INJECTION: dict[str, tuple[str, ...] | None] = {
+    "implementation": ("plan", "analyze", "reproduce", "diagnose", "profile", "gather"),
+    "review": ("verify", "benchmark"),
+    "reporting": None,
+    "task_generation": ("plan", "analyze", "scan", "scan_deps", "scan_code"),
+    "fix": ("plan",),
+    "scanning": ("scan_deps", "gather"),
+}
+
 _STEP_TIMEOUT_ALIASES = {"implement_fix": "implement"}
 _DEFAULT_STEP_TIMEOUT_SECONDS = 600
 _DEFAULT_HEARTBEAT_SECONDS = 60
@@ -505,6 +517,19 @@ def build_step_prompt(
     parts.append(f"Step: {step}")
     if attempt > 1:
         parts.append(f"Attempt: {attempt}")
+
+    # Inject outputs from prior pipeline steps.
+    step_outputs = task.metadata.get("step_outputs") if isinstance(task.metadata, dict) else None
+    if isinstance(step_outputs, dict) and step_outputs and category in _STEP_OUTPUT_INJECTION:
+        inject_keys = _STEP_OUTPUT_INJECTION[category]
+        if inject_keys is None:
+            inject_keys = tuple(step_outputs.keys())
+        for key in inject_keys:
+            val = step_outputs.get(key)
+            if isinstance(val, str) and val.strip():
+                parts.append("")
+                parts.append(f"## Output from prior '{key}' step")
+                parts.append(val.strip())
 
     # Include review findings for fix steps
     review_findings = task.metadata.get("review_findings") if isinstance(task.metadata, dict) else None
