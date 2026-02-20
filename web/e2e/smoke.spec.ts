@@ -21,6 +21,7 @@ test('creates a task from the create-work modal', async ({ page }) => {
   await expect(modal).toBeVisible()
 
   await modal.getByLabel('Title').fill(title)
+  await modal.getByLabel('Task Type').selectOption('feature')
   await modal.locator('button[form="create-task-form"]').click()
 
   await expect(modal).toBeHidden()
