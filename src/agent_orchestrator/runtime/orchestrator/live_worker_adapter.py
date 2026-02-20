@@ -141,6 +141,31 @@ _DEFAULT_PROJECT_COMMANDS: dict[str, dict[str, str]] = {
 }
 
 
+def _resolve_command_paths(
+    commands: dict[str, dict[str, str]],
+    project_dir: Path,
+) -> dict[str, dict[str, str]]:
+    """Resolve relative executable paths in project commands to absolute paths.
+
+    If the first token of a command starts with '.' and contains '/'
+    (e.g. ``.venv/bin/ruff``), resolve it against *project_dir* so that
+    workers running in git worktrees (which lack gitignored dirs like
+    ``.venv``) can still find the binary.
+    """
+    resolved: dict[str, dict[str, str]] = {}
+    for lang, cmds in commands.items():
+        resolved_cmds: dict[str, str] = {}
+        for key, cmd in cmds.items():
+            parts = cmd.split(None, 1)  # split on first whitespace
+            if parts and parts[0].startswith(".") and "/" in parts[0]:
+                abs_exe = str((project_dir / parts[0]).resolve())
+                resolved_cmds[key] = abs_exe if len(parts) == 1 else f"{abs_exe} {parts[1]}"
+            else:
+                resolved_cmds[key] = cmd
+        resolved[lang] = resolved_cmds
+    return resolved
+
+
 def detect_project_languages(project_dir: Path) -> list[str]:
     """Return all detected project languages based on marker files.
 
@@ -1157,6 +1182,12 @@ class LiveWorkerAdapter:
                         project_commands[lang] = dict(defaults)
             if not project_commands:
                 project_commands = None
+        # Resolve relative executable paths against the *original* project dir
+        # so workers in git worktrees can find binaries in gitignored dirs.
+        if project_commands:
+            project_commands = _resolve_command_paths(
+                project_commands, self._container.project_dir,
+            )
         prompt = build_step_prompt(
             task=task, step=step, attempt=attempt,
             project_languages=langs or None,
