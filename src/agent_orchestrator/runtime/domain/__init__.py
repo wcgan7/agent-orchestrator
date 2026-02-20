@@ -1,10 +1,10 @@
-from .models import AgentRecord, QuickActionRun, ReviewCycle, ReviewFinding, RunRecord, Task
+from .models import AgentRecord, ReviewCycle, ReviewFinding, RunRecord, Task, TerminalSession
 
 __all__ = [
     "Task",
     "RunRecord",
     "ReviewFinding",
     "ReviewCycle",
-    "QuickActionRun",
+    "TerminalSession",
     "AgentRecord",
 ]

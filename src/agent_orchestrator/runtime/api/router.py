@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from hashlib import sha256
 import uuid
@@ -15,10 +16,11 @@ from ...collaboration.modes import MODE_CONFIGS
 from ...pipelines.registry import PipelineRegistry
 from ...workers.config import WorkerProviderSpec, get_workers_runtime_config
 from ...workers.diagnostics import test_worker
-from ..domain.models import AgentRecord, QuickActionRun, Task, now_iso
+from ..domain.models import AgentRecord, Task, now_iso
 from ..events.bus import EventBus
 from ..orchestrator.service import OrchestratorService
 from ..storage.container import Container
+from ..terminal.service import TerminalService
 
 
 class CreateTaskRequest(BaseModel):
@@ -37,6 +39,25 @@ class CreateTaskRequest(BaseModel):
     source: str = "manual"
     worker_model: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    project_commands: Optional[dict[str, dict[str, str]]] = None
+    classifier_pipeline_id: Optional[str] = None
+    classifier_confidence: Optional[Literal["high", "low"]] = None
+    classifier_reason: Optional[str] = None
+    was_user_override: Optional[bool] = None
+
+
+class PipelineClassificationRequest(BaseModel):
+    title: str
+    description: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PipelineClassificationResponse(BaseModel):
+    pipeline_id: str
+    task_type: str
+    confidence: Literal["high", "low"]
+    reason: str
+    allowed_pipelines: list[str]
 
 
 class UpdateTaskRequest(BaseModel):
@@ -52,6 +73,7 @@ class UpdateTaskRequest(BaseModel):
     dependency_policy: Optional[str] = None
     worker_model: Optional[str] = None
     metadata: Optional[dict[str, Any]] = None
+    project_commands: Optional[dict[str, dict[str, str]]] = None
 
 
 class TransitionRequest(BaseModel):
@@ -72,14 +94,23 @@ class PrdCommitRequest(BaseModel):
     job_id: str
 
 
-class QuickActionRequest(BaseModel):
-    prompt: str
-    timeout: Optional[int] = None
+class StartTerminalSessionRequest(BaseModel):
+    cols: Optional[int] = Field(default=120, ge=2, le=500)
+    rows: Optional[int] = Field(default=36, ge=2, le=300)
+    shell: Optional[str] = None
 
 
-class PromoteQuickActionRequest(BaseModel):
-    title: Optional[str] = None
-    priority: str = "P2"
+class TerminalInputRequest(BaseModel):
+    data: str
+
+
+class TerminalResizeRequest(BaseModel):
+    cols: int = Field(ge=2, le=500)
+    rows: int = Field(ge=2, le=300)
+
+
+class StopTerminalSessionRequest(BaseModel):
+    signal: Literal["TERM", "KILL"] = "TERM"
 
 
 class PlanRefineRequest(BaseModel):
@@ -221,7 +252,6 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
 
 IMPORT_JOB_TTL_SECONDS = 60 * 60 * 24
 IMPORT_JOB_MAX_RECORDS = 200
-QUICK_ACTION_MAX_PENDING = 32
 
 
 def _priority_rank(priority: str) -> int:
@@ -330,6 +360,16 @@ def _normalize_human_blocking_issues(value: Any) -> list[dict[str, str]]:
     return out[:20]
 
 
+def _iso_delta_seconds(start: str, end: str) -> Optional[float]:
+    """Compute elapsed seconds between two ISO-8601 timestamps."""
+    try:
+        s = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        e = datetime.fromisoformat(end.replace("Z", "+00:00"))
+        return max((e - s).total_seconds(), 0.0)
+    except (ValueError, TypeError):
+        return None
+
+
 def _build_execution_summary(task: Task, container: "Container") -> Optional[dict[str, Any]]:
     """Build execution summary from the latest RunRecord's step data."""
     if task.status not in ("in_review", "blocked", "done"):
@@ -360,6 +400,10 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
             entry["open_counts"] = step_data["open_counts"]
         if step_data.get("commit"):
             entry["commit"] = str(step_data["commit"])
+        started_at_raw = step_data.get("started_at")
+        ts_raw = step_data.get("ts")
+        if isinstance(started_at_raw, str) and isinstance(ts_raw, str):
+            entry["duration_seconds"] = _iso_delta_seconds(started_at_raw, ts_raw)
         steps.append(entry)
     if not steps:
         return None
@@ -372,12 +416,14 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
         "running": "Running",
     }
     run_summary = status_labels.get(run.status) or status_labels.get(task.status) or run.status
+    run_duration = _iso_delta_seconds(run.started_at, run.finished_at) if run.started_at and run.finished_at else None
     return {
         "run_id": run.id,
         "run_status": run.status,
         "run_summary": run_summary,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
+        "duration_seconds": run_duration,
         "steps": steps,
     }
 
@@ -386,6 +432,8 @@ def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[s
     payload = task.to_dict()
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
     payload["human_blocking_issues"] = _normalize_human_blocking_issues(metadata.get("human_blocking_issues"))
+    raw_actions = metadata.get("human_review_actions")
+    payload["human_review_actions"] = list(raw_actions) if isinstance(raw_actions, list) else []
     if container is not None:
         summary = _build_execution_summary(task, container)
         if summary is not None:
@@ -758,21 +806,303 @@ def _has_unresolved_blockers(container: Container, task: Task) -> Optional[str]:
     return None
 
 
-def _parse_prd_into_tasks(content: str, default_priority: str) -> list[dict[str, Any]]:
-    tasks: list[dict[str, Any]] = []
-    for line in content.splitlines():
-        normalized = line.strip()
-        if normalized.startswith("- ") or normalized.startswith("* "):
-            title = normalized[2:].strip()
-            if title:
-                tasks.append({"title": title, "priority": default_priority})
-        elif normalized.startswith("## "):
-            title = normalized[3:].strip()
-            if title:
-                tasks.append({"title": title, "priority": default_priority})
-    if not tasks:
-        tasks.append({"title": "Imported PRD task", "priority": default_priority})
-    return tasks
+def _normalize_prd_text(content: str) -> str:
+    return content.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _extract_task_candidates_from_chunk(chunk_text: str) -> list[str]:
+    candidates: list[str] = []
+    for raw_line in chunk_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("- ") or line.startswith("* "):
+            title = re.sub(r"\s+", " ", line[2:].strip()).strip(" -")
+            if len(title) >= 4:
+                candidates.append(title)
+                continue
+        numbered = re.match(r"^\d+[\.\)]\s+(.*)$", line)
+        if numbered:
+            title = re.sub(r"\s+", " ", numbered.group(1).strip()).strip(" -")
+            if len(title) >= 4:
+                candidates.append(title)
+                continue
+        section_heading = re.match(r"^#{1,6}\s+(.*)$", line)
+        if section_heading:
+            title = re.sub(r"\s+", " ", section_heading.group(1).strip()).strip(" -")
+            if len(title) >= 4:
+                candidates.append(title)
+                continue
+    return candidates
+
+
+def _fallback_chunk(text: str, chunk_size: int = 1200, overlap: int = 120) -> list[dict[str, Any]]:
+    chunks: list[dict[str, Any]] = []
+    if not text.strip():
+        return chunks
+    idx = 0
+    chunk_id = 1
+    text_len = len(text)
+    while idx < text_len:
+        end = min(text_len, idx + chunk_size)
+        chunk_text = text[idx:end].strip()
+        if chunk_text:
+            chunks.append(
+                {
+                    "id": f"c{chunk_id}",
+                    "strategy": "token_window",
+                    "section_path": None,
+                    "char_start": idx,
+                    "char_end": end,
+                    "text": chunk_text,
+                }
+            )
+            chunk_id += 1
+        if end >= text_len:
+            break
+        idx = max(end - overlap, idx + 1)
+    return chunks
+
+
+def _ingest_prd(content: str, default_priority: str) -> dict[str, Any]:
+    normalized = _normalize_prd_text(content)
+    lines = normalized.splitlines(keepends=True)
+
+    chunks: list[dict[str, Any]] = []
+    current_heading = "Document"
+    current_block: list[str] = []
+    block_start = 0
+    cursor = 0
+    chunk_id = 1
+    heading_detected = False
+
+    def flush_block(end_offset: int) -> None:
+        nonlocal chunk_id, current_block, block_start
+        block_text = "".join(current_block).strip()
+        if not block_text:
+            current_block = []
+            block_start = end_offset
+            return
+        chunks.append(
+            {
+                "id": f"c{chunk_id}",
+                "strategy": "heading_section",
+                "section_path": current_heading,
+                "char_start": block_start,
+                "char_end": end_offset,
+                "text": block_text,
+            }
+        )
+        chunk_id += 1
+        current_block = []
+        block_start = end_offset
+
+    for line in lines:
+        stripped = line.strip()
+        is_heading = bool(re.match(r"^#{1,6}\s+\S+", stripped))
+        if is_heading:
+            heading_detected = True
+            flush_block(cursor)
+            current_heading = re.sub(r"^#{1,6}\s+", "", stripped).strip() or "Document"
+        current_block.append(line)
+        cursor += len(line)
+    flush_block(cursor)
+
+    if not chunks:
+        chunks = _fallback_chunk(normalized)
+    elif not heading_detected:
+        # Convert no-heading result into paragraph chunking when structure is flat.
+        chunks = _fallback_chunk(normalized)
+        for item in chunks:
+            item["strategy"] = "paragraph_fallback"
+
+    task_candidates: list[dict[str, Any]] = []
+    seen_titles: set[str] = set()
+    for chunk in chunks:
+        for title in _extract_task_candidates_from_chunk(str(chunk.get("text") or "")):
+            key = title.lower().strip()
+            if not key or key in seen_titles:
+                continue
+            seen_titles.add(key)
+            task_candidates.append(
+                {
+                    "title": title[:200],
+                    "priority": default_priority,
+                    "source_chunk_id": chunk["id"],
+                    "source_section_path": chunk.get("section_path"),
+                }
+            )
+
+    ambiguity_warnings: list[str] = []
+    if not task_candidates:
+        ambiguity_warnings.append(
+            "No explicit task bullets/headings found; generated generic task candidates from document chunks."
+        )
+        for chunk in chunks[:6]:
+            chunk_text = str(chunk.get("text") or "").strip()
+            first_sentence = re.split(r"(?<=[\.\!\?])\s+", chunk_text, maxsplit=1)[0].strip()
+            if not first_sentence:
+                continue
+            title = re.sub(r"\s+", " ", first_sentence).strip(" -")
+            if len(title) < 4:
+                continue
+            task_candidates.append(
+                {
+                    "title": title[:200],
+                    "priority": default_priority,
+                    "source_chunk_id": chunk["id"],
+                    "source_section_path": chunk.get("section_path"),
+                    "ambiguity_reason": "derived_from_first_sentence",
+                }
+            )
+
+    if not task_candidates:
+        task_candidates.append(
+            {
+                "title": "Imported PRD task",
+                "priority": default_priority,
+                "source_chunk_id": chunks[0]["id"] if chunks else None,
+                "source_section_path": chunks[0].get("section_path") if chunks else None,
+                "ambiguity_reason": "empty_or_unstructured_document",
+            }
+        )
+
+    parsed_prd = {
+        "strategy": chunks[0]["strategy"] if chunks else "empty",
+        "chunk_count": len(chunks),
+        "chunks": chunks,
+        "task_candidates": task_candidates,
+        "ambiguity_warnings": ambiguity_warnings,
+    }
+    return {
+        "original_prd": {
+            "content": content,
+            "normalized_content": normalized,
+            "char_count": len(normalized),
+            "checksum_sha256": sha256(normalized.encode("utf-8")).hexdigest(),
+        },
+        "parsed_prd": parsed_prd,
+    }
+
+
+def _generated_tasks_from_parsed_prd(parsed_prd: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = parsed_prd.get("task_candidates")
+    if not isinstance(candidates, list):
+        return []
+    out: list[dict[str, Any]] = []
+    previous_id: Optional[str] = None
+    for idx, item in enumerate(candidates, start=1):
+        if not isinstance(item, dict):
+            continue
+        generated_id = f"prd_{idx}"
+        title = str(item.get("title") or f"Imported PRD task {idx}").strip() or f"Imported PRD task {idx}"
+        priority = str(item.get("priority") or "P2").strip() or "P2"
+        depends_on = [previous_id] if previous_id else []
+        metadata = {
+            "generated_ref_id": generated_id,
+            "generated_depends_on": depends_on,
+            "source_chunk_id": item.get("source_chunk_id"),
+            "source_section_path": item.get("source_section_path"),
+            "ingestion_source": "parsed_prd",
+        }
+        if item.get("ambiguity_reason"):
+            metadata["ambiguity_reason"] = item.get("ambiguity_reason")
+        out.append(
+            {
+                "id": generated_id,
+                "title": title,
+                "description": "",
+                "task_type": "feature",
+                "priority": priority,
+                "depends_on": depends_on,
+                "metadata": metadata,
+            }
+        )
+        previous_id = generated_id
+    return out
+
+
+def _apply_generated_dep_links(container: Container, child_ids: list[str]) -> None:
+    ref_to_task_id: dict[str, str] = {}
+    for child_id in child_ids:
+        child = container.tasks.get(child_id)
+        if not child or not isinstance(child.metadata, dict):
+            continue
+        ref_id = str(child.metadata.get("generated_ref_id") or "").strip()
+        if ref_id:
+            ref_to_task_id[ref_id] = child.id
+
+    for child_id in child_ids:
+        child = container.tasks.get(child_id)
+        if not child or not isinstance(child.metadata, dict):
+            continue
+        raw_deps = child.metadata.get("generated_depends_on")
+        if not isinstance(raw_deps, list):
+            continue
+        changed = False
+        for dep_ref in raw_deps:
+            dep_id = ref_to_task_id.get(str(dep_ref or "").strip())
+            if not dep_id or dep_id == child.id:
+                continue
+            if dep_id not in child.blocked_by:
+                child.blocked_by.append(dep_id)
+                changed = True
+            dep_task = container.tasks.get(dep_id)
+            if dep_task and child.id not in dep_task.blocks:
+                dep_task.blocks.append(child.id)
+                container.tasks.upsert(dep_task)
+        if changed:
+            container.tasks.upsert(child)
+
+
+def _canonical_task_type_for_pipeline(registry: PipelineRegistry, pipeline_id: str) -> str:
+    template = registry.get(pipeline_id)
+    if template.task_types:
+        return str(template.task_types[0])
+    return "feature"
+
+
+def _normalize_pipeline_classification_output(
+    *,
+    summary: str | None,
+    allowed_pipelines: list[str],
+    registry: PipelineRegistry,
+) -> PipelineClassificationResponse:
+    allowed_set = set(allowed_pipelines)
+    pipeline_id = "feature"
+    confidence: Literal["high", "low"] = "low"
+    reason = "Pipeline auto-classification was inconclusive."
+
+    if isinstance(summary, str) and summary.strip():
+        try:
+            payload = json.loads(summary)
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            raw_pipeline = str(payload.get("pipeline_id") or "").strip()
+            raw_confidence = str(payload.get("confidence") or "").strip().lower()
+            raw_reason = str(payload.get("reason") or "").strip()
+            if raw_pipeline in allowed_set:
+                pipeline_id = raw_pipeline
+            if raw_confidence == "high":
+                confidence = "high"
+            elif raw_confidence == "low":
+                confidence = "low"
+            if raw_reason:
+                reason = raw_reason[:300]
+
+    if pipeline_id not in allowed_set:
+        pipeline_id = "feature"
+        confidence = "low"
+        reason = "Classifier returned an unknown pipeline."
+    task_type = _canonical_task_type_for_pipeline(registry, pipeline_id)
+    return PipelineClassificationResponse(
+        pipeline_id=pipeline_id,
+        task_type=task_type,
+        confidence=confidence,
+        reason=reason,
+        allowed_pipelines=allowed_pipelines,
+    )
 
 
 def create_router(
@@ -781,12 +1111,23 @@ def create_router(
     job_store: dict[str, dict[str, Any]],
 ) -> APIRouter:
     router = APIRouter(prefix="/api", tags=["api"])
+    terminal_services: dict[str, TerminalService] = {}
 
     def _ctx(project_dir: Optional[str]) -> tuple[Container, EventBus, OrchestratorService]:
         container: Container = resolve_container(project_dir)
         bus = EventBus(container.events, container.project_id)
         orchestrator: OrchestratorService = resolve_orchestrator(project_dir)
         return container, bus, orchestrator
+
+    def _terminal_ctx(project_dir: Optional[str]) -> tuple[Container, EventBus, TerminalService]:
+        container: Container = resolve_container(project_dir)
+        bus = EventBus(container.events, container.project_id)
+        key = str(container.project_dir)
+        service = terminal_services.get(key)
+        if service is None:
+            service = TerminalService(container, bus)
+            terminal_services[key] = service
+        return container, bus, service
 
     def _load_feedback_records(container: Container) -> list[dict[str, Any]]:
         cfg = container.config.load()
@@ -951,10 +1292,29 @@ def create_router(
     @router.post("/tasks")
     async def create_task(body: CreateTaskRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         container, bus, _ = _ctx(project_dir)
+        registry = PipelineRegistry()
+        allowed_pipelines = sorted(template.id for template in registry.list_templates())
+        classifier_pipeline_id = str(body.classifier_pipeline_id or "").strip()
+        classifier_confidence = str(body.classifier_confidence or "").strip().lower()
+        classifier_reason = str(body.classifier_reason or "").strip()
+        classifier_pipeline_valid = classifier_pipeline_id in allowed_pipelines
+        classifier_confidence_valid = classifier_confidence in {"high", "low"}
+        requested_task_type = str(body.task_type or "feature").strip() or "feature"
+
+        if requested_task_type == "auto":
+            if classifier_confidence != "high" or not classifier_pipeline_valid:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Auto task type requires a high-confidence classifier result.",
+                )
+            resolved_task_type = _canonical_task_type_for_pipeline(registry, classifier_pipeline_id)
+        else:
+            resolved_task_type = requested_task_type
+
+        template = registry.resolve_for_task_type(resolved_task_type)
+        final_pipeline_id = template.id
         pipeline_steps = body.pipeline_template
         if pipeline_steps is None:
-            registry = PipelineRegistry()
-            template = registry.resolve_for_task_type(body.task_type)
             pipeline_steps = template.step_names()
         dep_policy = body.dependency_policy.strip() if body.dependency_policy else ""
         if dep_policy not in ("permissive", "prudent", "strict"):
@@ -965,7 +1325,7 @@ def create_router(
         task = Task(
             title=body.title,
             description=body.description,
-            task_type=body.task_type,
+            task_type=resolved_task_type,
             priority=body.priority,
             labels=body.labels,
             blocked_by=body.blocked_by,
@@ -976,8 +1336,17 @@ def create_router(
             dependency_policy=dep_policy,
             source=body.source,
             worker_model=(str(body.worker_model).strip() if body.worker_model else None),
-            metadata=body.metadata,
+            metadata=dict(body.metadata or {}),
+            project_commands=(body.project_commands if body.project_commands else None),
         )
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        if classifier_pipeline_valid and classifier_confidence_valid:
+            task.metadata["classifier_pipeline_id"] = classifier_pipeline_id
+            task.metadata["classifier_confidence"] = classifier_confidence
+            task.metadata["classifier_reason"] = classifier_reason
+            task.metadata["was_user_override"] = bool(body.was_user_override)
+        task.metadata["final_pipeline_id"] = final_pipeline_id
         if body.status in ("backlog", "queued"):
             task.status = body.status
         if task.parent_id:
@@ -988,6 +1357,42 @@ def create_router(
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.created", entity_id=task.id, payload={"status": task.status})
         return {"task": _task_payload(task)}
+
+    @router.post("/tasks/classify-pipeline", response_model=PipelineClassificationResponse)
+    async def classify_pipeline(
+        body: PipelineClassificationRequest,
+        project_dir: Optional[str] = Query(None),
+    ) -> PipelineClassificationResponse:
+        container, _, orchestrator = _ctx(project_dir)
+        registry = PipelineRegistry()
+        allowed_pipelines = sorted(template.id for template in registry.list_templates())
+        synthetic = Task(
+            title=str(body.title or "").strip(),
+            description=str(body.description or "").strip(),
+            task_type="feature",
+            status="queued",
+            metadata=dict(body.metadata or {}),
+        )
+        if not isinstance(synthetic.metadata, dict):
+            synthetic.metadata = {}
+        synthetic.metadata["classification_allowed_pipelines"] = allowed_pipelines
+        try:
+            result = orchestrator.worker_adapter.run_step(task=synthetic, step="pipeline_classify", attempt=1)
+        except Exception:
+            result = None
+        if result is None or result.status != "ok":
+            return PipelineClassificationResponse(
+                pipeline_id="feature",
+                task_type="feature",
+                confidence="low",
+                reason="Pipeline auto-classification failed. Please select a pipeline.",
+                allowed_pipelines=allowed_pipelines,
+            )
+        return _normalize_pipeline_classification_output(
+            summary=result.summary,
+            allowed_pipelines=allowed_pipelines,
+            registry=registry,
+        )
 
     @router.get("/tasks")
     async def list_tasks(
@@ -1238,6 +1643,8 @@ def create_router(
                 status_code=400,
                 detail="Task status cannot be changed via PATCH. Use /transition, /retry, /cancel, or review actions.",
             )
+        if "project_commands" in updates and not updates["project_commands"]:
+            updates["project_commands"] = None
         for key, value in updates.items():
             setattr(task, key, value)
         task.updated_at = now_iso()
@@ -1294,12 +1701,16 @@ def create_router(
         task.metadata = task.metadata if isinstance(task.metadata, dict) else {}
         task.metadata.pop("human_blocking_issues", None)
         guidance = (body.guidance if body else None) or ""
+        ts = now_iso()
         if guidance.strip() or previous_error.strip():
             task.metadata["retry_guidance"] = {
-                "ts": now_iso(),
+                "ts": ts,
                 "guidance": guidance.strip(),
                 "previous_error": previous_error.strip(),
             }
+        if guidance.strip():
+            history_list: list = task.metadata.setdefault("human_review_actions", [])
+            history_list.append({"action": "retry", "ts": ts, "guidance": guidance.strip(), "previous_error": previous_error.strip()})
         start_from = (body.start_from_step if body else None) or ""
         if start_from.strip():
             task.metadata["retry_from_step"] = start_from.strip()
@@ -1406,6 +1817,15 @@ def create_router(
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.dep_analysis_reset", entity_id=task.id, payload={})
         return {"task": _task_payload(task, container)}
+
+    @router.get("/tasks/{task_id}/workdoc")
+    async def get_task_workdoc(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, _ = _ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        orchestrator = resolve_orchestrator(project_dir)
+        return orchestrator.get_workdoc(task_id)
 
     @router.get("/tasks/{task_id}/plan")
     async def get_task_plan(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1560,8 +1980,18 @@ def create_router(
     async def preview_import(body: PrdPreviewRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         container, _, _ = _ctx(project_dir)
         _prune_in_memory_jobs()
-        items = _parse_prd_into_tasks(body.content, body.default_priority)
-        nodes = [{"id": f"n{idx + 1}", "title": str(item.get("title") or "Imported task"), "priority": str(item.get("priority") or body.default_priority)} for idx, item in enumerate(items)]
+        ingestion = _ingest_prd(body.content, body.default_priority)
+        parsed_prd = ingestion["parsed_prd"]
+        original_prd = ingestion["original_prd"]
+        items = list(parsed_prd.get("task_candidates") or [])
+        nodes = [
+            {
+                "id": f"n{idx + 1}",
+                "title": str(item.get("title") or "Imported task"),
+                "priority": str(item.get("priority") or body.default_priority),
+            }
+            for idx, item in enumerate(items)
+        ]
         edges = [{"from": nodes[idx]["id"], "to": nodes[idx + 1]["id"]} for idx in range(len(nodes) - 1)]
         job_id = f"imp-{uuid.uuid4().hex[:10]}"
         job = {
@@ -1571,40 +2001,82 @@ def create_router(
             "status": "preview_ready",
             "created_at": now_iso(),
             "tasks": items,
+            "original_prd": original_prd,
+            "parsed_prd": parsed_prd,
         }
         job_store[job_id] = job
         _upsert_import_job(container, job)
-        return {"job_id": job_id, "preview": {"nodes": nodes, "edges": edges}}
+        return {
+            "job_id": job_id,
+            "preview": {
+                "nodes": nodes,
+                "edges": edges,
+                "chunk_count": int(parsed_prd.get("chunk_count") or 0),
+                "strategy": str(parsed_prd.get("strategy") or "unknown"),
+                "ambiguity_warnings": list(parsed_prd.get("ambiguity_warnings") or []),
+            },
+        }
 
     @router.post("/import/prd/commit")
     async def commit_import(body: PrdCommitRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
-        container, bus, _ = _ctx(project_dir)
+        container, bus, orchestrator = _ctx(project_dir)
         _prune_in_memory_jobs()
         job = job_store.get(body.job_id)
         if not job:
             job = _fetch_import_job(container, body.job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Import job not found")
-        created: list[str] = []
-        previous: Optional[Task] = None
-        for item in list(job.get("tasks", [])):
-            if not isinstance(item, dict):
+        if not isinstance(job.get("parsed_prd"), dict):
+            raise HTTPException(status_code=400, detail="Import job is missing parsed PRD artifacts.")
+        parsed_prd = dict(job.get("parsed_prd") or {})
+        generated_tasks = _generated_tasks_from_parsed_prd(parsed_prd)
+        if not generated_tasks:
+            raise HTTPException(status_code=400, detail="Parsed PRD produced no task candidates to generate.")
+
+        # Execute the existing initiative pipeline end-to-end using the ingested PRD artifacts.
+        prd_parent = Task(
+            title=str(job.get("title") or "Imported PRD"),
+            description=str((job.get("original_prd") or {}).get("normalized_content") or ""),
+            task_type="initiative_plan",
+            priority="P2",
+            source="prd_import",
+            metadata={
+                "prd_import_job_id": body.job_id,
+                "original_prd": job.get("original_prd"),
+                "parsed_prd": parsed_prd,
+            },
+        )
+        prd_parent.status = "queued"
+        container.tasks.upsert(prd_parent)
+        bus.emit(
+            channel="tasks",
+            event_type="task.created",
+            entity_id=prd_parent.id,
+            payload={"source": "prd_import", "import_job_id": body.job_id, "task_type": "initiative_plan"},
+        )
+
+        try:
+            orchestrator.run_task(prd_parent.id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        refreshed_parent = container.tasks.get(prd_parent.id)
+        created = list(refreshed_parent.children_ids if refreshed_parent else [])
+        _apply_generated_dep_links(container, created)
+        for child_id in created:
+            child = container.tasks.get(child_id)
+            if not child:
                 continue
-            task = Task(title=str(item.get("title") or "Imported task"), priority=str(item.get("priority") or "P2"), source="prd_import")
-            task.status = "queued"
-            if previous:
-                task.blocked_by.append(previous.id)
-                previous.blocks.append(task.id)
-                container.tasks.upsert(previous)
-            container.tasks.upsert(task)
-            created.append(task.id)
-            previous = task
+            child.source = "prd_import"
+            container.tasks.upsert(child)
+
         job["status"] = "committed"
         job["created_task_ids"] = created
+        job["parent_task_id"] = prd_parent.id
         job_store[body.job_id] = job
         _upsert_import_job(container, job)
         bus.emit(channel="tasks", event_type="import.committed", entity_id=body.job_id, payload={"created_task_ids": created})
-        return {"job_id": body.job_id, "created_task_ids": created}
+        return {"job_id": body.job_id, "created_task_ids": created, "parent_task_id": prd_parent.id}
 
     @router.get("/import/{job_id}")
     async def get_import_job(job_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1756,8 +2228,47 @@ def create_router(
                 "human_blocking_issues": task_issues,
             }
         ]
+        # Inject human review actions from task metadata so they survive event-log eviction.
+        # Only dedup approve/request_changes (clean 1:1 with history entries).
+        # Retry events are NOT deduped because task.retry fires for all retries
+        # but human_review_actions only records guided retries.
+        injected_review_types: set[str] = set()
+        action_type_map = {"approve": "task.approved", "request_changes": "task.changes_requested", "retry": "task.retry_with_guidance"}
+        dedup_types = {"task.approved", "task.changes_requested"}
+        raw_review_actions = task.metadata.get("human_review_actions") if isinstance(task.metadata, dict) else None
+        if isinstance(raw_review_actions, list):
+            for idx, entry in enumerate(raw_review_actions):
+                if not isinstance(entry, dict):
+                    continue
+                action = str(entry.get("action") or "")
+                ts = str(entry.get("ts") or task.created_at)
+                guidance = str(entry.get("guidance") or "")
+                previous_error = str(entry.get("previous_error") or "")
+                event_type_label = action_type_map.get(action, f"task.{action}")
+                if event_type_label in dedup_types:
+                    injected_review_types.add(event_type_label)
+                details = guidance
+                if previous_error:
+                    details = f"{guidance}\n\nPrevious error: {previous_error}" if guidance else f"Previous error: {previous_error}"
+                events.append(
+                    {
+                        "id": f"review-action-{task.id}-{idx}",
+                        "type": event_type_label,
+                        "timestamp": ts,
+                        "actor": "human",
+                        "actor_type": "human",
+                        "summary": {"approve": "Approved", "request_changes": "Changes requested", "retry": "Retry with guidance"}.get(action, action),
+                        "details": details,
+                    }
+                )
+
         for event in container.events.list_recent(limit=2000):
             if event.get("entity_id") != task_id:
+                continue
+            # Deduplicate: skip event-log entries whose type was already injected
+            # from human_review_actions (the authoritative source).
+            event_type = str(event.get("type") or "")
+            if event_type in injected_review_types:
                 continue
             payload = event.get("payload")
             payload_dict = payload if isinstance(payload, dict) else {}
@@ -1905,89 +2416,78 @@ def create_router(
                 return {"comment": item}
         raise HTTPException(status_code=404, detail="Comment not found")
 
-    @router.post("/quick-actions")
-    async def create_quick_action(body: QuickActionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
-        import asyncio
-        from ..quick_actions.executor import QuickActionExecutor
-
-        container, bus, _ = _ctx(project_dir)
-        pending_runs = [run for run in container.quick_actions.list() if run.status in {"queued", "running"}]
-        if len(pending_runs) >= QUICK_ACTION_MAX_PENDING:
-            raise HTTPException(status_code=429, detail="Too many pending quick actions; wait for active runs to finish.")
-        timeout_seconds: Optional[int] = None
-        if body.timeout is not None:
-            timeout_seconds = max(10, min(600, body.timeout))
-        run = QuickActionRun(prompt=body.prompt, status="queued", timeout_seconds=timeout_seconds)
-        container.quick_actions.upsert(run)
-        bus.emit(channel="quick_actions", event_type="quick_action.queued", entity_id=run.id, payload={"status": run.status})
-
-        response_snapshot = run.to_dict()
-
-        executor = QuickActionExecutor(container, bus)
-        loop = asyncio.get_running_loop()
-        loop.run_in_executor(None, executor.execute, run)
-
-        return {"quick_action": response_snapshot}
-
-    @router.get("/quick-actions")
-    async def list_quick_actions(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
-        container, _, _ = _ctx(project_dir)
-        runs = sorted(container.quick_actions.list(), key=lambda item: item.started_at or "", reverse=True)
-        return {"quick_actions": [run.to_dict() for run in runs]}
-
-    @router.get("/quick-actions/{quick_action_id}")
-    async def get_quick_action(quick_action_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
-        container, _, _ = _ctx(project_dir)
-        run = container.quick_actions.get(quick_action_id)
-        if not run:
-            raise HTTPException(status_code=404, detail="Quick action not found")
-        return {"quick_action": run.to_dict()}
-
-    @router.post("/quick-actions/{quick_action_id}/promote")
-    async def promote_quick_action(quick_action_id: str, body: PromoteQuickActionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
-        container, bus, _ = _ctx(project_dir)
-        run = container.quick_actions.get(quick_action_id)
-        if not run:
-            raise HTTPException(status_code=404, detail="Quick action not found")
-        if run.promoted_task_id:
-            task = container.tasks.get(run.promoted_task_id)
-            return {"task": _task_payload(task) if task else None, "already_promoted": True}
-        title = body.title or f"Promoted quick action: {run.prompt[:50]}"
-        task = Task(title=title, description=run.prompt, source="promoted_quick_action", priority=body.priority)
-        container.tasks.upsert(task)
-        run.promoted_task_id = task.id
-        container.quick_actions.upsert(run)
-        bus.emit(channel="quick_actions", event_type="quick_action.promoted", entity_id=run.id, payload={"task_id": task.id})
-        return {"task": _task_payload(task), "already_promoted": False}
-
-    @router.get("/quick-actions/{quick_action_id}/logs")
-    async def get_quick_action_logs(
-        quick_action_id: str,
+    @router.post("/terminal/session")
+    async def start_terminal_session(
+        body: StartTerminalSessionRequest,
         project_dir: Optional[str] = Query(None),
-        stdout_offset: int = Query(0),
-        stderr_offset: int = Query(0),
-        max_chars: int = Query(65536),
     ) -> dict[str, Any]:
-        container, _, _ = _ctx(project_dir)
-        run = container.quick_actions.get(quick_action_id)
-        if not run:
-            raise HTTPException(status_code=404, detail="Quick action not found")
-        max_chars = min(max(1024, max_chars), 262144)
-        max_bytes = max_chars * 2
+        container, _, terminal = _terminal_ctx(project_dir)
+        session = terminal.start_session(shell=body.shell, cols=body.cols or 120, rows=body.rows or 36)
+        return {"session": session.to_dict(), "project_id": container.project_id}
 
-        stdout_path = _safe_state_path(run.stdout_path, container.state_root)
-        stderr_path = _safe_state_path(run.stderr_path, container.state_root)
+    @router.get("/terminal/session")
+    async def get_terminal_session(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        container, _, terminal = _terminal_ctx(project_dir)
+        session = terminal.get_active_session(container.project_id)
+        return {"session": session.to_dict() if session else None}
 
-        stdout_text, new_stdout_offset, _ = _read_from_offset(stdout_path, stdout_offset, max_bytes)
-        stderr_text, new_stderr_offset, _ = _read_from_offset(stderr_path, stderr_offset, max_bytes)
+    @router.post("/terminal/session/{session_id}/input")
+    async def write_terminal_input(
+        session_id: str,
+        body: TerminalInputRequest,
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        _, _, terminal = _terminal_ctx(project_dir)
+        try:
+            session = terminal.write_input(session_id=session_id, data=body.data)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return {"session": session.to_dict()}
 
+    @router.post("/terminal/session/{session_id}/resize")
+    async def resize_terminal_session(
+        session_id: str,
+        body: TerminalResizeRequest,
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        _, _, terminal = _terminal_ctx(project_dir)
+        try:
+            session = terminal.resize(session_id=session_id, cols=body.cols, rows=body.rows)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return {"session": session.to_dict()}
+
+    @router.post("/terminal/session/{session_id}/stop")
+    async def stop_terminal_session(
+        session_id: str,
+        body: StopTerminalSessionRequest,
+        project_dir: Optional[str] = Query(None),
+    ) -> dict[str, Any]:
+        _, _, terminal = _terminal_ctx(project_dir)
+        try:
+            session = terminal.stop_session(session_id=session_id, signal_name=body.signal)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return {"session": session.to_dict()}
+
+    @router.get("/terminal/session/{session_id}/logs")
+    async def get_terminal_session_logs(
+        session_id: str,
+        project_dir: Optional[str] = Query(None),
+        offset: int = Query(0),
+        max_bytes: int = Query(65536),
+    ) -> dict[str, Any]:
+        _, _, terminal = _terminal_ctx(project_dir)
+        try:
+            output, new_offset = terminal.read_output(session_id=session_id, offset=offset, max_bytes=max_bytes)
+            session = terminal.get_session(session_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
         return {
-            "stdout": stdout_text,
-            "stderr": stderr_text,
-            "stdout_offset": new_stdout_offset,
-            "stderr_offset": new_stderr_offset,
-            "status": run.status,
-            "finished_at": run.finished_at,
+            "output": output,
+            "offset": new_offset,
+            "status": session.status if session else "unknown",
+            "finished_at": session.finished_at if session else None,
         }
 
     @router.get("/review-queue")
@@ -2005,9 +2505,12 @@ def create_router(
         if task.status != "in_review":
             raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review")
         task.status = "done"
-        task.metadata["last_review_approval"] = {"ts": now_iso(), "guidance": body.guidance}
+        ts = now_iso()
+        task.metadata["last_review_approval"] = {"ts": ts, "guidance": body.guidance}
+        history: list = task.metadata.setdefault("human_review_actions", [])
+        history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
         container.tasks.upsert(task)
-        bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={})
+        bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={"guidance": body.guidance or ""})
         return {"task": _task_payload(task, container)}
 
     @router.post("/review/{task_id}/request-changes")
@@ -2019,8 +2522,11 @@ def create_router(
         if task.status != "in_review":
             raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review")
         task.status = "queued"
-        task.metadata["requested_changes"] = {"ts": now_iso(), "guidance": body.guidance}
+        ts = now_iso()
+        task.metadata["requested_changes"] = {"ts": ts, "guidance": body.guidance}
         task.metadata["retry_from_step"] = "implement"
+        history: list = task.metadata.setdefault("human_review_actions", [])
+        history.append({"action": "request_changes", "ts": ts, "guidance": body.guidance or ""})
         container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.changes_requested", entity_id=task.id, payload={"guidance": body.guidance})
         return {"task": _task_payload(task, container)}

@@ -14,7 +14,7 @@ class TestPipelineTemplate:
         expected = {
             "feature", "bug_fix", "refactor", "research", "docs",
             "test", "repo_review", "security_audit", "review", "performance",
-            "hotfix", "spike", "chore", "plan_only", "decompose", "verify_only",
+            "hotfix", "spike", "chore", "plan_only", "verify_only",
         }
         assert expected == set(BUILTIN_TEMPLATES.keys())
 
@@ -30,12 +30,22 @@ class TestPipelineTemplate:
 
     def test_research_pipeline_steps(self):
         tmpl = BUILTIN_TEMPLATES["research"]
-        assert tmpl.step_names() == ["gather", "analyze", "summarize", "report"]
+        assert tmpl.step_names() == ["analyze", "report"]
+
+    def test_docs_pipeline_steps(self):
+        tmpl = BUILTIN_TEMPLATES["docs"]
+        assert tmpl.step_names() == ["analyze", "implement", "verify", "review", "commit"]
+        assert tmpl.task_types == ("docs",)
 
     def test_review_pipeline_steps(self):
         tmpl = BUILTIN_TEMPLATES["review"]
         assert tmpl.step_names() == ["analyze", "review", "report"]
         assert tmpl.task_types == ("review",)
+
+    def test_repo_review_pipeline_steps(self):
+        tmpl = BUILTIN_TEMPLATES["repo_review"]
+        assert tmpl.step_names() == ["analyze", "initiative_plan", "generate_tasks"]
+        assert tmpl.task_types == ("repo_review",)
 
     def test_performance_pipeline_steps(self):
         tmpl = BUILTIN_TEMPLATES["performance"]
@@ -65,7 +75,7 @@ class TestPipelineRegistry:
     def test_list_templates(self):
         reg = PipelineRegistry()
         templates = reg.list_templates()
-        assert len(templates) == 16
+        assert len(templates) == 15
 
     def test_get_template(self):
         reg = PipelineRegistry()
@@ -88,6 +98,8 @@ class TestPipelineRegistry:
         assert reg.resolve_for_task_type("security").id == "security_audit"
         assert reg.resolve_for_task_type("review").id == "review"
         assert reg.resolve_for_task_type("performance").id == "performance"
+        assert reg.resolve_for_task_type("initiative_plan").id == "plan_only"
+        assert reg.resolve_for_task_type("decompose").id == "plan_only"
 
     def test_resolve_unknown_type_defaults_to_feature(self):
         reg = PipelineRegistry()

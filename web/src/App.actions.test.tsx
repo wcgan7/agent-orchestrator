@@ -92,19 +92,6 @@ function installFetchMock() {
     },
   }
 
-  const quickActions = [
-    {
-      id: 'qa-1',
-      prompt: 'Summarize deploy logs',
-      status: 'completed',
-      kind: 'agent',
-      result_summary: 'All checks passed.',
-      promoted_task_id: null,
-      started_at: '2026-02-13T00:00:00Z',
-      finished_at: '2026-02-13T00:00:01Z',
-    },
-  ]
-
   const mockedFetch = vi.fn().mockImplementation((url, init) => {
     const u = String(url)
     const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
@@ -174,33 +161,18 @@ function installFetchMock() {
       return jsonResponse({ project: { id: 'pinned-2', path: '/tmp/repo-beta', source: 'pinned', is_git: true } })
     }
 
-    if (u.includes('/api/quick-actions/qa-1/promote') && method === 'POST') return jsonResponse({ task, already_promoted: false })
-    if (u.includes('/api/quick-actions/qa-2/promote') && method === 'POST') return jsonResponse({ task, already_promoted: false })
-    if (u.includes('/api/quick-actions/') && method === 'GET') {
-      const quickActionId = u.split('/api/quick-actions/')[1]?.split('?')[0] || 'qa-1'
-      return jsonResponse({
-        quick_action: {
-          id: quickActionId,
-          prompt: 'triage errors',
-          status: 'completed',
-          result_summary: 'done',
-          promoted_task_id: null,
-          kind: 'agent',
-        },
-      })
+    if (u.includes('/api/terminal/session/') && u.includes('/logs') && method === 'GET') {
+      return jsonResponse({ output: '', offset: 0, status: 'running', finished_at: null })
     }
-    if (u.includes('/api/quick-actions') && method === 'POST') {
-      return jsonResponse({
-        quick_action: {
-          id: 'qa-2',
-          prompt: 'triage errors',
-          status: 'queued',
-          result_summary: null,
-          promoted_task_id: null,
-        },
-      })
+    if (u.includes('/api/terminal/session/') && method === 'POST') {
+      return jsonResponse({ session: { id: 'term-1', status: 'running', shell: '/bin/zsh', cwd: '/tmp/repo-alpha' } })
     }
-    if (u.includes('/api/quick-actions') && method === 'GET') return jsonResponse({ quick_actions: quickActions })
+    if (u.includes('/api/terminal/session') && method === 'POST') {
+      return jsonResponse({ session: { id: 'term-1', status: 'running', shell: '/bin/zsh', cwd: '/tmp/repo-alpha' } })
+    }
+    if (u.includes('/api/terminal/session') && method === 'GET') {
+      return jsonResponse({ session: null })
+    }
 
     if (u.includes('/api/import/prd/preview') && method === 'POST') {
       return jsonResponse({
@@ -558,6 +530,7 @@ describe('App action coverage', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: /^Create Work$/i })[0])
     fireEvent.change(screen.getByLabelText(/^Title$/i), { target: { value: 'Implement checkout' } })
+    fireEvent.change(screen.getByLabelText(/Task Type/i), { target: { value: 'feature' } })
     fireEvent.change(screen.getByLabelText(/Worker model override/i), { target: { value: 'gpt-5-codex' } })
     fireEvent.click(screen.getByRole('button', { name: /Create & Queue/i }))
 
@@ -574,7 +547,7 @@ describe('App action coverage', () => {
     })
   })
 
-  it('runs quick action and import modal workflows', async () => {
+  it('runs terminal and import modal workflows', async () => {
     const mockedFetch = installFetchMock()
     render(<App />)
 
@@ -583,31 +556,15 @@ describe('App action coverage', () => {
     })
 
     fireEvent.click(screen.getAllByRole('button', { name: /^Create Work$/i })[0])
-    fireEvent.click(screen.getByRole('button', { name: /Quick Action/i }))
-
-    fireEvent.click(screen.getByRole('button', { name: /^Promote$/i }))
-    await waitFor(() => {
-      const promoteCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/quick-actions/qa-1/promote') &&
-        (init as RequestInit | undefined)?.method === 'POST'
-      )
-      expect(promoteCall).toBeTruthy()
-      const body = JSON.parse(String((promoteCall?.[1] as RequestInit).body))
-      expect(body.priority).toBe('P2')
-    })
-
-    fireEvent.change(screen.getByLabelText(/Prompt/i), { target: { value: 'triage errors' } })
-    fireEvent.click(screen.getByRole('button', { name: /Run Quick Action/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Terminal/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Start Terminal/i }))
 
     await waitFor(() => {
-      const quickActionCall = mockedFetch.mock.calls.find(([url, init]) =>
-        String(url).includes('/api/quick-actions') &&
-        !String(url).includes('/promote') &&
+      const startCall = mockedFetch.mock.calls.find(([url, init]) =>
+        String(url).includes('/api/terminal/session') &&
         (init as RequestInit | undefined)?.method === 'POST'
       )
-      expect(quickActionCall).toBeTruthy()
-      const body = JSON.parse(String((quickActionCall?.[1] as RequestInit).body))
-      expect(body.prompt).toBe('triage errors')
+      expect(startCall).toBeTruthy()
     })
 
     fireEvent.click(screen.getAllByRole('button', { name: /^Create Work$/i })[0])

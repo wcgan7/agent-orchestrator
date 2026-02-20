@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -264,45 +265,6 @@ class OrchestratorService:
             return None, None
         return spec.name, spec.model
 
-    def _migrate_legacy_plans(self, task: Task) -> None:
-        if not isinstance(task.metadata, dict):
-            task.metadata = {}
-        if task.metadata.get("legacy_plans_migrated"):
-            return
-        legacy_plans = task.metadata.get("plans")
-        if not isinstance(legacy_plans, list) or not legacy_plans:
-            task.metadata["legacy_plans_migrated"] = True
-            self.container.tasks.upsert(task)
-            return
-        if self.container.plan_revisions.for_task(task.id):
-            task.metadata["legacy_plans_migrated"] = True
-            self.container.tasks.upsert(task)
-            return
-        parent_id: str | None = None
-        latest_id: str | None = None
-        for item in legacy_plans:
-            if not isinstance(item, dict):
-                continue
-            content = str(item.get("content") or "").strip()
-            if not content:
-                continue
-            revision = PlanRevision(
-                task_id=task.id,
-                created_at=str(item.get("ts") or now_iso()),
-                source="import",
-                parent_revision_id=parent_id,
-                step=(str(item.get("step")).strip() if item.get("step") else None),
-                content=content,
-                status="draft",
-            )
-            self.container.plan_revisions.upsert(revision)
-            parent_id = revision.id
-            latest_id = revision.id
-        if latest_id:
-            task.metadata["latest_plan_revision_id"] = latest_id
-        task.metadata["legacy_plans_migrated"] = True
-        self.container.tasks.upsert(task)
-
     def _active_plan_refine_job(self, task_id: str) -> PlanRefineJob | None:
         for job in self.container.plan_refine_jobs.for_task(task_id):
             if job.status in {"queued", "running"}:
@@ -315,28 +277,26 @@ class OrchestratorService:
             raise ValueError("Task not found")
         if not isinstance(task.metadata, dict):
             task.metadata = {}
-        self._migrate_legacy_plans(task)
         revisions = self.container.plan_revisions.for_task(task_id)
         revisions.sort(key=lambda item: item.created_at)
         latest_revision_id = revisions[-1].id if revisions else None
         committed_revision_id = task.metadata.get("committed_plan_revision_id")
         if committed_revision_id and not any(item.id == committed_revision_id for item in revisions):
             committed_revision_id = None
+        if not committed_revision_id:
+            committed = [item for item in revisions if str(item.status or "").lower() == "committed"]
+            if committed:
+                committed_revision_id = committed[-1].id
+                task.metadata["committed_plan_revision_id"] = committed_revision_id
+                task.metadata["latest_plan_revision_id"] = latest_revision_id or committed_revision_id
+                self.container.tasks.upsert(task)
         active_job = self._active_plan_refine_job(task_id)
-        legacy_plans = [
-            {"step": item.step, "ts": item.created_at, "content": item.content}
-            for item in revisions
-        ]
-        latest = legacy_plans[-1] if legacy_plans else None
         return {
             "task_id": task_id,
             "latest_revision_id": latest_revision_id,
             "committed_revision_id": committed_revision_id,
             "revisions": [item.to_dict() for item in revisions],
             "active_refine_job": active_job.to_dict() if active_job else None,
-            # Legacy compatibility fields.
-            "plans": legacy_plans,
-            "latest": latest,
         }
 
     def create_plan_revision(
@@ -358,7 +318,6 @@ class OrchestratorService:
             raise ValueError("Task not found")
         if not isinstance(task.metadata, dict):
             task.metadata = {}
-        self._migrate_legacy_plans(task)
         body = str(content or "").strip()
         if not body:
             raise ValueError("Plan revision content cannot be empty")
@@ -384,11 +343,6 @@ class OrchestratorService:
         )
         self.container.plan_revisions.upsert(revision)
         task.metadata["latest_plan_revision_id"] = revision.id
-        legacy_plans = task.metadata.get("plans")
-        if not isinstance(legacy_plans, list):
-            legacy_plans = []
-        legacy_plans.append({"step": revision.step, "ts": revision.created_at, "content": revision.content})
-        task.metadata["plans"] = legacy_plans
         if status == "committed":
             task.metadata["committed_plan_revision_id"] = revision.id
         self.container.tasks.upsert(task)
@@ -415,7 +369,6 @@ class OrchestratorService:
                 raise ValueError("Task not found")
             if not isinstance(task.metadata, dict):
                 task.metadata = {}
-            self._migrate_legacy_plans(task)
             if self._active_plan_refine_job(task_id):
                 raise RuntimeError("A plan refine job is already active for this task")
             revisions = self.container.plan_revisions.for_task(task_id)
@@ -500,29 +453,32 @@ class OrchestratorService:
                 payload={"job_id": job.id, "error": job.error},
             )
             return job
+        refine_step = "initiative_plan_refine" if live_task.task_type == "initiative_plan" else "plan_refine"
+        refine_key = "initiative_plan_refine" if refine_step == "initiative_plan_refine" else "plan_refine"
+
         if not isinstance(live_task.metadata, dict):
             live_task.metadata = {}
-        live_task.metadata["plan_refine_base"] = base_revision.content
-        live_task.metadata["plan_refine_feedback"] = job.feedback
+        live_task.metadata[f"{refine_key}_base"] = base_revision.content
+        live_task.metadata[f"{refine_key}_feedback"] = job.feedback
         if job.instructions:
-            live_task.metadata["plan_refine_instructions"] = job.instructions
+            live_task.metadata[f"{refine_key}_instructions"] = job.instructions
         self.container.tasks.upsert(live_task)
 
         try:
             try:
-                result = self.worker_adapter.run_step(task=live_task, step="plan_refine", attempt=1)
+                result = self.worker_adapter.run_step(task=live_task, step=refine_step, attempt=1)
                 if result.status != "ok":
-                    raise ValueError(result.summary or "plan_refine failed")
+                    raise ValueError(result.summary or f"{refine_step} failed")
                 revised_plan = str(result.summary or "").strip()
                 if not revised_plan:
                     raise ValueError("Worker returned empty refined plan")
-                provider, model = self._resolve_worker_lineage(live_task, "plan_refine")
+                provider, model = self._resolve_worker_lineage(live_task, refine_step)
                 revision = self.create_plan_revision(
                     task_id=job.task_id,
                     content=revised_plan,
                     source="worker_refine",
                     parent_revision_id=base_revision.id,
-                    step="plan_refine",
+                    step=refine_step,
                     feedback_note=job.feedback,
                     provider=provider,
                     model=model,
@@ -564,9 +520,9 @@ class OrchestratorService:
         finally:
             cleanup_task = self.container.tasks.get(job.task_id)
             if cleanup_task and isinstance(cleanup_task.metadata, dict):
-                cleanup_task.metadata.pop("plan_refine_base", None)
-                cleanup_task.metadata.pop("plan_refine_feedback", None)
-                cleanup_task.metadata.pop("plan_refine_instructions", None)
+                cleanup_task.metadata.pop(f"{refine_key}_base", None)
+                cleanup_task.metadata.pop(f"{refine_key}_feedback", None)
+                cleanup_task.metadata.pop(f"{refine_key}_instructions", None)
                 self.container.tasks.upsert(cleanup_task)
 
     def list_plan_refine_jobs(self, task_id: str) -> list[PlanRefineJob]:
@@ -588,7 +544,6 @@ class OrchestratorService:
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
-        self._migrate_legacy_plans(task)
         target = self.container.plan_revisions.get(revision_id)
         if not target or target.task_id != task_id:
             raise ValueError("Revision not found for task")
@@ -599,7 +554,44 @@ class OrchestratorService:
                 self.container.plan_revisions.upsert(revision)
         task.metadata["latest_plan_revision_id"] = revision_id
         task.metadata["committed_plan_revision_id"] = revision_id
+        # Sync committed plan text to step_outputs so implement step uses it.
+        so = task.metadata.setdefault("step_outputs", {})
+        so["plan"] = (target.content or "")[:20_000]
         self.container.tasks.upsert(task)
+
+        # Keep workdoc ## Plan in sync with the committed plan text so manual edits
+        # become the canonical implementation guide immediately.
+        workdoc_path = task.metadata.get("workdoc_path") if isinstance(task.metadata, dict) else None
+        canonical = (
+            Path(workdoc_path)
+            if isinstance(workdoc_path, str) and workdoc_path.strip()
+            else self._workdoc_canonical_path(task.id)
+        )
+        if canonical.exists():
+            text = canonical.read_text(encoding="utf-8")
+            heading = "## Plan"
+            idx = text.find(heading)
+            if idx != -1:
+                after_heading = text.find("\n", idx)
+                if after_heading != -1:
+                    rest = text[after_heading + 1 :]
+                    next_heading = re.search(r"^## ", rest, re.MULTILINE)
+                    section_end = after_heading + 1 + next_heading.start() if next_heading else len(text)
+                    plan_body = (target.content or "").strip() or "_(empty committed plan)_"
+                    updated = text[: after_heading + 1] + plan_body + "\n\n" + text[section_end:]
+                    canonical.write_text(updated, encoding="utf-8")
+                    # Mirror canonical into the active worktree copy if present.
+                    step_project_dir = self._step_project_dir(task)
+                    worktree_copy = self._workdoc_worktree_path(step_project_dir)
+                    if worktree_copy.exists():
+                        worktree_copy.write_text(updated, encoding="utf-8")
+                    self.bus.emit(
+                        channel="tasks",
+                        event_type="workdoc.updated",
+                        entity_id=task.id,
+                        payload={"step": "plan", "source": "plan_commit"},
+                    )
+
         self.bus.emit(
             channel="tasks",
             event_type="plan.revision.committed",
@@ -619,7 +611,6 @@ class OrchestratorService:
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
-        self._migrate_legacy_plans(task)
         revisions = self.container.plan_revisions.for_task(task_id)
         revisions.sort(key=lambda item: item.created_at)
 
@@ -639,16 +630,56 @@ class OrchestratorService:
 
         if source == "committed":
             committed_id = str(task.metadata.get("committed_plan_revision_id") or "").strip()
-            if not committed_id:
-                raise ValueError("No committed plan revision exists for this task")
-            revision = self.container.plan_revisions.get(committed_id)
+            revision = self.container.plan_revisions.get(committed_id) if committed_id else None
             if not revision or revision.task_id != task_id:
-                raise ValueError("Committed plan revision no longer exists")
+                committed = [item for item in revisions if str(item.status or "").lower() == "committed"]
+                revision = committed[-1] if committed else None
+                if revision:
+                    task.metadata["committed_plan_revision_id"] = revision.id
+                    task.metadata["latest_plan_revision_id"] = revisions[-1].id if revisions else revision.id
+                    self.container.tasks.upsert(task)
+            if not revision or revision.task_id != task_id:
+                raise ValueError("No committed plan revision exists for this task")
             return revision.content, revision.id
 
         if not revisions:
             raise ValueError("No plan revision exists for this task")
         return revisions[-1].content, revisions[-1].id
+
+    def _resolve_task_plan_excerpt(self, task: Task, *, max_chars: int = 800) -> str:
+        """Return a short best-effort plan excerpt for objective context."""
+        if not isinstance(task.metadata, dict):
+            return ""
+
+        # Prefer committed plan revision, then latest plan revision.
+        for key in ("committed_plan_revision_id", "latest_plan_revision_id"):
+            rev_id = str(task.metadata.get(key) or "").strip()
+            if not rev_id:
+                continue
+            revision = self.container.plan_revisions.get(rev_id)
+            if revision and revision.task_id == task.id and str(revision.content or "").strip():
+                return str(revision.content).strip()[:max_chars]
+
+        # Fallback to plan text stashed in step outputs.
+        step_outputs = task.metadata.get("step_outputs")
+        if isinstance(step_outputs, dict):
+            plan_text = str(step_outputs.get("plan") or "").strip()
+            if plan_text:
+                return plan_text[:max_chars]
+        return ""
+
+    def _format_task_objective_summary(self, task: Task, *, max_chars: int = 1600) -> str:
+        """Build concise objective context for merge-conflict resolution."""
+        lines = [f"- Task: {task.title}"]
+        if task.description:
+            lines.append(f"  Description: {task.description}")
+        plan_excerpt = self._resolve_task_plan_excerpt(task)
+        if plan_excerpt:
+            lines.append("  Plan excerpt:")
+            lines.append("  ---")
+            lines.append(plan_excerpt)
+            lines.append("  ---")
+        return "\n".join(lines)[:max_chars]
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -676,6 +707,841 @@ class OrchestratorService:
             text=True,
         )
         return worktree_dir
+
+    # ------------------------------------------------------------------
+    # Working Document (workdoc) helpers
+    # ------------------------------------------------------------------
+
+    # Maps step names to (heading, placeholder_step) pairs.
+    # placeholder_step is the step name used in the template placeholder text.
+    _WORKDOC_SECTION_MAP: dict[str, tuple[str, str]] = {
+        "plan": ("## Plan", "plan"),
+        "initiative_plan": ("## Plan", "plan"),
+        "analyze": ("## Analysis", "analyze"),
+        "diagnose": ("## Analysis", "analyze"),
+        "scan_deps": ("## Dependency Scan Findings", "scan_deps"),
+        "scan_code": ("## Code Scan Findings", "scan_code"),
+        "generate_tasks": ("## Generated Tasks", "generate_tasks"),
+        "profile": ("## Profiling Baseline", "profile"),
+        "implement": ("## Implementation Log", "implement"),
+        "prototype": ("## Implementation Log", "implement"),
+        "implement_fix": ("## Fix Log", None),  # placeholder uses different wording
+        "verify": ("## Verification Results", "verify"),
+        "benchmark": ("## Verification Results", "verify"),
+        "reproduce": ("## Verification Results", "verify"),
+        "report": ("## Final Report", "report"),
+    }
+
+    _FEATURE_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Plan
+
+_Pending: will be populated by the plan step._
+
+## Implementation Log
+
+_Pending: will be populated by the implement step._
+
+## Verification Results
+
+_Pending: will be populated by the verify step._
+
+## Review Findings
+
+_Pending: will be populated by the review step._
+
+## Fix Log
+
+_Pending: will be populated as needed._
+"""
+
+    _GENERIC_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Plan
+
+_Pending: will be populated by the plan step._
+
+## Analysis
+
+_Pending: will be populated by the analyze step._
+
+## Profiling Baseline
+
+_Pending: will be populated by the profile step._
+
+## Implementation Log
+
+_Pending: will be populated by the implement step._
+
+## Verification Results
+
+_Pending: will be populated by the verify step._
+
+## Final Report
+
+_Pending: will be populated by the report step._
+
+## Review Findings
+
+_Pending: will be populated by the review step._
+
+## Fix Log
+
+_Pending: will be populated as needed._
+"""
+
+    _VERIFY_ONLY_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Verification Results
+
+_Pending: will be populated by the verify step._
+
+## Final Report
+
+_Pending: will be populated by the report step._
+"""
+
+    _SECURITY_AUDIT_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Dependency Scan Findings
+
+_Pending: will be populated by the scan_deps step._
+
+## Code Scan Findings
+
+_Pending: will be populated by the scan_code step._
+
+## Security Report
+
+_Pending: will be populated by the report step._
+
+## Generated Remediation Tasks
+
+_Pending: will be populated by the generate_tasks step._
+"""
+
+    _REPO_REVIEW_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Repository Analysis
+
+_Pending: will be populated by the analyze step._
+
+## Initiative Plan
+
+_Pending: will be populated by the plan step._
+
+## Generated Tasks
+
+_Pending: will be populated by the generate_tasks step._
+"""
+
+    _RESEARCH_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Research Analysis
+
+_Pending: will be populated by the analyze step._
+
+## Final Report
+
+_Pending: will be populated by the report step._
+"""
+
+    _REVIEW_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Review Analysis
+
+_Pending: will be populated by the analyze step._
+
+## Review Findings
+
+_Pending: will be populated by the review step._
+
+## Final Report
+
+_Pending: will be populated by the report step._
+"""
+
+    _BUG_FIX_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Reproduction Evidence
+
+_Pending: will be populated by the reproduce step._
+
+## Diagnosis
+
+_Pending: will be populated by the diagnose step._
+
+## Fix Implementation
+
+_Pending: will be populated by the implement step._
+
+## Verification Results
+
+_Pending: will be populated by the verify step._
+
+## Review Findings
+
+_Pending: will be populated by the review step._
+
+## Fix Log
+
+_Pending: will be populated as needed._
+"""
+
+    _REFACTOR_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Refactor Analysis
+
+_Pending: will be populated by the analyze step._
+
+## Refactor Plan
+
+_Pending: will be populated by the plan step._
+
+## Refactor Implementation
+
+_Pending: will be populated by the implement step._
+
+## Verification Results
+
+_Pending: will be populated by the verify step._
+
+## Review Findings
+
+_Pending: will be populated by the review step._
+
+## Fix Log
+
+_Pending: will be populated as needed._
+"""
+
+    _PERFORMANCE_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Profiling Baseline
+
+_Pending: will be populated by the profile step._
+
+## Optimization Plan
+
+_Pending: will be populated by the plan step._
+
+## Optimization Implementation
+
+_Pending: will be populated by the implement step._
+
+## Benchmark Results
+
+_Pending: will be populated by the verify step._
+
+## Review Findings
+
+_Pending: will be populated by the review step._
+
+## Fix Log
+
+_Pending: will be populated as needed._
+"""
+
+    _TEST_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Coverage Analysis
+
+_Pending: will be populated by the analyze step._
+
+## Test Implementation
+
+_Pending: will be populated by the implement step._
+
+## Verification Results
+
+_Pending: will be populated by the verify step._
+
+## Review Findings
+
+_Pending: will be populated by the review step._
+
+## Fix Log
+
+_Pending: will be populated as needed._
+"""
+
+    _DOCS_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Documentation Analysis
+
+_Pending: will be populated by the analyze step._
+
+## Documentation Updates
+
+_Pending: will be populated by the implement step._
+
+## Verification Results
+
+_Pending: will be populated by the verify step._
+
+## Review Findings
+
+_Pending: will be populated by the review step._
+
+## Fix Log
+
+_Pending: will be populated as needed._
+"""
+
+    _HOTFIX_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Hotfix Implementation
+
+_Pending: will be populated by the implement step._
+
+## Verification Results
+
+_Pending: will be populated by the verify step._
+
+## Review Findings
+
+_Pending: will be populated by the review step._
+
+## Fix Log
+
+_Pending: will be populated as needed._
+"""
+
+    _CHORE_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Chore Implementation
+
+_Pending: will be populated by the implement step._
+
+## Verification Results
+
+_Pending: will be populated by the verify step._
+"""
+
+    _SPIKE_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Spike Analysis
+
+_Pending: will be populated by the analyze step._
+
+## Prototype Notes
+
+_Pending: will be populated by the implement step._
+
+## Final Report
+
+_Pending: will be populated by the report step._
+"""
+
+    _PLAN_ONLY_WORKDOC_TEMPLATE = """\
+# Working Document: {title}
+
+**Task ID:** {task_id}
+**Type:** {task_type} | **Priority:** {priority}
+**Created:** {created_at}
+
+---
+
+## Task Description
+
+{description}
+
+---
+
+## Analysis
+
+_Pending: will be populated by the analyze step._
+
+## Plan
+
+_Pending: will be populated by the plan step._
+
+## Generated Tasks
+
+_Pending: will be populated by the generate_tasks step._
+
+## Final Report
+
+_Pending: will be populated by the report step._
+"""
+
+    def _pipeline_id_for_task(self, task: Task) -> str:
+        """Resolve pipeline id for a task; fall back safely on failure."""
+        try:
+            return PipelineRegistry().resolve_for_task_type(task.task_type).id
+        except Exception:
+            return "feature"
+
+    def _workdoc_template_for_task(self, task: Task) -> str:
+        """Return the workdoc template body for the task's pipeline."""
+        pipeline_id = self._pipeline_id_for_task(task)
+        template_by_pipeline: dict[str, str] = {
+            "feature": self._FEATURE_WORKDOC_TEMPLATE,
+            "bug_fix": self._BUG_FIX_WORKDOC_TEMPLATE,
+            "refactor": self._REFACTOR_WORKDOC_TEMPLATE,
+            "research": self._RESEARCH_WORKDOC_TEMPLATE,
+            "docs": self._DOCS_WORKDOC_TEMPLATE,
+            "test": self._TEST_WORKDOC_TEMPLATE,
+            "repo_review": self._REPO_REVIEW_WORKDOC_TEMPLATE,
+            "security_audit": self._SECURITY_AUDIT_WORKDOC_TEMPLATE,
+            "review": self._REVIEW_WORKDOC_TEMPLATE,
+            "performance": self._PERFORMANCE_WORKDOC_TEMPLATE,
+            "hotfix": self._HOTFIX_WORKDOC_TEMPLATE,
+            "spike": self._SPIKE_WORKDOC_TEMPLATE,
+            "chore": self._CHORE_WORKDOC_TEMPLATE,
+            "plan_only": self._PLAN_ONLY_WORKDOC_TEMPLATE,
+            "verify_only": self._VERIFY_ONLY_WORKDOC_TEMPLATE,
+        }
+        return template_by_pipeline.get(pipeline_id, self._GENERIC_WORKDOC_TEMPLATE)
+
+    def _workdoc_section_for_step(self, task: Task, step: str) -> tuple[str, str] | None:
+        """Resolve section heading/placeholder mapping for a step and task pipeline."""
+        section = self._WORKDOC_SECTION_MAP.get(step)
+        if not section:
+            return None
+        heading, placeholder_step = section
+        pipeline_id = self._pipeline_id_for_task(task)
+        section_overrides: dict[str, dict[str, tuple[str, str]]] = {
+            "security_audit": {
+                "report": ("## Security Report", "report"),
+                "generate_tasks": ("## Generated Remediation Tasks", "generate_tasks"),
+            },
+            "repo_review": {
+                "analyze": ("## Repository Analysis", "analyze"),
+                "initiative_plan": ("## Initiative Plan", "plan"),
+            },
+            "research": {
+                "analyze": ("## Research Analysis", "analyze"),
+            },
+            "review": {
+                "analyze": ("## Review Analysis", "analyze"),
+            },
+            "bug_fix": {
+                "reproduce": ("## Reproduction Evidence", "reproduce"),
+                "diagnose": ("## Diagnosis", "diagnose"),
+                "implement": ("## Fix Implementation", "implement"),
+            },
+            "refactor": {
+                "analyze": ("## Refactor Analysis", "analyze"),
+                "plan": ("## Refactor Plan", "plan"),
+                "implement": ("## Refactor Implementation", "implement"),
+            },
+            "performance": {
+                "plan": ("## Optimization Plan", "plan"),
+                "implement": ("## Optimization Implementation", "implement"),
+                "benchmark": ("## Benchmark Results", "verify"),
+            },
+            "test": {
+                "analyze": ("## Coverage Analysis", "analyze"),
+                "implement": ("## Test Implementation", "implement"),
+            },
+            "docs": {
+                "analyze": ("## Documentation Analysis", "analyze"),
+                "implement": ("## Documentation Updates", "implement"),
+            },
+            "hotfix": {
+                "implement": ("## Hotfix Implementation", "implement"),
+            },
+            "chore": {
+                "implement": ("## Chore Implementation", "implement"),
+            },
+            "spike": {
+                "analyze": ("## Spike Analysis", "analyze"),
+                "prototype": ("## Prototype Notes", "implement"),
+            },
+        }
+        override = section_overrides.get(pipeline_id, {}).get(step)
+        if override:
+            heading, placeholder_step = override
+        return heading, placeholder_step
+
+    def _workdoc_canonical_path(self, task_id: str) -> Path:
+        return self.container.state_root / "workdocs" / f"{task_id}.md"
+
+    @staticmethod
+    def _workdoc_worktree_path(project_dir: Path) -> Path:
+        return project_dir / ".workdoc.md"
+
+    def _init_workdoc(self, task: Task, project_dir: Path) -> Path:
+        """Render the workdoc template, write canonical + worktree copies.
+
+        .workdoc.md is already gitignored by bootstrap (_ensure_gitignored).
+        """
+        workdocs_dir = self.container.state_root / "workdocs"
+        workdocs_dir.mkdir(parents=True, exist_ok=True)
+
+        canonical = self._workdoc_canonical_path(task.id)
+        # Use safe substitution to avoid KeyError if task fields contain braces.
+        template = self._workdoc_template_for_task(task)
+        content = (
+            template
+            .replace("{title}", task.title)
+            .replace("{task_id}", task.id)
+            .replace("{task_type}", task.task_type)
+            .replace("{priority}", task.priority)
+            .replace("{created_at}", task.created_at)
+            .replace("{description}", task.description or "(no description)")
+        )
+        canonical.write_text(content, encoding="utf-8")
+
+        worktree_copy = self._workdoc_worktree_path(project_dir)
+        shutil.copy2(str(canonical), str(worktree_copy))
+
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        task.metadata["workdoc_path"] = str(canonical)
+        return canonical
+
+    @staticmethod
+    def _cleanup_workdoc_for_commit(project_dir: Path) -> None:
+        """Remove the worktree .workdoc.md before commit so git add -A won't stage it."""
+        workdoc = project_dir / ".workdoc.md"
+        if workdoc.exists():
+            workdoc.unlink()
+
+    def _refresh_workdoc(self, task: Task, project_dir: Path) -> None:
+        """Copy canonical workdoc to worktree so the worker sees the latest version."""
+        canonical = self._workdoc_canonical_path(task.id)
+        if not canonical.exists():
+            return
+        worktree_copy = self._workdoc_worktree_path(project_dir)
+        shutil.copy2(str(canonical), str(worktree_copy))
+
+    def _sync_workdoc(
+        self, task: Task, step: str, project_dir: Path, summary: str | None, attempt: int | None = None
+    ) -> None:
+        """Post-step sync: accept worker changes or fallback-append summary."""
+        canonical = self._workdoc_canonical_path(task.id)
+        if not canonical.exists():
+            return
+        worktree_copy = self._workdoc_worktree_path(project_dir)
+        if not worktree_copy.exists():
+            return
+
+        canonical_text = canonical.read_text(encoding="utf-8")
+        worktree_text = worktree_copy.read_text(encoding="utf-8")
+
+        changed = False
+        orchestrator_managed_steps = {"verify", "benchmark", "reproduce", "implement_fix", "report", "profile"}
+        allow_worker_workdoc_write = step not in orchestrator_managed_steps
+        if worktree_text != canonical_text and allow_worker_workdoc_write:
+            # Worker updated the file — accept as new canonical
+            canonical.write_text(worktree_text, encoding="utf-8")
+            changed = True
+        elif summary and summary.strip():
+            # Fallback: append summary under the step's heading
+            section = self._workdoc_section_for_step(task, step)
+            if not section:
+                return
+            heading, placeholder_step = section
+            if placeholder_step:
+                placeholder = f"_Pending: will be populated by the {placeholder_step} step._"
+            else:
+                placeholder = "_Pending: will be populated as needed._"
+            trimmed = summary.strip()
+            if step == "implement_fix":
+                cycle_num = int(attempt or 1)
+                trimmed = f"### Fix Cycle {cycle_num}\n{trimmed}"
+            if placeholder in canonical_text:
+                updated = canonical_text.replace(placeholder, trimmed, 1)
+            else:
+                # Append under the heading
+                idx = canonical_text.find(heading)
+                if idx == -1:
+                    return
+                # Find the end of the heading line
+                newline_after = canonical_text.find("\n", idx)
+                if newline_after == -1:
+                    updated = canonical_text + "\n\n" + trimmed
+                else:
+                    # Find the next heading (## ) or end of file
+                    rest = canonical_text[newline_after + 1:]
+                    next_heading = re.search(r"^## ", rest, re.MULTILINE)
+                    if next_heading:
+                        insert_pos = newline_after + 1 + next_heading.start()
+                        updated = canonical_text[:insert_pos] + trimmed + "\n\n" + canonical_text[insert_pos:]
+                    else:
+                        updated = canonical_text.rstrip() + "\n\n" + trimmed + "\n"
+            canonical.write_text(updated, encoding="utf-8")
+            worktree_copy.write_text(updated, encoding="utf-8")
+            changed = True
+
+        if changed:
+            self.bus.emit(
+                channel="tasks",
+                event_type="workdoc.updated",
+                entity_id=task.id,
+                payload={"step": step},
+            )
+
+    def _sync_workdoc_review(self, task: Task, cycle: ReviewCycle, project_dir: Path) -> None:
+        """Append review cycle findings to the workdoc."""
+        canonical = self._workdoc_canonical_path(task.id)
+        if not canonical.exists():
+            return
+
+        text = canonical.read_text(encoding="utf-8")
+
+        lines: list[str] = [
+            f"### Review Cycle {cycle.attempt} — {cycle.decision}",
+        ]
+        counts = cycle.open_counts or {}
+        lines.append(
+            "Open findings: "
+            f"critical={int(counts.get('critical', 0))}, "
+            f"high={int(counts.get('high', 0))}, "
+            f"medium={int(counts.get('medium', 0))}, "
+            f"low={int(counts.get('low', 0))}"
+        )
+        for f in cycle.findings:
+            if f.file and f.line:
+                loc = f" ({f.file}:{f.line})"
+            elif f.file:
+                loc = f" ({f.file})"
+            else:
+                loc = ""
+            category = f"[{f.category}] " if f.category else ""
+            lines.append(f"- **[{f.severity}]** {category}{f.summary}{loc}")
+            if f.suggested_fix:
+                lines.append(f"  - Suggested fix: {f.suggested_fix}")
+            if f.status and f.status != "open":
+                lines.append(f"  - Status: {f.status}")
+        block = "\n".join(lines)
+
+        placeholder = "_Pending: will be populated by the review step._"
+        if placeholder in text:
+            updated = text.replace(placeholder, block, 1)
+        else:
+            heading = "## Review Findings"
+            idx = text.find(heading)
+            if idx == -1:
+                updated = text.rstrip() + "\n\n" + heading + "\n\n" + block + "\n"
+            else:
+                next_heading = re.search(r"^## ", text[idx + len(heading):], re.MULTILINE)
+                if next_heading:
+                    insert_pos = idx + len(heading) + next_heading.start()
+                    updated = text[:insert_pos] + block + "\n\n" + text[insert_pos:]
+                else:
+                    updated = text.rstrip() + "\n\n" + block + "\n"
+
+        canonical.write_text(updated, encoding="utf-8")
+        worktree_copy = self._workdoc_worktree_path(project_dir)
+        if worktree_copy.exists():
+            worktree_copy.write_text(updated, encoding="utf-8")
+
+        self.bus.emit(
+            channel="tasks",
+            event_type="workdoc.updated",
+            entity_id=task.id,
+            payload={"step": "review", "cycle": cycle.attempt},
+        )
+
+    def _step_project_dir(self, task: Task) -> Path:
+        """Return the effective project dir for a task (worktree or main)."""
+        worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
+        return Path(worktree_path) if worktree_path else self.container.project_dir
+
+    def get_workdoc(self, task_id: str) -> dict[str, Any]:
+        """Read canonical workdoc for a task. Returns {task_id, content, exists}."""
+        canonical = self._workdoc_canonical_path(task_id)
+        if canonical.exists():
+            return {"task_id": task_id, "content": canonical.read_text(encoding="utf-8"), "exists": True}
+        return {"task_id": task_id, "content": None, "exists": False}
 
     def _merge_and_cleanup(self, task: Task, worktree_dir: Path) -> None:
         branch = f"task-{task.id}"
@@ -740,9 +1606,11 @@ class OrchestratorService:
 
             # Identify other recently completed tasks whose changes may conflict
             other_tasks_info: list[str] = []
+            other_objectives: list[str] = []
             for other in self.container.tasks.list():
                 if other.id != task.id and other.status == "done":
                     other_tasks_info.append(f"- {other.title}: {other.description}")
+                    other_objectives.append(self._format_task_objective_summary(other))
 
             # Build resolve prompt and store in task metadata.
             # Temporarily clear worktree_dir so the worker runs in project_dir
@@ -750,6 +1618,8 @@ class OrchestratorService:
             task.metadata.pop("worktree_dir", None)
             task.metadata["merge_conflict_files"] = conflict_contents
             task.metadata["merge_other_tasks"] = other_tasks_info
+            task.metadata["merge_current_objective"] = self._format_task_objective_summary(task)
+            task.metadata["merge_other_objectives"] = other_objectives
             self.container.tasks.upsert(task)
 
             # Dispatch worker to resolve
@@ -781,6 +1651,8 @@ class OrchestratorService:
             # Always clean up conflict metadata and restore worktree_dir
             task.metadata.pop("merge_conflict_files", None)
             task.metadata.pop("merge_other_tasks", None)
+            task.metadata.pop("merge_current_objective", None)
+            task.metadata.pop("merge_other_objectives", None)
             if saved_worktree_dir:
                 task.metadata["worktree_dir"] = saved_worktree_dir
 
@@ -924,6 +1796,29 @@ class OrchestratorService:
         return result
 
     _VERIFY_OUTPUT_TAIL_CHARS = 8000
+    _NON_ACTIONABLE_VERIFY_REASON_CODES = {
+        "tool_missing",
+        "config_missing",
+        "no_tests",
+        "permission_denied",
+        "resource_limit",
+        "os_incompatibility",
+        "infrastructure",
+    }
+    _NON_ACTIONABLE_VERIFY_SUMMARY_PATTERNS = (
+        r"command not found",
+        r"not installed",
+        r"no tests? found",
+        r"missing (config|configuration)",
+        r"no such file or directory",
+        r"permission denied",
+        r"operation not permitted",
+        r"network is unreachable",
+        r"connection refused",
+        r"timed out connecting",
+        r"docker.*not (available|running)",
+        r"requires .* not available",
+    )
 
     def _capture_verify_output(self, task: Task) -> None:
         """Read the tail of the verify step's stdout/stderr and stash it in metadata.
@@ -962,12 +1857,84 @@ class OrchestratorService:
         if parts:
             task.metadata["verify_output"] = "\n".join(parts)
 
+    def _is_non_actionable_verify_failure(self, task: Task, summary: str | None) -> bool:
+        """Return True when a verify failure is due to environment/tooling, not code."""
+        if isinstance(task.metadata, dict):
+            reason_code = str(task.metadata.get("verify_reason_code") or "").strip().lower()
+            if reason_code in self._NON_ACTIONABLE_VERIFY_REASON_CODES:
+                return True
+        text = str(summary or "").strip().lower()
+        if not text:
+            return False
+        return any(re.search(pattern, text) for pattern in self._NON_ACTIONABLE_VERIFY_SUMMARY_PATTERNS)
+
+    def _mark_verify_degraded(
+        self,
+        task: Task,
+        run: RunRecord,
+        *,
+        step: str,
+        summary: str | None,
+    ) -> None:
+        """Persist and emit degraded verification context, then continue best-effort flow."""
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        entry = {
+            "ts": now_iso(),
+            "step": step,
+            "reason_code": str(task.metadata.get("verify_reason_code") or "unknown"),
+            "summary": str(summary or "Verification degraded due to environment/tooling constraints."),
+        }
+        issues = task.metadata.get("verify_degraded_issues")
+        if not isinstance(issues, list):
+            issues = []
+        issues.append(entry)
+        task.metadata["verify_degraded_issues"] = issues
+        task.metadata["verify_degraded"] = entry
+        task.metadata["verify_non_actionable_failure"] = True
+        task.status = "in_progress"
+        task.error = None
+        task.pending_gate = None
+        self.container.tasks.upsert(task)
+        run.status = "in_progress"
+        run.finished_at = None
+        run.summary = None
+        self.container.runs.upsert(run)
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.verify_degraded",
+            entity_id=task.id,
+            payload=entry,
+        )
+
+    def _consume_verify_non_actionable_flag(self, task: Task) -> bool:
+        if not isinstance(task.metadata, dict):
+            return False
+        return bool(task.metadata.pop("verify_non_actionable_failure", False))
+
+    def _select_post_fix_validation_step(self, steps: list[str]) -> str | None:
+        """Pick the validation step that should run after implement_fix in review loops."""
+        if "verify" in steps:
+            return "verify"
+        if "benchmark" in steps:
+            return "benchmark"
+        return None
+
     def _run_non_review_step(self, task: Task, run: RunRecord, step: str, attempt: int = 1) -> bool:
+        # Refresh workdoc before each step so the worker sees the latest version.
+        step_project_dir = self._step_project_dir(task)
+        self._refresh_workdoc(task, step_project_dir)
+
+        step_started = now_iso()
         try:
             result = self.worker_adapter.run_step(task=task, step=step, attempt=attempt)
         except WorkerCancelledError:
             raise self._Cancelled()
-        step_log: dict[str, Any] = {"step": step, "status": result.status, "ts": now_iso(), "summary": result.summary}
+
+        # Post-step workdoc sync (before other bookkeeping that may upsert task).
+        self._sync_workdoc(task, step, step_project_dir, result.summary, attempt=attempt)
+
+        step_log: dict[str, Any] = {"step": step, "status": result.status, "ts": now_iso(), "started_at": step_started, "summary": result.summary}
         if result.human_blocking_issues:
             step_log["human_blocking_issues"] = result.human_blocking_issues
         # Preserve log file paths so historical step logs can be retrieved.
@@ -983,6 +1950,9 @@ class OrchestratorService:
             self._block_for_human_issues(task, run, step, result.summary, result.human_blocking_issues)
             return False
         if result.status != "ok":
+            if step in _VERIFY_STEPS and self._is_non_actionable_verify_failure(task, result.summary):
+                self._mark_verify_degraded(task, run, step=step, summary=result.summary)
+                return False
             task.status = "blocked"
             task.error = result.summary or f"{step} failed"
             task.pending_gate = None
@@ -998,7 +1968,7 @@ class OrchestratorService:
         task.metadata.pop("human_blocking_issues", None)
 
         # Store plan output as first-class immutable plan revisions.
-        if step == "plan" and result.summary:
+        if step in {"plan", "initiative_plan"} and result.summary:
             provider, model = self._resolve_worker_lineage(task, step)
             self.create_plan_revision(
                 task_id=task.id,
@@ -1021,12 +1991,25 @@ class OrchestratorService:
             so = task.metadata.setdefault("step_outputs", {})
             # Plan text already bounded at 20KB by _normalize_planning_text.
             # Other outputs truncated to 4KB to prevent metadata bloat.
-            max_len = 20_000 if step == "plan" else 4_000
+            max_len = 20_000 if step in {"plan", "initiative_plan"} else 4_000
             so[step] = result.summary[:max_len]
 
-        # Handle generate_tasks: create child tasks from step output
-        if step == "generate_tasks" and result.generated_tasks:
-            self._create_child_tasks(task, result.generated_tasks)
+        # Handle generate_tasks: prefer generated tasks, but avoid silent no-op by recording warning metadata.
+        if step == "generate_tasks":
+            generated = list(result.generated_tasks or [])
+            if not generated:
+                if not isinstance(task.metadata, dict):
+                    task.metadata = {}
+                task.metadata["generate_tasks_warning"] = result.summary or "generate_tasks produced no structured tasks"
+                self.container.tasks.upsert(task)
+                self.bus.emit(
+                    channel="tasks",
+                    event_type="task.generate_tasks_empty",
+                    entity_id=task.id,
+                    payload={"warning": task.metadata["generate_tasks_warning"]},
+                )
+                return True
+            self._create_child_tasks(task, generated)
 
         return True
 
@@ -1056,8 +2039,15 @@ class OrchestratorService:
                 payload={"parent_id": parent.id, "source": "generate_tasks"},
             )
 
-        # Wire up depends_on indices between generated tasks
+        # Wire up depends_on task-ID references between generated tasks
         if apply_deps and created_ids:
+            generated_ref_to_task_id: dict[str, str] = {}
+            for idx, item in enumerate(task_defs):
+                if not isinstance(item, dict) or idx >= len(created_ids):
+                    continue
+                ref = str(item.get("id") or "").strip()
+                if ref and ref not in generated_ref_to_task_id:
+                    generated_ref_to_task_id[ref] = created_ids[idx]
             for idx, item in enumerate(task_defs):
                 if not isinstance(item, dict) or idx >= len(created_ids):
                     continue
@@ -1068,12 +2058,15 @@ class OrchestratorService:
                 child_task = self.container.tasks.get(child_id)
                 if not child_task:
                     continue
-                for dep_idx in deps:
-                    if not isinstance(dep_idx, int) or dep_idx < 0 or dep_idx >= len(created_ids):
+                for dep_ref in deps:
+                    dep_key = str(dep_ref or "").strip()
+                    if not dep_key:
                         continue
-                    if dep_idx == idx:
+                    dep_id = generated_ref_to_task_id.get(dep_key)
+                    if not dep_id:
                         continue
-                    dep_id = created_ids[dep_idx]
+                    if dep_id == child_id:
+                        continue
                     if dep_id not in child_task.blocked_by:
                         child_task.blocked_by.append(dep_id)
                     dep_task = self.container.tasks.get(dep_id)
@@ -1239,12 +2232,14 @@ class OrchestratorService:
             project_dir = Path(worktree_path) if worktree_path else self.container.project_dir
             if not project_dir.is_dir():
                 project_dir = self.container.project_dir
+            summary_started = now_iso()
             summary_text = fn(task=task, run=run, project_dir=project_dir)
             if isinstance(summary_text, str) and summary_text.strip():
                 run.steps.append({
                     "step": "summary",
                     "status": "ok",
                     "ts": now_iso(),
+                    "started_at": summary_started,
                     "summary": summary_text,
                 })
                 self.container.runs.upsert(run)
@@ -1445,6 +2440,9 @@ class OrchestratorService:
                 task.metadata["worktree_dir"] = str(worktree_dir)
                 self.container.tasks.upsert(task)
 
+            workdoc_dir = worktree_dir if worktree_dir else self.container.project_dir
+            self._init_workdoc(task, workdoc_dir)
+
             task_branch = f"task-{task.id}" if worktree_dir else self._ensure_branch()
             run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), branch=task_branch)
             run.steps = []
@@ -1510,6 +2508,9 @@ class OrchestratorService:
                 if not self._run_non_review_step(task, run, step, attempt=1):
                     # If a verify step failed, try implement_fix → verify loop.
                     if step in _VERIFY_STEPS:
+                        if self._consume_verify_non_actionable_flag(task):
+                            last_phase1_step = step
+                            continue
                         fixed = False
                         for fix_attempt in range(1, max_verify_fix_attempts + 1):
                             # Stash the failure summary and log output so implement_fix sees it.
@@ -1546,6 +2547,8 @@ class OrchestratorService:
             # Guard: block if implementation produced no file changes
             if has_commit:
                 impl_dir = worktree_dir or self.container.project_dir
+                # Remove worktree workdoc before checking — it's not a real change.
+                self._cleanup_workdoc_for_commit(impl_dir)
                 if not self._has_uncommitted_changes(impl_dir):
                     task.status = "blocked"
                     task.error = "No file changes detected after implementation"
@@ -1561,6 +2564,7 @@ class OrchestratorService:
             # Phase 2: Review loop (only if template has "review")
             self._check_cancelled(task)
             if has_review and retry_from != "commit":
+                post_fix_validation_step = self._select_post_fix_validation_step(steps)
                 gate_name = self._GATE_MAPPING.get("review")
                 if gate_name and should_gate(mode, gate_name):
                     if not self._wait_for_gate(task, gate_name):
@@ -1579,6 +2583,7 @@ class OrchestratorService:
                     else:
                         task.metadata.pop("review_history", None)
                     self.container.tasks.upsert(task)
+                    review_started = now_iso()
                     findings, review_result = self._findings_from_result(task, review_attempt)
                     if review_result.human_blocking_issues:
                         self._block_for_human_issues(
@@ -1610,7 +2615,8 @@ class OrchestratorService:
                         decision="changes_requested" if self._exceeds_quality_gate(task, findings) else "approved",
                     )
                     self.container.reviews.append(cycle)
-                    review_step_log: dict[str, Any] = {"step": "review", "status": cycle.decision, "ts": now_iso(), "open_counts": open_counts}
+                    self._sync_workdoc_review(task, cycle, worktree_dir or self.container.project_dir)
+                    review_step_log: dict[str, Any] = {"step": "review", "status": cycle.decision, "ts": now_iso(), "started_at": review_started, "open_counts": open_counts}
                     review_last_logs = task.metadata.get("last_logs") if isinstance(task.metadata, dict) else None
                     if isinstance(review_last_logs, dict):
                         for key in ("stdout_path", "stderr_path", "progress_path"):
@@ -1644,36 +2650,41 @@ class OrchestratorService:
                     if not self._run_non_review_step(task, run, "implement_fix", attempt=review_attempt):
                         return
 
-                    # Run verify with retry loop (same as Phase 1)
-                    task.current_step = "verify"
-                    self.container.tasks.upsert(task)
-                    if not self._run_non_review_step(task, run, "verify", attempt=review_attempt):
-                        verify_fixed = False
-                        for vfix in range(1, max_verify_fix_attempts + 1):
-                            task.status = "in_progress"
-                            task.metadata["verify_failure"] = task.error
-                            self._capture_verify_output(task)
-                            task.error = None
-                            task.retry_count += 1
-                            self.container.tasks.upsert(task)
-                            run.status = "in_progress"
-                            run.finished_at = None
-                            run.summary = None
-                            self.container.runs.upsert(run)
+                    if post_fix_validation_step:
+                        # Run post-fix validation with retry loop (same as Phase 1)
+                        task.current_step = post_fix_validation_step
+                        self.container.tasks.upsert(task)
+                        if not self._run_non_review_step(task, run, post_fix_validation_step, attempt=review_attempt):
+                            if self._consume_verify_non_actionable_flag(task):
+                                task.current_step = "review"
+                                self.container.tasks.upsert(task)
+                                continue
+                            validation_fixed = False
+                            for vfix in range(1, max_verify_fix_attempts + 1):
+                                task.status = "in_progress"
+                                task.metadata["verify_failure"] = task.error
+                                self._capture_verify_output(task)
+                                task.error = None
+                                task.retry_count += 1
+                                self.container.tasks.upsert(task)
+                                run.status = "in_progress"
+                                run.finished_at = None
+                                run.summary = None
+                                self.container.runs.upsert(run)
 
-                            task.current_step = "implement_fix"
-                            self.container.tasks.upsert(task)
-                            if not self._run_non_review_step(task, run, "implement_fix", attempt=vfix + 1):
+                                task.current_step = "implement_fix"
+                                self.container.tasks.upsert(task)
+                                if not self._run_non_review_step(task, run, "implement_fix", attempt=vfix + 1):
+                                    return
+                                task.metadata.pop("verify_failure", None)
+                                task.metadata.pop("verify_output", None)
+                                task.current_step = post_fix_validation_step
+                                self.container.tasks.upsert(task)
+                                if self._run_non_review_step(task, run, post_fix_validation_step, attempt=vfix + 1):
+                                    validation_fixed = True
+                                    break
+                            if not validation_fixed:
                                 return
-                            task.metadata.pop("verify_failure", None)
-                            task.metadata.pop("verify_output", None)
-                            task.current_step = "verify"
-                            self.container.tasks.upsert(task)
-                            if self._run_non_review_step(task, run, "verify", attempt=vfix + 1):
-                                verify_fixed = True
-                                break
-                        if not verify_fixed:
-                            return
 
                     task.metadata.pop("review_findings", None)
                     task.metadata.pop("review_history", None)
@@ -1700,6 +2711,8 @@ class OrchestratorService:
                         self._abort_for_gate(task, run, "before_commit")
                         return
 
+                commit_started = now_iso()
+                self._cleanup_workdoc_for_commit(worktree_dir or self.container.project_dir)
                 commit_sha = self._commit_for_task(task, worktree_dir)
                 if not commit_sha:
                     # Only block when git is present — otherwise commit is a no-op
@@ -1715,7 +2728,7 @@ class OrchestratorService:
                             entity_id=task.id, payload={"error": task.error},
                         )
                         return
-                run.steps.append({"step": "commit", "status": "ok", "ts": now_iso(), "commit": commit_sha})
+                run.steps.append({"step": "commit", "status": "ok", "ts": now_iso(), "started_at": commit_started, "commit": commit_sha})
                 self.container.runs.upsert(run)
 
                 # Merge worktree branch back to run branch

@@ -16,7 +16,7 @@ STATE_FILES = {
     "runs": "runs.yaml",
     "review_cycles": "review_cycles.yaml",
     "agents": "agents.yaml",
-    "quick_actions": "quick_actions.yaml",
+    "terminal_sessions": "terminal_sessions.yaml",
     "plan_revisions": "plan_revisions.yaml",
     "plan_refine_jobs": "plan_refine_jobs.yaml",
     "events": "events.jsonl",
@@ -50,22 +50,28 @@ def _needs_archive(base: Path) -> bool:
 
 
 def _ensure_gitignored(project_dir: Path) -> None:
-    """Add .agent_orchestrator/ to the project's .gitignore if not already present."""
+    """Add .agent_orchestrator/ and .workdoc.md to the project's .gitignore if not already present."""
     gitignore = project_dir / ".gitignore"
-    entry = ".agent_orchestrator/"
+    entries = [".agent_orchestrator/", ".workdoc.md"]
     if gitignore.exists():
         content = gitignore.read_text(encoding="utf-8")
-        for line in content.splitlines():
-            stripped = line.strip()
-            if stripped == entry or stripped == ".agent_orchestrator":
-                return
-        # Ensure we start on a new line
+        existing_stripped = {line.strip() for line in content.splitlines()}
+        missing = [e for e in entries if e not in existing_stripped and e.rstrip("/") not in existing_stripped]
+        if not missing:
+            return
         if content and not content.endswith("\n"):
             content += "\n"
-        content += f"\n# Agent Orchestrator runtime data\n{entry}\n"
+        # Only add the comment header if not already present.
+        if "# Agent Orchestrator runtime data" not in content:
+            content += "\n# Agent Orchestrator runtime data\n"
+        for e in missing:
+            content += f"{e}\n"
         gitignore.write_text(content, encoding="utf-8")
     else:
-        gitignore.write_text(f"# Agent Orchestrator runtime data\n{entry}\n", encoding="utf-8")
+        lines = "# Agent Orchestrator runtime data\n"
+        for e in entries:
+            lines += f"{e}\n"
+        gitignore.write_text(lines, encoding="utf-8")
 
 
 def ensure_state_root(project_dir: Path) -> Path:
@@ -86,6 +92,8 @@ def ensure_state_root(project_dir: Path) -> Path:
             target.write_text("version: 3\n", encoding="utf-8")
         if file_name.endswith(".jsonl") and not target.exists():
             target.touch()
+
+    (state_root / "workdocs").mkdir(parents=True, exist_ok=True)
 
     config_repo = FileConfigRepository(state_root / "config.yaml", state_root / "config.lock")
     config = config_repo.load()

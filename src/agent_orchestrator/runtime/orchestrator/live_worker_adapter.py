@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from ...pipelines.registry import PipelineRegistry
+from ...prompts import load as load_prompt
 from ...workers.config import get_workers_runtime_config, resolve_worker_for_step
 from ...workers.diagnostics import test_worker
 from ...worker import WorkerCancelledError
@@ -23,26 +24,30 @@ from .worker_adapter import StepResult
 logger = logging.getLogger(__name__)
 
 # Step category mapping
-_PLANNING_STEPS = {"plan", "analyze", "plan_refine"}
+_PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine"}
 _IMPL_STEPS = {"implement", "prototype"}
 _FIX_STEPS = {"implement_fix"}
 _VERIFY_STEPS = {"verify", "benchmark", "reproduce"}
 _REVIEW_STEPS = {"review"}
 _REPORT_STEPS = {"report", "summarize"}
-_SCAN_STEPS = {"scan", "scan_deps", "scan_code", "gather"}
-_TASK_GEN_STEPS = {"generate_tasks", "diagnose"}
+_SCAN_STEPS = {"scan_deps", "scan_code"}
+_TASK_GEN_STEPS = {"generate_tasks"}
+_DIAGNOSIS_STEPS = {"diagnose"}
 _MERGE_RESOLVE_STEPS = {"resolve_merge"}
 _DEP_ANALYSIS_STEPS = {"analyze_deps"}
+_PIPELINE_CLASSIFICATION_STEPS = {"pipeline_classify"}
 
 # Which prior step outputs each category should receive in its prompt.
 # None = inject all available outputs (for reporting/summarize steps).
 _STEP_OUTPUT_INJECTION: dict[str, tuple[str, ...] | None] = {
-    "implementation": ("plan", "analyze", "reproduce", "diagnose", "profile", "gather"),
+    "implementation": ("plan", "analyze", "reproduce", "diagnose", "profile"),
+    "diagnosis": ("reproduce",),
+    "planning": (),
     "review": ("verify", "benchmark"),
     "reporting": None,
-    "task_generation": ("plan", "analyze", "scan", "scan_deps", "scan_code"),
+    "task_generation": ("initiative_plan", "plan", "analyze", "scan_deps", "scan_code"),
     "fix": ("plan",),
-    "scanning": ("scan_deps", "gather"),
+    "scanning": ("scan_deps",),
 }
 
 _STEP_TIMEOUT_ALIASES = {"implement_fix": "implement"}
@@ -54,54 +59,49 @@ _DEFAULT_HEARTBEAT_GRACE_SECONDS = 240
 # Prompt layers
 # ---------------------------------------------------------------------------
 
-_PREAMBLE = (
-    "You are an autonomous coding agent managed by a coordinator process.\n"
-    "The coordinator is the final authority on task state — it assigns steps,\n"
-    "tracks progress, and handles all git commits.\n\n"
-    "## Human-blocking issues\n"
-    "If you encounter a problem that genuinely cannot be resolved without human\n"
-    "intervention, report it as a human-blocking issue. Valid reasons:\n"
-    "specification is missing or contradictory, required credentials or access\n"
-    "are unavailable. Do NOT escalate code-quality concerns, design preferences,\n"
-    "refactoring suggestions, or review feedback — handle those within your\n"
-    "step output."
-)
+_STEP_PROMPT_FILES: dict[str, str] = {
+    "planning": "steps/plan.md",
+    "implementation": "steps/implement.md",
+    "fix": "steps/fix.md",
+    "verification": "steps/verify.md",
+    "review": "steps/review.md",
+    "reporting": "steps/report.md",
+    "scanning": "steps/scan_code.md",
+    "task_generation": "steps/task_generation.md",
+    "diagnosis": "steps/diagnose.md",
+    "merge_resolution": "steps/merge_resolution.md",
+    "dependency_analysis": "steps/dependency_analysis.md",
+    "pipeline_classification": "steps/pipeline_classify.md",
+    "general": "steps/general.md",
+}
 
-_GUARDRAILS = (
-    "## Guardrails\n"
-    "- Do NOT commit, push, or rebase — the coordinator handles all commits.\n"
-    "- Do NOT modify files under `.agent_orchestrator/` — those are coordinator state.\n"
-    "- Do NOT suppress or down-rank review findings.\n"
-    "- Prefer fixing issues over escalating; escalate only when truly stuck.\n"
-    "- Be explicit about risks, uncertainty, and assumptions."
-)
-
-_LANGUAGE_STANDARDS: dict[str, str] = {
+_LANGUAGE_DEFAULTS: dict[str, str] = {
     "python": (
-        "## Language standards — Python\n"
-        "- Google-style docstrings; module-level docstring in every file.\n"
-        "- Type hints (Python 3.10+ syntax). Aim for mypy strict compliance.\n"
-        "- Format with ruff; lint with ruff check."
+        "### Python defaults\n"
+        "- Google-style docstrings.\n"
+        "- Type hints (Python 3.10+ syntax) on public APIs.\n"
+        "- Prefer precise typing; avoid untyped public interfaces."
     ),
     "typescript": (
-        "## Language standards — TypeScript\n"
-        "- JSDoc on exported symbols. Strict tsconfig (no `any`).\n"
-        "- Compile-check with tsc --noEmit. Lint with ESLint."
+        "### TypeScript defaults\n"
+        "- JSDoc on exported symbols where helpful.\n"
+        "- Strict TypeScript; avoid `any` (prefer `unknown` + narrowing).\n"
+        "- Preserve null/undefined safety."
     ),
     "javascript": (
-        "## Language standards — JavaScript\n"
-        "- JSDoc on exported symbols.\n"
-        "- Lint with ESLint; format with Prettier."
+        "### JavaScript defaults\n"
+        "- JSDoc on exported symbols and non-trivial params/returns.\n"
+        "- Keep runtime validation clear at module boundaries."
     ),
     "go": (
-        "## Language standards — Go\n"
+        "### Go defaults\n"
         "- Godoc conventions on exported symbols.\n"
-        "- Format with gofmt; lint with golangci-lint."
+        "- Return errors with context; avoid panics in library paths."
     ),
     "rust": (
-        "## Language standards — Rust\n"
+        "### Rust defaults\n"
         "- `///` doc comments on public items.\n"
-        "- Format with cargo fmt; lint with cargo clippy."
+        "- Prefer `Result` propagation over `unwrap`/`expect` outside tests/tools."
     ),
 }
 
@@ -216,107 +216,114 @@ def _step_category(step: str) -> str:
         return "scanning"
     if step in _TASK_GEN_STEPS:
         return "task_generation"
+    if step in _DIAGNOSIS_STEPS:
+        return "diagnosis"
     if step in _MERGE_RESOLVE_STEPS:
         return "merge_resolution"
     if step in _DEP_ANALYSIS_STEPS:
         return "dependency_analysis"
+    if step in _PIPELINE_CLASSIFICATION_STEPS:
+        return "pipeline_classification"
     return "general"
 
 
-_CATEGORY_INSTRUCTIONS: dict[str, str] = {
+
+_WORKDOC_STEP_INSTRUCTIONS: dict[str, str] = {
     "planning": (
-        "Create a scoped, independently testable plan for the following task.\n"
-        "Describe a coherent technical approach. Do not assume infrastructure or\n"
-        "services that are not already present. Planning does not modify\n"
-        "repository code."
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it to understand the task context, then **replace** the `## Plan` section's\n"
+        "placeholder with your full plan. Write the file back when done."
     ),
     "implementation": (
-        "Implement the changes described in the following task.\n"
-        "Complete the entire step fully — partial work leaves the repository in\n"
-        "an inconsistent state.\n"
-        "IMPORTANT: If this change affects user-facing behavior, CLI usage,\n"
-        "configuration, setup instructions, or API surface, you MUST update\n"
-        "README.md and any relevant documentation files to reflect the changes.\n"
-        "This is an explicit instruction, not a suggestion.\n"
-        "If previous review cycle history is shown below, preserve all fixes\n"
-        "applied in prior cycles. Do not revert or reimplement from scratch —\n"
-        "make targeted, incremental fixes only."
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read the `## Plan` section for the implementation guide. As you work,\n"
+        "update the `## Implementation Log` section with completed items,\n"
+        "key decisions, and any deviations from the plan. Write the file back when done."
     ),
     "fix": (
-        "Fix the issues identified in the review findings and/or verification\n"
-        "failures listed below. Do NOT reimplement the task from scratch.\n"
-        "Make only the minimal, targeted changes needed to address each finding.\n"
-        "Preserve all existing work that is correct — do not refactor, reorganize,\n"
-        "or rewrite code that is not directly related to a finding.\n"
-        "If review cycle history is shown, ensure your fixes do not regress issues\n"
-        "resolved in prior cycles."
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read the full document for context on prior work.\n"
+        "Do NOT modify `.workdoc.md` in this step — the orchestrator appends\n"
+        "structured fix-cycle entries to `## Fix Log`."
     ),
     "verification": (
-        "Run the project's test, lint, and type-check commands for the following\n"
-        "task. Do not bypass or skip tests. Report results accurately — do not\n"
-        "mask failures. If you can identify the root cause of a failure, note it\n"
-        "clearly so the next step can address it."
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read the implementation context for what was changed.\n"
+        "Do NOT modify `.workdoc.md` in this step — the orchestrator writes\n"
+        "normalized verification results after classification."
     ),
     "review": (
-        "Review the implementation and list findings.\n"
-        "Each finding must include a severity (critical / high / medium / low).\n"
-        "Evaluate every acceptance criterion explicitly. Provide concrete\n"
-        "evidence tied to files and diffs — do not speculate. Do not down-rank\n"
-        "findings.\n"
-        "SCOPE: Only flag issues introduced or directly affected by THIS task's\n"
-        "changes. Pre-existing issues in unchanged code are out of scope.\n"
-        "Missing project-wide tooling (e.g. linter configs not present before\n"
-        "this task) is out of scope unless the task description requires it.\n"
-        "CONSISTENCY: If previous review cycles are shown below, do not\n"
-        "contradict earlier decisions. Do not reverse an approach you\n"
-        "previously accepted unless new evidence of a critical defect emerged.\n"
-        "Focus on remaining open issues.\n"
-        "CONVERGENCE: Each cycle must move closer to approval. Do not raise\n"
-        "new low-severity or cosmetic findings after the first cycle unless\n"
-        "they concern code changed since the last review.\n"
-        "If the change affects user-facing behavior, CLI usage, configuration,\n"
-        "or API surface, verify that README.md and relevant documentation were\n"
-        "updated. Raise a medium-severity finding if documentation is stale or\n"
-        "missing."
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it for full context on the plan, implementation, and verification.\n"
+        "Do NOT modify the file — the orchestrator will append review findings."
     ),
-    "reporting": (
-        "Produce a summary report for the following task.\n"
-        "Tie conclusions to concrete evidence. Be explicit about risks and\n"
-        "remaining uncertainty."
-    ),
-    "scanning": (
-        "Scan and gather information for the following task.\n"
-        "Report findings with severity and file locations. Provide concrete\n"
-        "evidence only."
-    ),
-    "task_generation": (
-        "Generate subtasks for the following task.\n"
-        "Each subtask must be independently implementable. Include title,\n"
-        "description, task_type, and priority. Cover the full scope without\n"
-        "overlap.\n"
-        "If a plan is provided, decompose it into ordered subtasks and specify\n"
-        "depends_on indices for tasks that must complete before others can start."
-    ),
-    "merge_resolution": "Resolve the merge conflicts in the following files. Both tasks' objectives must be fulfilled in the resolution.",
-    "dependency_analysis": (
-        "Analyze task dependencies for this codebase.\n\n"
-        "First, examine the project structure to understand what already exists:\n"
-        "- Look at the directory layout and key files\n"
-        "- Check existing modules, APIs, and shared code\n"
-        "- Identify what infrastructure is already in place\n\n"
-        "Then, given the pending tasks below, determine which tasks depend on others.\n"
-        "A task B depends on task A if:\n"
-        "- B requires code, APIs, schemas, or artifacts that task A will CREATE (not already existing)\n"
-        "- B imports or builds on modules that task A will introduce\n"
-        "- B cannot produce correct results without task A's changes being present\n\n"
-        "Do NOT create a dependency if:\n"
-        "- Both tasks touch the same area but don't actually need each other's output\n"
-        "- The dependency is based on vague thematic similarity\n"
-        "- The required code/API already exists in the codebase\n\n"
-        "If tasks can safely run in parallel, leave them independent."
-    ),
-    "general": "Follow the task description and report results clearly.",
 }
+
+_WORKDOC_STEP_INSTRUCTIONS_BY_STEP: dict[str, str] = {
+    "analyze": (
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it to understand the task context, then **replace** the `## Analysis` section's\n"
+        "placeholder with your analysis. Write the file back when done."
+    ),
+    "prototype": (
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read the `## Plan` section for context when present. As you work,\n"
+        "update the `## Implementation Log` section with prototype notes:\n"
+        "- hypotheses tested,\n"
+        "- experiments run,\n"
+        "- observed results,\n"
+        "- decision recommendation.\n"
+        "Write the file back when done."
+    ),
+    "diagnose": (
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it to understand the task context, then **replace** the `## Analysis` section's\n"
+        "placeholder with your diagnosis. Write the file back when done."
+    ),
+    "initiative_plan": (
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it to understand the task context, then **replace** the `## Plan` section's\n"
+        "placeholder with your initiative plan. Write the file back when done."
+    ),
+    "profile": (
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it for context before profiling.\n"
+        "Do NOT modify `.workdoc.md` in this step — the orchestrator writes\n"
+        "profiling output into `## Profiling Baseline`."
+    ),
+    "report": (
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it for final context (plan, implementation, verification, review).\n"
+        "Do NOT modify `.workdoc.md` in this step — the orchestrator writes\n"
+        "the report output into `## Final Report`."
+    ),
+}
+
+
+_WORKDOC_SKIP_STEPS = {"plan_refine", "initiative_plan_refine"}  # These steps don't go through the sync path.
+
+
+def _workdoc_prompt_section(step: str) -> str:
+    """Return the workdoc instruction block for a step, or empty string."""
+    if step in _WORKDOC_SKIP_STEPS:
+        return ""
+    step_specific = _WORKDOC_STEP_INSTRUCTIONS_BY_STEP.get(step)
+    if step_specific:
+        return step_specific
+    category = _step_category(step)
+    return _WORKDOC_STEP_INSTRUCTIONS.get(category, "")
+
 
 _DEPENDENCY_POLICY_INSTRUCTIONS: dict[str, dict[str, str]] = {
     "implementation": {
@@ -376,17 +383,31 @@ _DEPENDENCY_POLICY_INSTRUCTIONS: dict[str, dict[str, str]] = {
     },
 }
 
-_CATEGORY_JSON_SCHEMAS: dict[str, str] = {
-    "planning": '{"plan": "string describing the plan"}',
-    "implementation": '{"patch": "unified diff of changes", "summary": "description of changes"}',
-    "verification": '{"status": "pass|fail", "summary": "test results summary"}',
-    "review": '{"findings": [{"severity": "critical|high|medium|low", "category": "string", "summary": "string", "file": "path", "line": 0, "suggested_fix": "string"}]}',
-    "reporting": '{"summary": "detailed report text"}',
-    "scanning": '{"findings": [{"severity": "critical|high|medium|low", "category": "string", "summary": "string", "file": "path"}]}',
-    "task_generation": '{"tasks": [{"title": "string", "description": "string", "task_type": "feature|bugfix|research", "priority": "P0|P1|P2|P3", "depends_on": [0, 1]}]}',
-    "merge_resolution": '{"status": "ok|error", "summary": "string"}',
-    "dependency_analysis": '{"edges": [{"from": "task_id_first", "to": "task_id_depends", "reason": "why"}]}',
-    "general": '{"status": "ok|error", "summary": "string"}',
+_REVIEW_ALLOWED_SEVERITIES = {"critical", "high", "medium", "low"}
+_REVIEW_ALLOWED_CATEGORIES = {
+    "correctness",
+    "reliability",
+    "security",
+    "performance",
+    "api_contract",
+    "documentation",
+    "maintainability",
+    "test_coverage",
+    "other",
+}
+_VERIFY_ALLOWED_STATUSES = {"pass", "fail", "skip", "environment"}
+_VERIFY_ALLOWED_REASON_CODES = {
+    "assertion_failure",
+    "type_error",
+    "lint_violation",
+    "tool_missing",
+    "config_missing",
+    "no_tests",
+    "permission_denied",
+    "resource_limit",
+    "os_incompatibility",
+    "infrastructure",
+    "unknown",
 }
 
 _PLAN_PREAMBLE_PREFIXES: tuple[str, ...] = (
@@ -444,22 +465,68 @@ def _normalize_planning_text(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _load_workdoc_snapshot(task: Task, project_dir: Path) -> str:
+    """Load canonical/worktree workdoc text for run-end summary context."""
+    candidates: list[Path] = []
+    if isinstance(task.metadata, dict):
+        workdoc_path = task.metadata.get("workdoc_path")
+        if isinstance(workdoc_path, str) and workdoc_path.strip():
+            candidates.append(Path(workdoc_path.strip()))
+    candidates.append(project_dir / ".workdoc.md")
+
+    for path in candidates:
+        try:
+            if path.exists() and path.is_file():
+                text = path.read_text(encoding="utf-8").strip()
+                if text:
+                    return text[:30000]
+        except Exception:
+            continue
+    return "(workdoc unavailable)"
+
+
 def build_step_prompt(
     *,
     task: Task,
     step: str,
     attempt: int,
-    is_codex: bool,
     project_languages: list[str] | None = None,
     project_commands: dict[str, dict[str, str]] | None = None,
 ) -> str:
     """Build a prompt from Task fields with step-specific instructions."""
     category = _step_category(step)
-    instruction = _CATEGORY_INSTRUCTIONS[category]
+    pipeline_id = PipelineRegistry().resolve_for_task_type(task.task_type).id
+    if step == "plan_refine":
+        instruction_name = "steps/plan_refine.md"
+    elif step == "initiative_plan_refine":
+        instruction_name = "steps/initiative_plan_refine.md"
+    elif step == "implement" and pipeline_id == "docs":
+        instruction_name = "steps/implement_docs.md"
+    elif step == "analyze":
+        instruction_name = "steps/analyze.md"
+    elif step == "initiative_plan":
+        instruction_name = "steps/initiative_plan.md"
+    elif step == "diagnose":
+        instruction_name = "steps/diagnose.md"
+    elif step == "prototype":
+        instruction_name = "steps/prototype.md"
+    elif step == "profile":
+        instruction_name = "steps/profile.md"
+    elif step == "scan_deps":
+        instruction_name = "steps/scan_deps.md"
+    elif step == "scan_code":
+        instruction_name = "steps/scan_code.md"
+    elif step == "summarize":
+        instruction_name = "steps/summarize.md"
+    else:
+        instruction_name = _STEP_PROMPT_FILES[category]
+    instruction = load_prompt(instruction_name)
+    preamble = load_prompt("preamble.md")
+    guardrails = load_prompt("guardrails.md")
 
     # Special prompt for dependency analysis
     if category == "dependency_analysis" and isinstance(task.metadata, dict):
-        parts = [_PREAMBLE, "", instruction, ""]
+        parts = [preamble, "", instruction, ""]
 
         candidate_tasks = task.metadata.get("candidate_tasks")
         if isinstance(candidate_tasks, list) and candidate_tasks:
@@ -493,35 +560,71 @@ def build_step_prompt(
 
         parts.append("## Rules")
         parts.append("- Only output edges where one task MUST complete before another can start.")
+        parts.append("- If uncertain, omit the edge (prefer false negatives over false positives).")
         parts.append("- Use the exact task IDs from above.")
+        parts.append("- Add concise, concrete reason per edge.")
+        parts.append("- Include confidence (`high` or `medium`) and short evidence reference per edge.")
         parts.append("- If all tasks are independent, return an empty edges array.")
         parts.append("- Do not create circular dependencies.")
 
         parts.append("")
-        parts.append(_GUARDRAILS)
-
-        if not is_codex:
-            schema = _CATEGORY_JSON_SCHEMAS["dependency_analysis"]
-            parts.append("")
-            parts.append(f"Respond with valid JSON matching this schema: {schema}")
+        parts.append(guardrails)
 
         return "\n".join(parts)
 
-    parts = [_PREAMBLE, "", instruction, ""]
+    if category == "pipeline_classification":
+        parts = [preamble, "", instruction, ""]
+        parts.append(f"Task: {task.title}")
+        if task.description:
+            parts.append(f"Description: {task.description}")
+        allowed = task.metadata.get("classification_allowed_pipelines") if isinstance(task.metadata, dict) else None
+        if isinstance(allowed, list) and allowed:
+            cleaned = [str(item).strip() for item in allowed if str(item).strip()]
+            if cleaned:
+                parts.append("")
+                parts.append("## Allowed pipeline IDs")
+                for pipeline_id in cleaned:
+                    parts.append(f"- {pipeline_id}")
+        parts.append("")
+        parts.append(guardrails)
+        return "\n".join(parts)
+
+    parts = [preamble, "", instruction, ""]
 
     parts.append(f"Task: {task.title}")
     if task.description:
         parts.append(f"Description: {task.description}")
     parts.append(f"Type: {task.task_type}")
-    parts.append(f"Priority: {task.priority}")
-    parts.append(f"Step: {step}")
-    if attempt > 1:
+    if attempt > 1 and step != "implement":
         parts.append(f"Attempt: {attempt}")
 
+    # Inject workdoc instructions for steps that use the working document.
+    workdoc_block = _workdoc_prompt_section(step)
+    if workdoc_block:
+        parts.append("")
+        parts.append(workdoc_block)
+
     # Inject outputs from prior pipeline steps.
+    # For implement/implement_fix, rely on the workdoc as the single source of truth.
     step_outputs = task.metadata.get("step_outputs") if isinstance(task.metadata, dict) else None
-    if isinstance(step_outputs, dict) and step_outputs and category in _STEP_OUTPUT_INJECTION:
+    if (
+        isinstance(step_outputs, dict)
+        and step_outputs
+        and category in _STEP_OUTPUT_INJECTION
+        and step not in {"implement", "implement_fix", "initiative_plan"}
+    ):
         inject_keys = _STEP_OUTPUT_INJECTION[category]
+        if step == "report" and task.task_type in {"security", "security_audit"}:
+            # Security audit report should synthesize only scan evidence.
+            inject_keys = ("scan_deps", "scan_code")
+        if step == "generate_tasks" and task.task_type == "initiative_plan":
+            # Initiative planning flow uses initiative_plan output as the only
+            # decomposition source to avoid legacy fallback drift.
+            inject_keys = ("initiative_plan",)
+        elif step == "generate_tasks" and task.task_type in {"security", "security_audit"}:
+            # Security remediation tasks should be derived from scan evidence and
+            # report synthesis, not generic planning outputs.
+            inject_keys = ("report", "scan_deps", "scan_code")
         if inject_keys is None:
             inject_keys = tuple(step_outputs.keys())
         for key in inject_keys:
@@ -531,11 +634,50 @@ def build_step_prompt(
                 parts.append(f"## Output from prior '{key}' step")
                 parts.append(val.strip())
 
-    # Include review findings for fix steps
+    is_fix_step = step == "implement_fix"
     review_findings = task.metadata.get("review_findings") if isinstance(task.metadata, dict) else None
-    if review_findings and isinstance(review_findings, list):
+
+    # Insert a dedicated remediation payload section for implement_fix.
+    has_review_findings = bool(review_findings and isinstance(review_findings, list))
+    has_verify_failure = (
+        isinstance(task.metadata, dict)
+        and isinstance(task.metadata.get("verify_failure"), str)
+        and task.metadata.get("verify_failure", "").strip()
+    )
+    has_verify_output = (
+        isinstance(task.metadata, dict)
+        and isinstance(task.metadata.get("verify_output"), str)
+        and task.metadata.get("verify_output", "").strip()
+    )
+    has_verify_reason_code = (
+        isinstance(task.metadata, dict)
+        and isinstance(task.metadata.get("verify_reason_code"), str)
+        and task.metadata.get("verify_reason_code", "").strip()
+    )
+    retry_guidance = task.metadata.get("retry_guidance") if isinstance(task.metadata, dict) else None
+    requested_changes = task.metadata.get("requested_changes") if isinstance(task.metadata, dict) else None
+    has_previous_error = False
+    has_feedback = False
+    has_requested = False
+    if isinstance(retry_guidance, dict):
+        prev_error = str(retry_guidance.get("previous_error") or "").strip()
+        guidance_text = str(retry_guidance.get("guidance") or "").strip()
+        has_previous_error = bool(prev_error)
+        has_feedback = bool(guidance_text)
+    if isinstance(requested_changes, dict):
+        requested_text = str(requested_changes.get("guidance") or "").strip()
+        has_requested = bool(requested_text)
+
+    if is_fix_step and (
+        has_review_findings or has_verify_failure or has_verify_output or has_verify_reason_code or has_previous_error
+    ):
         parts.append("")
-        parts.append("Review findings to address:")
+        parts.append("## Issues to fix")
+
+    # Include review findings for fix steps.
+    if review_findings and isinstance(review_findings, list) and is_fix_step:
+        parts.append("")
+        parts.append("### Review findings to address")
         for finding in review_findings:
             if isinstance(finding, dict):
                 sev = finding.get("severity", "medium")
@@ -547,7 +689,7 @@ def build_step_prompt(
 
     # Include review history for review and fix steps
     review_history = task.metadata.get("review_history") if isinstance(task.metadata, dict) else None
-    if review_history and isinstance(review_history, list):
+    if review_history and isinstance(review_history, list) and step in {"review", "implement_fix"}:
         parts.append("")
         parts.append("## Previous review cycle history")
         parts.append(
@@ -584,24 +726,35 @@ def build_step_prompt(
 
     # Include plan context for task generation
     plan_for_generation = task.metadata.get("plan_for_generation") if isinstance(task.metadata, dict) else None
-    if plan_for_generation and category == "task_generation":
+    if plan_for_generation and category == "task_generation" and task.task_type != "initiative_plan":
         parts.append("")
         parts.append("## Plan to decompose into subtasks")
         parts.append(str(plan_for_generation))
         parts.append("")
         parts.append(
             "Decompose this plan into ordered subtasks. Use the depends_on field "
-            "(array of task indices) to specify execution order where needed."
+            "(array of task IDs) to specify execution order where needed."
+        )
+
+    if step == "generate_tasks" and task.task_type in {"security", "security_audit"}:
+        parts.append("")
+        parts.append("## Remediation task generation focus")
+        parts.append(
+            "Generate concrete remediation tasks from security findings only. "
+            "Each task should map to one or more specific findings with clear "
+            "scope and expected risk reduction. Use depends_on IDs where order "
+            "is required (e.g., dependency upgrade before follow-up code hardening)."
         )
 
     # Include context for iterative plan refinement.
-    if category == "planning" and step == "plan_refine" and isinstance(task.metadata, dict):
-        base_plan = str(task.metadata.get("plan_refine_base") or "").strip()
-        feedback = str(task.metadata.get("plan_refine_feedback") or "").strip()
-        instructions = str(task.metadata.get("plan_refine_instructions") or "").strip()
+    if category == "planning" and step in {"plan_refine", "initiative_plan_refine"} and isinstance(task.metadata, dict):
+        refine_key = "initiative_plan_refine" if step == "initiative_plan_refine" else "plan_refine"
+        base_plan = str(task.metadata.get(f"{refine_key}_base") or "").strip()
+        feedback = str(task.metadata.get(f"{refine_key}_feedback") or "").strip()
+        instructions = str(task.metadata.get(f"{refine_key}_instructions") or "").strip()
         if base_plan:
             parts.append("")
-            parts.append("## Base plan")
+            parts.append("## Base initiative plan" if step == "initiative_plan_refine" else "## Base plan")
             parts.append(base_plan)
         if feedback:
             parts.append("")
@@ -611,15 +764,14 @@ def build_step_prompt(
             parts.append("")
             parts.append("## Additional instructions")
             parts.append(instructions)
-        if not is_codex:
-            parts.append("")
-            parts.append("Return a full rewritten plan in the `plan` field.")
-    if category == "planning":
         parts.append("")
-        parts.append("## Planning output requirements")
-        parts.append("- Return only the final plan body.")
-        parts.append("- Do not include prefaces, tool logs, or follow-up questions.")
-        parts.append("- For refinements, return the full rewritten plan, not just a change summary.")
+        if step == "initiative_plan_refine":
+            parts.append("Return a full rewritten initiative plan in the `initiative_plan` field.")
+        else:
+            parts.append("Return a full rewritten plan in the `plan` field.")
+    if step in {"plan", "plan_refine"}:
+        parts.append("")
+        parts.append(load_prompt("partials/plan_output_format.md"))
 
     # Include merge conflict context for resolve_merge step
     if category == "merge_resolution" and isinstance(task.metadata, dict):
@@ -638,52 +790,84 @@ def build_step_prompt(
             for info in other_tasks:
                 parts.append(str(info))
 
+        current_objective = task.metadata.get("merge_current_objective")
+        if isinstance(current_objective, str) and current_objective.strip():
+            parts.append("")
+            parts.append("Current task objective context:")
+            parts.append(current_objective.strip())
+
+        other_objectives = task.metadata.get("merge_other_objectives")
+        if isinstance(other_objectives, list) and other_objectives:
+            parts.append("")
+            parts.append("Other task objective context (must also be preserved):")
+            for info in other_objectives:
+                if isinstance(info, str) and info.strip():
+                    parts.append(info.strip())
+
         parts.append("")
         parts.append("Edit the conflicted files to resolve all conflicts. "
                       "Ensure BOTH this task's and the other task(s)' objectives are preserved.")
 
     # Include verify failure context for fix steps.
-    if isinstance(task.metadata, dict) and category in ("implementation", "fix"):
+    if isinstance(task.metadata, dict) and is_fix_step:
         verify_failure = task.metadata.get("verify_failure")
         if verify_failure:
             parts.append("")
-            parts.append("## Verification failure to fix")
+            parts.append("### Verification failure")
             parts.append(f"  {verify_failure}")
+        verify_reason_code = task.metadata.get("verify_reason_code")
+        if isinstance(verify_reason_code, str) and verify_reason_code.strip():
+            parts.append("")
+            parts.append("### Verification reason code")
+            parts.append(f"  {verify_reason_code.strip()}")
         verify_output = task.metadata.get("verify_output")
         if isinstance(verify_output, str) and verify_output.strip():
             parts.append("")
-            parts.append("## Verification output (test/lint/typecheck logs)")
+            parts.append("### Verification output (test/lint/typecheck logs)")
             parts.append(verify_output.strip())
 
-    # Inject human feedback from previous review or retry.
-    if isinstance(task.metadata, dict):
+    # Inject previous attempt error as a concrete issue to fix.
+    if isinstance(task.metadata, dict) and is_fix_step:
         retry_guidance = task.metadata.get("retry_guidance")
         if isinstance(retry_guidance, dict):
             prev_error = str(retry_guidance.get("previous_error") or "").strip()
             if prev_error:
                 parts.append("")
-                parts.append("## Previous attempt error")
+                parts.append("### Previous attempt error")
                 parts.append(prev_error)
+
+    # Inject guidance/adjustments from previous review or retry.
+    if isinstance(task.metadata, dict):
+        retry_guidance = task.metadata.get("retry_guidance")
+        requested_changes = task.metadata.get("requested_changes")
+        if is_fix_step and (
+            (isinstance(retry_guidance, dict) and str(retry_guidance.get("guidance") or "").strip())
+            or (isinstance(requested_changes, dict) and str(requested_changes.get("guidance") or "").strip())
+        ):
+            parts.append("")
+            parts.append("## Requested adjustments")
+        if isinstance(retry_guidance, dict) and is_fix_step:
             text = str(retry_guidance.get("guidance") or "").strip()
             if text:
                 parts.append("")
-                parts.append("## Feedback from previous attempt")
+                parts.append("### Feedback from previous attempt")
                 parts.append(text)
-        requested_changes = task.metadata.get("requested_changes")
-        if isinstance(requested_changes, dict):
+        if isinstance(requested_changes, dict) and is_fix_step:
             text = str(requested_changes.get("guidance") or "").strip()
             if text:
                 parts.append("")
-                parts.append("## Requested changes from reviewer")
+                parts.append("### Requested changes from reviewer")
                 parts.append(text)
 
-    # Inject language standards for implementation and review steps
-    if project_languages and category in ("implementation", "fix", "review"):
-        for lang in project_languages:
-            lang_block = _LANGUAGE_STANDARDS.get(lang)
-            if lang_block:
-                parts.append("")
-                parts.append(lang_block)
+    # Inject style guidelines and language defaults for implementation and review steps
+    if category in ("implementation", "fix", "review"):
+        parts.append("")
+        parts.append(load_prompt("style.md"))
+        if project_languages:
+            for lang in project_languages:
+                lang_block = _LANGUAGE_DEFAULTS.get(lang)
+                if lang_block:
+                    parts.append(lang_block)
 
     # Inject project commands for implementation and verification steps
     if project_commands and project_languages and category in ("implementation", "fix", "verification"):
@@ -700,13 +884,7 @@ def build_step_prompt(
         parts.append(dep_instruction)
 
     parts.append("")
-    parts.append(_GUARDRAILS)
-
-    if not is_codex:
-        # Add JSON schema instruction for ollama
-        schema = _CATEGORY_JSON_SCHEMAS.get(category, _CATEGORY_JSON_SCHEMAS["general"])
-        parts.append("")
-        parts.append(f"Respond with valid JSON matching this schema: {schema}")
+    parts.append(guardrails)
 
     return "\n".join(parts)
 
@@ -787,6 +965,79 @@ def _extract_json_value(text: str) -> Any | None:
     except json.JSONDecodeError:
         return None
     return value if isinstance(value, (dict, list)) else None
+
+
+def _normalize_review_findings(raw_findings: Any) -> list[dict[str, Any]]:
+    """Normalize raw findings to a stable actionable schema."""
+    if not isinstance(raw_findings, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in raw_findings:
+        if not isinstance(item, dict):
+            continue
+
+        summary = str(item.get("summary") or "").strip()
+        if not summary:
+            continue
+
+        severity = str(item.get("severity") or "medium").strip().lower()
+        if severity == "info":
+            continue
+        if severity not in _REVIEW_ALLOWED_SEVERITIES:
+            severity = "medium"
+
+        category = str(item.get("category") or "other").strip().lower().replace(" ", "_")
+        if category not in _REVIEW_ALLOWED_CATEGORIES:
+            category = "other"
+
+        file_raw = item.get("file")
+        file_path = str(file_raw).strip() if file_raw is not None else ""
+
+        line_raw = item.get("line")
+        line_num: int | None
+        try:
+            line_num = int(line_raw)
+            if line_num <= 0:
+                line_num = None
+        except (TypeError, ValueError):
+            line_num = None
+
+        suggested_fix = str(item.get("suggested_fix") or "").strip()
+
+        status = str(item.get("status") or "open").strip().lower()
+        if status in {"fixed", "closed", "done"}:
+            status = "resolved"
+        elif status not in {"open", "resolved"}:
+            status = "open"
+
+        normalized.append(
+            {
+                "severity": severity,
+                "category": category,
+                "summary": summary,
+                "file": file_path,
+                "line": line_num,
+                "suggested_fix": suggested_fix,
+                "status": status,
+            }
+        )
+    return normalized
+
+
+def _normalize_verify_reason_code(value: Any) -> str:
+    reason = str(value or "").strip().lower()
+    return reason if reason in _VERIFY_ALLOWED_REASON_CODES else "unknown"
+
+
+def _format_verify_summary(summary: Any, reason_code: str) -> str | None:
+    text = str(summary).strip() if summary is not None else ""
+    if not text and reason_code == "unknown":
+        return None
+    if not text:
+        return f"[reason_code={reason_code}]"
+    if reason_code == "unknown":
+        return text
+    return f"{text} [reason_code={reason_code}]"
 
 
 class LiveWorkerAdapter:
@@ -876,6 +1127,14 @@ class LiveWorkerAdapter:
             lang: cmds for lang, cmds in raw_commands.items()
             if isinstance(cmds, dict)
         } or None
+        # Overlay per-task project commands (language-level replace)
+        task_pc = task.project_commands
+        if isinstance(task_pc, dict) and task_pc:
+            if project_commands is None:
+                project_commands = {}
+            for lang, cmds in task_pc.items():
+                if isinstance(cmds, dict) and cmds:
+                    project_commands[lang] = dict(cmds)
         # Fill in defaults for detected languages with no configured commands
         if langs:
             if project_commands is None:
@@ -889,7 +1148,7 @@ class LiveWorkerAdapter:
                 project_commands = None
         prompt = build_step_prompt(
             task=task, step=step, attempt=attempt,
-            is_codex=(spec.type in {"codex", "claude"}), project_languages=langs or None,
+            project_languages=langs or None,
             project_commands=project_commands,
         )
 
@@ -941,18 +1200,19 @@ class LiveWorkerAdapter:
             self._container.tasks.upsert(task)
 
         # 4. Map result
-        step_result = self._map_result(result, spec, step)
+        step_result = self._map_result(result, spec, step, task)
+        raw_json = _extract_json(result.response_text) if result.response_text else None
+        raw_is_json = isinstance(raw_json, dict)
 
-        # 5. For codex/claude verification steps that fell through to default "ok"
+        # 5. For verification steps that fell through to default "ok"
         #    (no structured summary), run a lightweight LLM formatter to parse the
         #    freeform output into pass/fail.
         category = _step_category(step)
         if (
             category == "verification"
-            and spec.type in {"codex", "claude"}
             and result.response_text
             and step_result.status == "ok"
-            and step_result.summary is None
+            and not raw_is_json
         ):
             step_result = self._parse_verify_output(
                 spec=spec,
@@ -961,14 +1221,14 @@ class LiveWorkerAdapter:
                 task=task,
             )
 
-        # 6. For codex/claude review steps that fell through with no findings,
+        # 6. For review steps that fell through with no findings,
         #    run a lightweight LLM formatter to extract structured findings.
         if (
             category == "review"
-            and spec.type in {"codex", "claude"}
             and result.response_text
             and step_result.status == "ok"
             and step_result.findings is None
+            and not raw_is_json
         ):
             step_result = self._parse_review_output(
                 spec=spec,
@@ -976,14 +1236,14 @@ class LiveWorkerAdapter:
                 project_dir=project_dir,
             )
 
-        # 7. For codex/claude task generation steps that fell through with no
+        # 7. For task generation steps that fell through with no
         #    generated_tasks, run a lightweight LLM formatter to extract them.
         if (
             category == "task_generation"
-            and spec.type in {"codex", "claude"}
             and result.response_text
             and step_result.status == "ok"
             and step_result.generated_tasks is None
+            and not raw_is_json
         ):
             step_result = self._parse_task_generation_output(
                 spec=spec,
@@ -1006,29 +1266,8 @@ class LiveWorkerAdapter:
         task: Task,
     ) -> StepResult:
         """Use a short LLM call to classify freeform verification output."""
-        formatter_prompt = (
-            "You are a CI results classifier.\n\n"
-            "Given the verification output below, respond with ONLY a JSON object:\n"
-            '{"status": "pass|fail|skip|environment", "summary": "one-line summary of results"}\n\n'
-            "Rules:\n"
-            '- Use "fail" if a test, lint, or type-check command ran and '
-            "produced failures (non-zero exit code from an actual check run).\n"
-            '- Use "skip" if a command was not found, a tool is not installed, '
-            "no test files exist, or a config file is missing (e.g. missing ESLint "
-            "config, no pytest found). These are pre-existing environment gaps, "
-            "not test failures.\n"
-            '- Use "environment" if tests ran but failures are caused by OS, sandbox, '
-            "permission, or infrastructure constraints — not by code logic. Examples: "
-            "PermissionError on semaphores/sockets, resource limits, Docker/container "
-            "restrictions, missing system libraries. These cannot be fixed by changing "
-            "application code.\n"
-            '- Use "pass" if every check that ran succeeded.\n'
-            '- If some checks passed and others were skipped (tool not found), '
-            'use "pass" — skipped checks are not failures.\n\n'
-            "Verification output:\n"
-            "---\n"
-            f"{response_text[:8000]}\n"
-            "---"
+        formatter_prompt = load_prompt("formatters/verify_output.md").format(
+            output=response_text[:8000],
         )
 
         fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
@@ -1045,16 +1284,21 @@ class LiveWorkerAdapter:
                 progress_path=progress_path,
             )
         except Exception:
-            logger.debug("Verify formatter call failed; returning default ok")
-            return StepResult(status="ok", summary=response_text[:500])
+            logger.debug("Verify formatter call failed; returning error")
+            return StepResult(status="error", summary="Verification output formatter failed")
 
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
             logger.debug("Verify formatter returned unparseable output")
-            return StepResult(status="ok", summary=response_text[:500])
+            return StepResult(status="error", summary="Verification output formatter returned invalid JSON")
 
         status_val = str(parsed.get("status", "")).lower().strip()
-        summary = parsed.get("summary")
+        if status_val not in _VERIFY_ALLOWED_STATUSES:
+            status_val = "fail"
+        reason_code = _normalize_verify_reason_code(parsed.get("reason_code"))
+        summary = _format_verify_summary(parsed.get("summary"), reason_code)
+        if isinstance(task.metadata, dict):
+            task.metadata["verify_reason_code"] = reason_code
         if status_val == "fail":
             return StepResult(status="error", summary=str(summary) if summary else response_text[:500])
         if status_val == "environment":
@@ -1076,28 +1320,8 @@ class LiveWorkerAdapter:
         project_dir: Path,
     ) -> StepResult:
         """Use a short LLM call to extract structured findings from freeform review output."""
-        formatter_prompt = (
-            "You are a code-review findings extractor.\n\n"
-            "Given the review output below, respond with ONLY a JSON object:\n"
-            '{"findings": [{"severity": "critical|high|medium|low|info", '
-            '"category": "bug|security|performance|style|maintainability|other", '
-            '"summary": "one-line description", '
-            '"file": "path/to/file or empty string", '
-            '"line": 0, '
-            '"suggested_fix": "brief suggestion or empty string"}]}\n\n'
-            "Rules:\n"
-            "- Only include findings that represent actual issues requiring code changes.\n"
-            "- EXCLUDE positive observations, praise, informational notes, and\n"
-            "  intentional/documented design decisions that need no action.\n"
-            "- If a finding is labeled 'positive', 'by design', or explicitly states\n"
-            "  no change is needed, drop it.\n"
-            "- Return an empty findings array if the review found no actionable issues.\n"
-            "- Each finding must have at least severity, category, and summary.\n"
-            "- Use the exact severity/category values listed above.\n\n"
-            "Review output:\n"
-            "---\n"
-            f"{response_text[:8000]}\n"
-            "---"
+        formatter_prompt = load_prompt("formatters/review_output.md").format(
+            output=response_text[:8000],
         )
 
         fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
@@ -1114,19 +1338,19 @@ class LiveWorkerAdapter:
                 progress_path=progress_path,
             )
         except Exception:
-            logger.debug("Review formatter call failed; returning default ok")
-            return StepResult(status="ok", summary=response_text[:500])
+            logger.debug("Review formatter call failed; returning error")
+            return StepResult(status="error", summary="Review output formatter failed")
 
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
             logger.debug("Review formatter returned unparseable output")
-            return StepResult(status="ok", summary=response_text[:500])
+            return StepResult(status="error", summary="Review output formatter returned invalid JSON")
 
         findings = parsed.get("findings")
         if isinstance(findings, list):
-            return StepResult(status="ok", findings=findings)
+            return StepResult(status="ok", findings=_normalize_review_findings(findings))
 
-        return StepResult(status="ok", summary=response_text[:500])
+        return StepResult(status="error", summary="Review output formatter returned no findings field")
 
     # ------------------------------------------------------------------
     # Task-generation-output formatter (codex / claude)
@@ -1140,22 +1364,8 @@ class LiveWorkerAdapter:
         project_dir: Path,
     ) -> StepResult:
         """Use a short LLM call to extract structured tasks from freeform generation output."""
-        formatter_prompt = (
-            "You are a task-list extractor.\n\n"
-            "Given the task generation output below, respond with ONLY a JSON object:\n"
-            '{"tasks": [{"title": "string", "description": "string", '
-            '"task_type": "feature|bugfix|research|chore", '
-            '"priority": "P0|P1|P2|P3", '
-            '"depends_on": []}]}\n\n'
-            "Rules:\n"
-            "- Extract every distinct task/subtask mentioned in the output.\n"
-            "- Each task must have at least title and description.\n"
-            "- Use depends_on as zero-based indices into the tasks array to express ordering.\n"
-            "- Return an empty tasks array only if the output truly contains no tasks.\n\n"
-            "Task generation output:\n"
-            "---\n"
-            f"{response_text[:12000]}\n"
-            "---"
+        formatter_prompt = load_prompt("formatters/task_generation_output.md").format(
+            output=response_text[:12000],
         )
 
         fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
@@ -1172,13 +1382,13 @@ class LiveWorkerAdapter:
                 progress_path=progress_path,
             )
         except Exception:
-            logger.debug("Task generation formatter call failed; returning default ok")
-            return StepResult(status="ok", summary=response_text[:500])
+            logger.debug("Task generation formatter call failed; returning error")
+            return StepResult(status="error", summary="Task generation output formatter failed")
 
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
             logger.debug("Task generation formatter returned unparseable output")
-            return StepResult(status="ok", summary=response_text[:500])
+            return StepResult(status="error", summary="Task generation output formatter returned invalid JSON")
 
         tasks = (
             parsed.get("tasks")
@@ -1188,9 +1398,9 @@ class LiveWorkerAdapter:
         if isinstance(tasks, list):
             return StepResult(status="ok", generated_tasks=tasks)
 
-        return StepResult(status="ok", summary=response_text[:500])
+        return StepResult(status="error", summary="Task generation output formatter returned no tasks list")
 
-    def _map_result(self, result: WorkerRunResult, spec: Any, step: str) -> StepResult:
+    def _map_result(self, result: WorkerRunResult, spec: Any, step: str, task: Task) -> StepResult:
         if result.human_blocking_issues:
             return StepResult(
                 status="human_blocked",
@@ -1206,7 +1416,7 @@ class LiveWorkerAdapter:
                         tail = err_text[-500:]
                         summary = f"{summary}\n{tail}"
                 except Exception:
-                    pass
+                    logger.debug("Failed reading stderr for no-heartbeat worker result", exc_info=True)
             return StepResult(status="error", summary=summary)
         if result.timed_out:
             summary = "Worker timed out"
@@ -1217,7 +1427,7 @@ class LiveWorkerAdapter:
                         tail = err_text[-500:]
                         summary = f"{summary}\n{tail}"
                 except Exception:
-                    pass
+                    logger.debug("Failed reading stderr for timed-out worker result", exc_info=True)
             return StepResult(status="error", summary=summary)
         if result.exit_code != 0:
             summary = f"Worker exited with code {result.exit_code}"
@@ -1228,21 +1438,64 @@ class LiveWorkerAdapter:
                     if err_text:
                         summary = err_text[:500]
                 except Exception:
-                    pass
+                    logger.debug("Failed reading stderr for non-zero worker exit", exc_info=True)
             return StepResult(status="error", summary=summary)
 
-        # Dependency analysis: always parse response text (both codex and ollama)
+        # Dependency analysis: always parse response text.
         category = _step_category(step)
         if category == "dependency_analysis" and result.response_text:
             return self._parse_dep_analysis_output(result.response_text)
 
+        if category == "verification" and result.response_text:
+            parsed = _extract_json(result.response_text)
+            if isinstance(parsed, dict):
+                status_val = str(parsed.get("status", "")).lower().strip()
+                if status_val not in _VERIFY_ALLOWED_STATUSES:
+                    return StepResult(status="error", summary="Verification output JSON has invalid status")
+                reason_code = _normalize_verify_reason_code(parsed.get("reason_code"))
+                summary = _format_verify_summary(parsed.get("summary"), reason_code)
+                if isinstance(task.metadata, dict):
+                    task.metadata["verify_reason_code"] = reason_code
+                if status_val == "fail":
+                    return StepResult(status="error", summary=str(summary) if summary else "Verification failed")
+                if status_val == "environment":
+                    note = str(summary) if summary else "Verification blocked by environment constraints"
+                    if isinstance(task.metadata, dict):
+                        task.metadata["verify_environment_note"] = note
+                    return StepResult(status="ok", summary=note)
+                return StepResult(status="ok", summary=str(summary) if summary else "")
+
+        if category == "review" and result.response_text:
+            parsed = _extract_json(result.response_text)
+            if isinstance(parsed, dict):
+                findings = parsed.get("findings")
+                if isinstance(findings, list):
+                    return StepResult(status="ok", findings=_normalize_review_findings(findings))
+                return StepResult(status="error", summary="Review output JSON missing findings array")
+
+        if category == "pipeline_classification" and result.response_text:
+            parsed = _extract_json_value(result.response_text)
+            if isinstance(parsed, dict):
+                return StepResult(status="ok", summary=json.dumps(parsed))
+            return StepResult(status="error", summary="Pipeline classification output must be valid JSON")
+
         if category == "planning" and result.response_text:
             parsed = _extract_json(result.response_text)
             if isinstance(parsed, dict):
-                summary = parsed.get("plan") or parsed.get("summary")
+                summary = parsed.get("analysis") if step == "analyze" else None
+                summary = summary or (parsed.get("initiative_plan") if step in {"initiative_plan", "initiative_plan_refine"} else None)
+                summary = summary or parsed.get("plan") or parsed.get("summary")
                 if summary:
                     return StepResult(status="ok", summary=_normalize_planning_text(str(summary))[:20000])
             return StepResult(status="ok", summary=_normalize_planning_text(result.response_text)[:20000])
+
+        if category == "diagnosis" and result.response_text:
+            parsed = _extract_json(result.response_text)
+            if isinstance(parsed, dict):
+                summary = parsed.get("diagnosis") or parsed.get("summary")
+                if summary:
+                    return StepResult(status="ok", summary=str(summary).strip()[:20000])
+            return StepResult(status="ok", summary=result.response_text.strip()[:20000])
 
         if category == "task_generation" and result.response_text:
             parsed_value = _extract_json_value(result.response_text)
@@ -1257,7 +1510,7 @@ class LiveWorkerAdapter:
                 if isinstance(tasks, list):
                     return StepResult(status="ok", generated_tasks=tasks)
 
-        # Parse structured output for ollama
+        # Parse remaining structured output for ollama-specific categories.
         if spec.type == "ollama" and result.response_text:
             return self._parse_ollama_output(result.response_text, step)
 
@@ -1282,6 +1535,8 @@ class LiveWorkerAdapter:
         if category == "review" or category == "scanning":
             findings = parsed.get("findings")
             if isinstance(findings, list):
+                if category == "review":
+                    return StepResult(status="ok", findings=_normalize_review_findings(findings))
                 return StepResult(status="ok", findings=findings)
 
         if category == "task_generation":
@@ -1295,8 +1550,8 @@ class LiveWorkerAdapter:
             mapped_status = "ok" if status in ("ok", "pass") else "error"
             return StepResult(status=mapped_status, summary=summary)
 
-        # For planning, implementation, reporting — extract summary
-        summary = parsed.get("summary") or parsed.get("plan")
+        # For planning, implementation, reporting, diagnosis — extract summary
+        summary = parsed.get("summary") or parsed.get("plan") or parsed.get("initiative_plan") or parsed.get("diagnosis")
         return StepResult(status="ok", summary=str(summary) if summary else None)
 
     # ------------------------------------------------------------------
@@ -1341,39 +1596,25 @@ class LiveWorkerAdapter:
             if result.returncode == 0 and result.stdout.strip():
                 diff_stat = result.stdout.strip()[:4000]
         except Exception:
-            pass
+            logger.debug("Failed collecting git diff stat for run summary", exc_info=True)
 
-        parts = [
-            "You are a delivery summary writer.",
-            "",
-            f"Task: {task.title}",
-        ]
-        if task.description:
-            parts.append(f"Description: {task.description[:500]}")
-        parts.append(f"Type: {task.task_type}")
-        parts.append("")
-        parts.append("## Execution log")
-        parts.extend(step_lines or ["(no steps recorded)"])
+        description_section = f"Description: {task.description[:500]}\n" if task.description else ""
+        execution_log = "\n".join(step_lines) if step_lines else "(no steps recorded)"
+        diff_section = f"\n## Git diff stat\n{diff_stat}" if diff_stat else ""
+        error_section = f"\n## Error: {task.error}" if task.error else ""
+        workdoc_snapshot = _load_workdoc_snapshot(task, project_dir)
+        run_status = str(run.status or "unknown")
 
-        if diff_stat:
-            parts.append("")
-            parts.append("## Git diff stat")
-            parts.append(diff_stat)
-
-        if task.error:
-            parts.append("")
-            parts.append(f"## Error: {task.error}")
-
-        parts.append("")
-        parts.append(
-            "Given the execution log and diff stat above, produce a concise summary "
-            "of what was implemented, what tests/checks passed or failed, and what "
-            "requires human attention. You have access to the project files — read "
-            "specific changed files if you need more detail about the implementation. "
-            'Respond with ONLY a JSON object: {"summary": "markdown text"}'
+        prompt = load_prompt("formatters/summarize.md").format(
+            task_title=task.title,
+            description_section=description_section,
+            task_type=task.task_type,
+            run_status=run_status,
+            workdoc_snapshot=workdoc_snapshot,
+            execution_log=execution_log,
+            diff_section=diff_section,
+            error_section=error_section,
         )
-
-        prompt = "\n".join(parts)
 
         fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
         progress_path = fmt_run_dir / "progress.json"

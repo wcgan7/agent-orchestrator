@@ -1,15 +1,15 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import { buildApiUrl, buildAuthHeaders } from './api'
 import { ImportJobPanel } from './components/AppPanels/ImportJobPanel'
-import { QuickActionDetailPanel } from './components/AppPanels/QuickActionDetailPanel'
+import { TerminalPanel } from './components/AppPanels/TerminalPanel'
 import HITLModeSelector from './components/HITLModeSelector/HITLModeSelector'
 import Markdown from 'react-markdown'
 import { humanizeLabel } from './ui/labels'
 import './styles/orchestrator.css'
 
 type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
-type CreateTab = 'task' | 'import' | 'quick'
-type TaskDetailTab = 'overview' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
+type CreateTab = 'task' | 'import' | 'terminal'
+type TaskDetailTab = 'overview' | 'plan' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
 type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition'
 
 type TaskRecord = {
@@ -37,8 +37,17 @@ type TaskRecord = {
   quality_gate?: Record<string, number>
   metadata?: Record<string, unknown>
   human_blocking_issues?: HumanBlockingIssue[]
+  human_review_actions?: ReviewAction[]
   error?: string | null
   execution_summary?: ExecutionSummary | null
+  project_commands?: Record<string, Record<string, string>> | null
+}
+
+type ReviewAction = {
+  action: 'approve' | 'request_changes' | 'retry'
+  ts: string
+  guidance: string
+  previous_error?: string
 }
 
 type ExecutionStepSummary = {
@@ -47,6 +56,7 @@ type ExecutionStepSummary = {
   summary: string
   open_counts?: Record<string, number>
   commit?: string
+  duration_seconds?: number | null
 }
 
 type ExecutionSummary = {
@@ -55,6 +65,7 @@ type ExecutionSummary = {
   run_summary: string
   started_at: string | null
   finished_at: string | null
+  duration_seconds?: number | null
   steps: ExecutionStepSummary[]
 }
 
@@ -76,6 +87,9 @@ type PreviewEdge = {
 type PrdPreview = {
   nodes: PreviewNode[]
   edges: PreviewEdge[]
+  chunk_count?: number
+  strategy?: string
+  ambiguity_warnings?: string[]
 }
 
 type OrchestratorStatus = {
@@ -126,19 +140,6 @@ type PinnedProjectRef = {
   id: string
   path: string
   pinned_at?: string
-}
-
-type QuickActionRecord = {
-  id: string
-  prompt: string
-  status: string
-  started_at?: string | null
-  finished_at?: string | null
-  result_summary?: string | null
-  promoted_task_id?: string | null
-  kind?: string | null
-  command?: string | null
-  exit_code?: number | null
 }
 
 type TaskLogsSnapshot = {
@@ -336,14 +337,12 @@ type TaskPlanDocument = {
   committed_revision_id?: string | null
   revisions: PlanRevisionRecord[]
   active_refine_job?: PlanRefineJobRecord | null
-  plans: Array<{ step?: string | null; ts?: string | null; content?: string }>
-  latest?: { step?: string | null; ts?: string | null; content?: string } | null
 }
 
 const STORAGE_PROJECT = 'agent-orchestrator-project'
 const STORAGE_ROUTE = 'agent-orchestrator-route'
 const ADD_REPO_VALUE = '__add_new_repo__'
-const WS_RELOAD_CHANNELS = new Set(['tasks', 'queue', 'agents', 'review', 'quick_actions', 'notifications'])
+const WS_RELOAD_CHANNELS = new Set(['tasks', 'queue', 'agents', 'review', 'terminal', 'notifications'])
 const LOG_CHUNK_CHARS = 200_000
 const LOG_HISTORY_MAX_CHARS = 5_000_000
 const LOG_NEAR_BOTTOM_PX = 120
@@ -381,8 +380,9 @@ const ROUTES: Array<{ key: RouteKey; label: string }> = [
 ]
 
 const TASK_TYPE_OPTIONS = [
+  'auto',
   'feature',
-  'plan',
+  'initiative_plan',
   'bug',
   'refactor',
   'research',
@@ -391,6 +391,10 @@ const TASK_TYPE_OPTIONS = [
   'security',
   'performance',
 ]
+
+function isPlanningTaskType(taskType: string | undefined | null): boolean {
+  return taskType === 'initiative_plan' || taskType === 'plan_only' || taskType === 'plan'
+}
 
 const DEFAULT_COLLABORATION_MODES: CollaborationMode[] = [
   { mode: 'autopilot', display_name: 'Autopilot', description: 'Agents run freely.' },
@@ -966,21 +970,12 @@ function normalizeTaskPlan(payload: unknown): TaskPlanDocument {
     : {}
   const revisionsRaw = Array.isArray(root.revisions) ? root.revisions : []
   const revisions = revisionsRaw.map((item) => normalizePlanRevision(item)).filter((item): item is PlanRevisionRecord => item !== null)
-  const plansRaw = Array.isArray(root.plans) ? root.plans : []
-  const plans = plansRaw
-    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
-    .map((item) => ({ step: item.step ? String(item.step) : null, ts: item.ts ? String(item.ts) : null, content: item.content ? String(item.content) : '' }))
-  const latestRaw = root.latest && typeof root.latest === 'object' && !Array.isArray(root.latest)
-    ? root.latest as Record<string, unknown>
-    : null
   return {
     task_id: String(root.task_id || ''),
     latest_revision_id: root.latest_revision_id ? String(root.latest_revision_id) : null,
     committed_revision_id: root.committed_revision_id ? String(root.committed_revision_id) : null,
     revisions,
     active_refine_job: normalizePlanRefineJob(root.active_refine_job || null),
-    plans,
-    latest: latestRaw ? { step: latestRaw.step ? String(latestRaw.step) : null, ts: latestRaw.ts ? String(latestRaw.ts) : null, content: latestRaw.content ? String(latestRaw.content) : '' } : null,
   }
 }
 
@@ -999,6 +994,17 @@ function toLocaleTimestamp(value?: string | null): string {
   const parsed = new Date(value)
   if (Number.isNaN(parsed.getTime())) return value
   return parsed.toLocaleString()
+}
+
+function formatDuration(seconds: number | null | undefined): string {
+  if (seconds == null || seconds < 0) return ''
+  if (seconds < 60) return `${Math.round(seconds)}s`
+  const m = Math.floor(seconds / 60)
+  const s = Math.round(seconds % 60)
+  if (m < 60) return s > 0 ? `${m}m ${s}s` : `${m}m`
+  const h = Math.floor(m / 60)
+  const rm = m % 60
+  return rm > 0 ? `${h}h ${rm}m` : `${h}h`
 }
 
 function inferProjectId(projectDir: string): string {
@@ -1292,7 +1298,6 @@ export default function App() {
   const [workerHealthRefreshing, setWorkerHealthRefreshing] = useState(false)
   const [projects, setProjects] = useState<ProjectRef[]>([])
   const [pinnedProjects, setPinnedProjects] = useState<PinnedProjectRef[]>([])
-  const [quickActions, setQuickActions] = useState<QuickActionRecord[]>([])
   const [executionBatches, setExecutionBatches] = useState<string[][]>([])
   const [executionCompleted, setExecutionCompleted] = useState<string[]>([])
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null)
@@ -1318,6 +1323,7 @@ export default function App() {
   const [planJobLoading, setPlanJobLoading] = useState(false)
   const [planRefineStdout, setPlanRefineStdout] = useState('')
   const [planningWorkerTab, setPlanningWorkerTab] = useState<'plan' | 'manual'>('plan')
+  const [planTabMode, setPlanTabMode] = useState<'view' | 'edit' | 'refine'>('view')
   const [planSavingManual, setPlanSavingManual] = useState(false)
   const [planCommitting, setPlanCommitting] = useState(false)
   const [planGenerateLoading, setPlanGenerateLoading] = useState(false)
@@ -1352,10 +1358,17 @@ export default function App() {
   const [editTaskApprovalMode, setEditTaskApprovalMode] = useState<'human_review' | 'auto_approve'>('human_review')
   const [editTaskHitlMode, setEditTaskHitlMode] = useState('autopilot')
   const [editTaskDependencyPolicy, setEditTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
+  const [editTaskProjectCommands, setEditTaskProjectCommands] = useState('')
 
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskDescription, setNewTaskDescription] = useState('')
-  const [newTaskType, setNewTaskType] = useState('feature')
+  const [newTaskType, setNewTaskType] = useState('auto')
+  const [autoPipelineNeedsManualSelection, setAutoPipelineNeedsManualSelection] = useState(false)
+  const [pendingPipelineClassification, setPendingPipelineClassification] = useState<{
+    pipeline_id: string
+    confidence: 'high' | 'low'
+    reason: string
+  } | null>(null)
   const [newTaskPriority, setNewTaskPriority] = useState('P2')
   const [newTaskLabels, setNewTaskLabels] = useState('')
   const [newTaskBlockedBy, setNewTaskBlockedBy] = useState('')
@@ -1365,6 +1378,7 @@ export default function App() {
   const [newTaskParentId, setNewTaskParentId] = useState('')
   const [newTaskPipelineTemplate, setNewTaskPipelineTemplate] = useState('')
   const [newTaskMetadata, setNewTaskMetadata] = useState('')
+  const [newTaskProjectCommands, setNewTaskProjectCommands] = useState('')
   const [newTaskWorkerModel, setNewTaskWorkerModel] = useState('')
   const [collaborationModes, setCollaborationModes] = useState<CollaborationMode[]>(DEFAULT_COLLABORATION_MODES)
   const [newDependencyId, setNewDependencyId] = useState('')
@@ -1419,19 +1433,9 @@ export default function App() {
   const [selectedImportJobError, setSelectedImportJobError] = useState('')
   const [selectedImportJobErrorAt, setSelectedImportJobErrorAt] = useState('')
 
-  const [quickPrompt, setQuickPrompt] = useState('')
-  const [quickTimeout, setQuickTimeout] = useState('')
-  const [selectedQuickActionId, setSelectedQuickActionId] = useState('')
-  const [selectedQuickActionDetail, setSelectedQuickActionDetail] = useState<QuickActionRecord | null>(null)
-  const [selectedQuickActionLoading, setSelectedQuickActionLoading] = useState(false)
-  const [selectedQuickActionError, setSelectedQuickActionError] = useState('')
-  const [selectedQuickActionErrorAt, setSelectedQuickActionErrorAt] = useState('')
-  const [quickActionStdout, setQuickActionStdout] = useState('')
-  const [quickActionStderr, setQuickActionStderr] = useState('')
-  const [quickActionStdoutOffset, setQuickActionStdoutOffset] = useState(0)
-  const [quickActionStderrOffset, setQuickActionStderrOffset] = useState(0)
   const [reviewGuidance, setReviewGuidance] = useState('')
   const [retryFromStep, setRetryFromStep] = useState('')
+  const [showAllActivity, setShowAllActivity] = useState(false)
   const [logViewStep, setLogViewStep] = useState('')
   const logViewStepRef = useRef('')
 
@@ -1480,7 +1484,6 @@ export default function App() {
   const [settingsDependencyPolicy, setSettingsDependencyPolicy] = useState(DEFAULT_SETTINGS.defaults.dependency_policy)
 
   const selectedTaskIdRef = useRef(selectedTaskId)
-  const selectedQuickActionIdRef = useRef(selectedQuickActionId)
   const selectedImportJobIdRef = useRef(selectedImportJobId)
   const activeProjectIdRef = useRef(activeProjectId)
   const projectDirRef = useRef(projectDir)
@@ -1498,7 +1501,18 @@ export default function App() {
   }, [selectedTaskId])
 
   useEffect(() => {
-    setTaskDetailTab(taskSelectTabRef.current || 'overview')
+    const explicitTab = taskSelectTabRef.current
+    if (!explicitTab && selectedTaskId) {
+      // Auto-switch to plan tab when task is paused at before_implement gate
+      const matchedTask = Object.values(board.columns).flat().find((t) => t.id === selectedTaskId)
+      if (matchedTask?.pending_gate === 'before_implement' && !isPlanningTaskType(matchedTask.task_type)) {
+        setTaskDetailTab('plan')
+      } else {
+        setTaskDetailTab('overview')
+      }
+    } else {
+      setTaskDetailTab(explicitTab || 'overview')
+    }
     taskSelectTabRef.current = undefined
     setTaskActionPending(null)
     setTaskActionDetail('')
@@ -1514,11 +1528,9 @@ export default function App() {
     setTaskDiffLoading(false)
     setReviewGuidance('')
     setRetryFromStep('')
+    setShowAllActivity(false)
+    setPlanTabMode('view')
   }, [selectedTaskId])
-
-  useEffect(() => {
-    selectedQuickActionIdRef.current = selectedQuickActionId
-  }, [selectedQuickActionId])
 
   useEffect(() => {
     selectedImportJobIdRef.current = selectedImportJobId
@@ -1621,7 +1633,7 @@ export default function App() {
 
   useEffect(() => {
     if (route !== 'planning') return
-    const planTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => t.task_type === 'plan' || t.task_type === 'plan_only')
+    const planTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => isPlanningTaskType(t.task_type))
     if (planTasks.length === 0) {
       if (planningTaskId) setPlanningTaskId('')
       return
@@ -1783,6 +1795,7 @@ export default function App() {
       setEditTaskApprovalMode(task.approval_mode || 'human_review')
       setEditTaskHitlMode(task.hitl_mode || 'autopilot')
       setEditTaskDependencyPolicy(task.dependency_policy || 'prudent')
+      setEditTaskProjectCommands(task.project_commands ? JSON.stringify(task.project_commands, null, 2) : '')
       if (task.status === 'blocked' && task.current_step) {
         setRetryFromStep(task.current_step)
       }
@@ -2434,85 +2447,6 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [selectedTaskId, selectedTaskPlan?.active_refine_job?.status, projectDir])
 
-  async function loadQuickActionDetail(quickActionId: string): Promise<void> {
-    if (!quickActionId) {
-      setSelectedQuickActionDetail(null)
-      return
-    }
-    setSelectedQuickActionLoading(true)
-    setSelectedQuickActionError('')
-    setSelectedQuickActionErrorAt('')
-    try {
-      const payload = await requestJson<{ quick_action: QuickActionRecord }>(buildApiUrl(`/api/quick-actions/${quickActionId}`, projectDir))
-      if (selectedQuickActionIdRef.current !== quickActionId) return
-      setSelectedQuickActionDetail(payload.quick_action ?? null)
-    } catch (err) {
-      if (selectedQuickActionIdRef.current !== quickActionId) return
-      setSelectedQuickActionDetail(null)
-      const detail = err instanceof Error ? err.message : 'unknown error'
-      setSelectedQuickActionError(`Failed to load quick action detail (${detail})`)
-      setSelectedQuickActionErrorAt(new Date().toLocaleTimeString())
-    } finally {
-      setSelectedQuickActionLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    if (!selectedQuickActionId) return
-    void loadQuickActionDetail(selectedQuickActionId)
-    // Reset log state when quick action changes
-    setQuickActionStdout('')
-    setQuickActionStderr('')
-    setQuickActionStdoutOffset(0)
-    setQuickActionStderrOffset(0)
-  }, [selectedQuickActionId, projectDir])
-
-  // Poll logs for active quick actions
-  useEffect(() => {
-    if (!selectedQuickActionId) return
-    const detail = selectedQuickActionDetail
-    if (!detail) return
-    if (detail.status !== 'queued' && detail.status !== 'running') return
-
-    let stdoutOff = quickActionStdoutOffset
-    let stderrOff = quickActionStderrOffset
-    let cancelled = false
-
-    async function poll(): Promise<void> {
-      try {
-        const resp = await requestJson<{
-          stdout: string
-          stderr: string
-          stdout_offset: number
-          stderr_offset: number
-          status: string
-          finished_at: string | null
-        }>(buildApiUrl(`/api/quick-actions/${selectedQuickActionId}/logs?stdout_offset=${stdoutOff}&stderr_offset=${stderrOff}`, projectDir))
-        if (cancelled) return
-        if (resp.stdout) {
-          setQuickActionStdout((prev) => prev + resp.stdout)
-        }
-        if (resp.stderr) {
-          setQuickActionStderr((prev) => prev + resp.stderr)
-        }
-        stdoutOff = resp.stdout_offset
-        stderrOff = resp.stderr_offset
-        setQuickActionStdoutOffset(stdoutOff)
-        setQuickActionStderrOffset(stderrOff)
-        // If finished, refresh the detail to get final status
-        if (resp.finished_at) {
-          void loadQuickActionDetail(selectedQuickActionId)
-        }
-      } catch {
-        // Ignore transient fetch errors during polling
-      }
-    }
-
-    void poll()
-    const timer = window.setInterval(() => void poll(), 2_000)
-    return () => { cancelled = true; window.clearInterval(timer) }
-  }, [selectedQuickActionId, selectedQuickActionDetail?.status, projectDir])
-
   function toErrorMessage(prefix: string, err: unknown): string {
     const detail = err instanceof Error ? err.message : 'unknown error'
     return `${prefix} (${detail})`
@@ -2573,27 +2507,6 @@ export default function App() {
     }
   }
 
-  async function refreshQuickActionsSurface(): Promise<void> {
-    const refreshProjectDir = projectDirRef.current
-    try {
-      const payload = await requestJson<{ quick_actions: QuickActionRecord[] }>(buildApiUrl('/api/quick-actions', refreshProjectDir))
-      if (refreshProjectDir !== projectDirRef.current) {
-        return
-      }
-      setQuickActions(payload.quick_actions || [])
-
-      const selectedQuickAction = String(selectedQuickActionIdRef.current || '').trim()
-      if (selectedQuickAction) {
-        void loadQuickActionDetail(selectedQuickAction)
-      }
-    } catch (err) {
-      if (refreshProjectDir !== projectDirRef.current) {
-        return
-      }
-      setError(toErrorMessage('Failed to refresh quick actions surface', err))
-    }
-  }
-
   async function reloadAll(): Promise<void> {
     const requestSeq = reloadAllSeqRef.current + 1
     reloadAllSeqRef.current = requestSeq
@@ -2606,7 +2519,6 @@ export default function App() {
         agentData,
         projectData,
         pinnedData,
-        quickActionData,
         executionOrderData,
         metricsData,
         workerHealthData,
@@ -2617,7 +2529,6 @@ export default function App() {
         requestJson<{ agents: AgentRecord[] }>(buildApiUrl('/api/agents', projectDir)),
         requestJson<{ projects: ProjectRef[] }>(buildApiUrl('/api/projects', projectDir)),
         requestJson<{ items: PinnedProjectRef[] }>(buildApiUrl('/api/projects/pinned', projectDir)),
-        requestJson<{ quick_actions: QuickActionRecord[] }>(buildApiUrl('/api/quick-actions', projectDir)),
         requestJson<{ batches: string[][]; completed?: string[] }>(buildApiUrl('/api/tasks/execution-order', projectDir)),
         requestJson<unknown>(buildApiUrl('/api/metrics', projectDir)).catch(() => null),
         requestJson<unknown>(buildApiUrl('/api/workers/health', projectDir)).catch(() => ({ providers: [] })),
@@ -2631,7 +2542,6 @@ export default function App() {
       setAgents(agentData.agents || [])
       setProjects(projectData.projects || [])
       setPinnedProjects(pinnedData.items || [])
-      setQuickActions(quickActionData.quick_actions || [])
       setExecutionBatches(executionOrderData.batches || [])
       setExecutionCompleted(executionOrderData.completed || [])
       setMetrics(normalizeMetrics(metricsData))
@@ -2668,11 +2578,9 @@ export default function App() {
 
         const refreshTasks = channels.has('tasks') || channels.has('queue') || channels.has('review') || channels.has('notifications')
         const refreshAgents = channels.has('agents') || channels.has('notifications')
-        const refreshQuickActions = channels.has('quick_actions')
         const ops: Array<Promise<void>> = []
         if (refreshTasks) ops.push(refreshTasksSurface())
         if (refreshAgents) ops.push(refreshAgentsSurface())
-        if (refreshQuickActions) ops.push(refreshQuickActionsSurface())
         if (ops.length > 0) {
           await Promise.all(ops)
         }
@@ -2712,7 +2620,7 @@ export default function App() {
     let reconnectTimer: number | null = null
     let reconnectAttempts = 0
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`
-    const subscribedChannels = ['tasks', 'queue', 'agents', 'review', 'quick_actions', 'notifications', 'system']
+    const subscribedChannels = ['tasks', 'queue', 'agents', 'review', 'terminal', 'notifications', 'system']
 
     const scheduleReconnect = (): void => {
       if (stopped || reconnectTimer !== null) return
@@ -2745,14 +2653,6 @@ export default function App() {
       const currentProjectId = String(activeProjectIdRef.current || '').trim()
       if (eventProjectId && (!currentProjectId || currentProjectId !== eventProjectId)) {
         return
-      }
-
-      if (channel === 'quick_actions') {
-        const selectedQuickAction = String(selectedQuickActionIdRef.current || '').trim()
-        const eventEntityId = String(data.entity_id || '').trim()
-        if (selectedQuickAction && (!eventEntityId || eventEntityId === selectedQuickAction)) {
-          void loadQuickActionDetail(selectedQuickAction)
-        }
       }
 
       if (WS_RELOAD_CHANNELS.has(channel)) {
@@ -2854,10 +2754,84 @@ export default function App() {
         return
       }
     }
+    let parsedProjectCommands: Record<string, Record<string, string>> | undefined
+    if (newTaskProjectCommands.trim()) {
+      try {
+        parsedProjectCommands = parseProjectCommands(newTaskProjectCommands)
+        if (Object.keys(parsedProjectCommands).length === 0) parsedProjectCommands = undefined
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Invalid project commands JSON')
+        return
+      }
+    }
     const parsedPipelineTemplate = newTaskPipelineTemplate
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean)
+    let resolvedTaskType = newTaskType
+    let classifierPipelineId: string | undefined
+    let classifierConfidence: 'high' | 'low' | undefined
+    let classifierReason: string | undefined
+    let wasUserOverride = false
+    if (resolvedTaskType === 'auto') {
+      if (autoPipelineNeedsManualSelection) {
+        setError('Auto pipeline selection was low confidence. Please choose a specific pipeline and submit again.')
+        return
+      }
+      try {
+        const classification = await requestJson<{
+          pipeline_id: string
+          task_type: string
+          confidence: 'high' | 'low'
+          reason: string
+        }>(buildApiUrl('/api/tasks/classify-pipeline', projectDir), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: newTaskTitle.trim(),
+            description: newTaskDescription,
+            metadata: parsedMetadata,
+          }),
+        })
+        classifierPipelineId = String(classification.pipeline_id || '').trim() || 'feature'
+        classifierConfidence = classification.confidence === 'high' ? 'high' : 'low'
+        classifierReason = String(classification.reason || '').trim()
+        if (classifierConfidence !== 'high') {
+          const suggestedTaskType = String(classification.task_type || '').trim() || 'feature'
+          setPendingPipelineClassification({
+            pipeline_id: classifierPipelineId,
+            confidence: classifierConfidence,
+            reason: classifierReason,
+          })
+          setNewTaskType(suggestedTaskType)
+          setAutoPipelineNeedsManualSelection(true)
+          setError(`Auto classification is low confidence: ${classifierReason || 'please choose a pipeline manually.'}`)
+          return
+        }
+        resolvedTaskType = String(classification.task_type || '').trim() || 'feature'
+      } catch (err) {
+        setError(`Auto classification failed: ${toErrorMessage('Please choose a pipeline manually', err)}`)
+        setNewTaskType('feature')
+        setAutoPipelineNeedsManualSelection(true)
+        setPendingPipelineClassification({
+          pipeline_id: 'feature',
+          confidence: 'low',
+          reason: 'Pipeline auto-classification failed.',
+        })
+        return
+      }
+    } else {
+      if (autoPipelineNeedsManualSelection) {
+        wasUserOverride = true
+      }
+      if (autoPipelineNeedsManualSelection && pendingPipelineClassification) {
+        classifierPipelineId = pendingPipelineClassification.pipeline_id
+        classifierConfidence = pendingPipelineClassification.confidence
+        classifierReason = pendingPipelineClassification.reason
+      } else if (pendingPipelineClassification) {
+        setPendingPipelineClassification(null)
+      }
+    }
     try {
       await requestJson<{ task: TaskRecord }>(buildApiUrl('/api/tasks', projectDir), {
         method: 'POST',
@@ -2865,7 +2839,7 @@ export default function App() {
         body: JSON.stringify({
           title: newTaskTitle.trim(),
           description: newTaskDescription,
-          task_type: newTaskType,
+          task_type: resolvedTaskType,
           priority: newTaskPriority,
           labels: newTaskLabels.split(',').map((item) => item.trim()).filter(Boolean),
           blocked_by: newTaskBlockedBy.split(',').map((item) => item.trim()).filter(Boolean),
@@ -2876,6 +2850,11 @@ export default function App() {
           parent_id: newTaskParentId.trim() || undefined,
           pipeline_template: parsedPipelineTemplate.length > 0 ? parsedPipelineTemplate : undefined,
           metadata: parsedMetadata,
+          project_commands: parsedProjectCommands,
+          classifier_pipeline_id: classifierPipelineId,
+          classifier_confidence: classifierConfidence,
+          classifier_reason: classifierReason,
+          was_user_override: wasUserOverride || undefined,
           status: statusOverride || 'queued',
         }),
       })
@@ -2886,7 +2865,9 @@ export default function App() {
     setError('')
     setNewTaskTitle('')
     setNewTaskDescription('')
-    setNewTaskType('feature')
+    setNewTaskType('auto')
+    setAutoPipelineNeedsManualSelection(false)
+    setPendingPipelineClassification(null)
     setNewTaskPriority('P2')
     setNewTaskLabels('')
     setNewTaskBlockedBy('')
@@ -2896,6 +2877,7 @@ export default function App() {
     setNewTaskParentId('')
     setNewTaskPipelineTemplate('')
     setNewTaskMetadata('')
+    setNewTaskProjectCommands('')
     setNewTaskWorkerModel('')
     setWorkOpen(false)
     await reloadAll()
@@ -2940,26 +2922,6 @@ export default function App() {
       await reloadAll()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to commit import')
-    }
-  }
-
-  async function submitQuickAction(event: FormEvent): Promise<void> {
-    event.preventDefault()
-    if (!quickPrompt.trim()) return
-    try {
-      const resp = await requestJson<{ quick_action: QuickActionRecord }>(buildApiUrl('/api/quick-actions', projectDir), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: quickPrompt.trim(), ...(quickTimeout.trim() ? { timeout: parseInt(quickTimeout.trim(), 10) } : {}) }),
-      })
-      if (resp.quick_action) {
-        setSelectedQuickActionId(resp.quick_action.id)
-        setSelectedQuickActionDetail(resp.quick_action)
-      }
-      setQuickPrompt('')
-      await reloadAll()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to submit quick action')
     }
   }
 
@@ -3134,11 +3096,11 @@ export default function App() {
     }
   }
 
-  async function saveManualPlanRevision(taskId: string): Promise<void> {
+  async function saveManualPlanRevision(taskId: string): Promise<string | undefined> {
     const manualContent = planManualContent.trim()
     if (!manualContent) {
       setPlanActionError('Manual revision content is required.')
-      return
+      return undefined
     }
     setPlanSavingManual(true)
     setPlanActionMessage('')
@@ -3158,8 +3120,10 @@ export default function App() {
       setSelectedPlanRevisionId(resp.revision.id)
       setPlanActionMessage('Manual plan revision saved.')
       await loadTaskPlan(taskId)
+      return resp.revision.id
     } catch (err) {
       setPlanActionError(toErrorMessage('Failed to save manual plan revision', err))
+      return undefined
     } finally {
       setPlanSavingManual(false)
     }
@@ -3236,6 +3200,19 @@ export default function App() {
   }
 
   async function saveTaskEdits(taskId: string): Promise<void> {
+    let pcPayload: Record<string, Record<string, string>> | undefined
+    if (editTaskProjectCommands.trim()) {
+      try {
+        const parsed = parseProjectCommands(editTaskProjectCommands)
+        pcPayload = Object.keys(parsed).length > 0 ? parsed : {}
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Invalid project commands JSON')
+        return
+      }
+    } else if (selectedTaskDetail?.project_commands) {
+      // Field was cleared — send empty object to signal removal
+      pcPayload = {}
+    }
     await runTaskMutation(
       'save',
       async () => {
@@ -3251,6 +3228,7 @@ export default function App() {
             approval_mode: editTaskApprovalMode,
             hitl_mode: editTaskHitlMode,
             dependency_policy: editTaskDependencyPolicy,
+            project_commands: pcPayload,
           }),
         })
         await reloadAll()
@@ -3461,22 +3439,6 @@ export default function App() {
     }
   }
 
-  async function promoteQuickAction(quickActionId: string): Promise<void> {
-    try {
-      await requestJson<{ task: TaskRecord; already_promoted: boolean }>(buildApiUrl(`/api/quick-actions/${quickActionId}/promote`, projectDir), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ priority: 'P2' }),
-      })
-      await reloadAll()
-      if (selectedQuickActionIdRef.current === quickActionId) {
-        await loadQuickActionDetail(quickActionId)
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to promote quick action')
-    }
-  }
-
   async function controlOrchestrator(action: 'pause' | 'resume' | 'drain' | 'stop'): Promise<void> {
     try {
       await requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/control', projectDir), {
@@ -3512,6 +3474,29 @@ export default function App() {
       {
         successMessage: startFromStep ? `Task re-queued from ${startFromStep}.` : 'Task re-queued.',
         errorPrefix: 'Failed to retry task',
+      },
+    )
+  }
+
+  async function approveTask(taskId: string): Promise<void> {
+    await runTaskMutation(
+      'transition',
+      async () => {
+        await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/review/${taskId}/approve`, projectDir), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ guidance: reviewGuidance.trim() || undefined }),
+        })
+        setReviewGuidance('')
+        await reloadAll()
+        if (selectedTaskIdRef.current === taskId) {
+          await loadTaskDetail(taskId)
+        }
+      },
+      {
+        successMessage: 'Task approved.',
+        errorPrefix: 'Failed to approve task',
+        detail: 'done',
       },
     )
   }
@@ -3630,7 +3615,7 @@ export default function App() {
   const selectedTaskView = selectedTaskDetail && selectedTaskDetail.id === selectedTaskId ? selectedTaskDetail : selectedTask
   const blockerIds = selectedTaskView?.blocked_by || []
   const blockedIds = selectedTaskView?.blocks || []
-  const isPlanTask = selectedTaskView?.task_type === 'plan' || selectedTaskView?.task_type === 'plan_only'
+  const isPlanTask = isPlanningTaskType(selectedTaskView?.task_type)
   const isTaskActionBusy = taskActionPending !== null
   const configLocked = !new Set(['backlog', 'queued', 'blocked', 'cancelled']).has(selectedTaskView?.status || '')
   const taskStatus = selectedTaskView?.status || ''
@@ -3640,6 +3625,12 @@ export default function App() {
   })
   const hasUnresolvedBlockers = unresolvedBlockers.length > 0
   const showViewPlan = isPlanTask && selectedTaskView?.status === 'done'
+  const showPlanTab = selectedTaskView && !isPlanningTaskType(selectedTaskView.task_type) && (
+    (selectedTaskPlan?.revisions?.length ?? 0) > 0 ||
+    selectedTaskView.pending_gate === 'before_implement'
+  )
+  // Guard: if the Plan tab is selected but no longer visible, fall back to overview.
+  const effectiveTaskDetailTab = (taskDetailTab === 'plan' && !showPlanTab) ? 'overview' : taskDetailTab
 
   const taskDetailContent = selectedTaskView ? (
       <div className="detail-card">
@@ -3647,12 +3638,21 @@ export default function App() {
         <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}</p>
         <div className="detail-tabs" role="tablist" aria-label="Task detail sections">
           <button
-            className={`detail-tab ${taskDetailTab === 'overview' ? 'is-active' : ''}`}
-            aria-pressed={taskDetailTab === 'overview'}
+            className={`detail-tab ${effectiveTaskDetailTab === 'overview' ? 'is-active' : ''}`}
+            aria-pressed={effectiveTaskDetailTab === 'overview'}
             onClick={() => setTaskDetailTab('overview')}
           >
             Overview
           </button>
+          {showPlanTab ? (
+            <button
+              className={`detail-tab ${effectiveTaskDetailTab === 'plan' ? 'is-active' : ''}`}
+              aria-pressed={effectiveTaskDetailTab === 'plan'}
+              onClick={() => setTaskDetailTab('plan')}
+            >
+              Plan
+            </button>
+          ) : null}
           <button
             className={`detail-tab ${taskDetailTab === 'logs' ? 'is-active' : ''}`}
             aria-pressed={taskDetailTab === 'logs'}
@@ -3681,7 +3681,7 @@ export default function App() {
           >
             Configuration
           </button>
-          {(selectedTaskView.status === 'in_review' || selectedTaskView.status === 'done' || selectedTaskView.status === 'blocked') && selectedTaskView.task_type !== 'plan' ? (
+          {(selectedTaskView.status === 'in_review' || selectedTaskView.status === 'done' || selectedTaskView.status === 'blocked') && !isPlanningTaskType(selectedTaskView.task_type) ? (
             <button
               className={`detail-tab ${taskDetailTab === 'changes' ? 'is-active' : ''}`}
               aria-pressed={taskDetailTab === 'changes'}
@@ -3691,7 +3691,7 @@ export default function App() {
             </button>
           ) : null}
         </div>
-        {taskDetailTab === 'overview' ? (
+        {effectiveTaskDetailTab === 'overview' ? (
           <div className="task-detail-section-body">
             {selectedTaskView.description ? <RenderedMarkdown content={selectedTaskView.description} className="task-desc" /> : <p className="task-desc">No description.</p>}
             <p className="field-label">
@@ -3750,6 +3750,7 @@ export default function App() {
                       <summary className="execution-details-toggle">Step details</summary>
                       <p className="execution-summary-meta">
                         {selectedTaskView.execution_summary!.run_summary}
+                        {formatDuration(selectedTaskView.execution_summary!.duration_seconds) ? ` · ${formatDuration(selectedTaskView.execution_summary!.duration_seconds)}` : ''}
                         {selectedTaskView.execution_summary!.started_at ? ` · started ${new Date(selectedTaskView.execution_summary!.started_at).toLocaleString()}` : ''}
                         {selectedTaskView.execution_summary!.finished_at ? ` · finished ${new Date(selectedTaskView.execution_summary!.finished_at).toLocaleString()}` : ''}
                       </p>
@@ -3766,6 +3767,7 @@ export default function App() {
                               <span className={`execution-step-icon ${isOk ? 'step-ok' : 'step-error'}`}>{isOk ? '\u2713' : '\u2717'}</span>
                               <span className="execution-step-name">{humanizeLabel(step.step)}</span>
                               <span className={`status-pill status-pill-inline ${isOk ? 'status-done' : 'status-failed'}`}>{step.status}</span>
+                              {formatDuration(step.duration_seconds) ? <span className="execution-step-duration">{formatDuration(step.duration_seconds)}</span> : null}
                               {step.open_counts && Object.keys(step.open_counts).length > 0 ? (
                                 <span className="execution-step-counts">
                                   {Object.entries(step.open_counts).map(([sev, count]) => `${count} ${sev}`).join(', ')}
@@ -3799,6 +3801,25 @@ export default function App() {
                 </div>
               )
             })() : null}
+            {Array.isArray(selectedTaskView.human_review_actions) && selectedTaskView.human_review_actions.length > 0 ? (
+              <div className="review-history-box">
+                <p className="review-history-header">Review history</p>
+                {selectedTaskView.human_review_actions.map((entry, idx) => {
+                  const actionLabel = entry.action === 'approve' ? 'Approved' : entry.action === 'request_changes' ? 'Changes requested' : entry.action === 'retry' ? 'Retry with guidance' : entry.action
+                  const badgeClass = entry.action === 'approve' ? 'status-done' : entry.action === 'request_changes' ? 'status-review' : 'status-blocked'
+                  return (
+                    <div className="review-history-entry" key={`review-action-${idx}`}>
+                      <div className="review-history-entry-head">
+                        <span className={`status-pill status-pill-inline ${badgeClass}`}>{actionLabel}</span>
+                        <span className="review-history-ts">{toLocaleTimestamp(entry.ts) || '-'}</span>
+                      </div>
+                      {entry.guidance ? <RenderedMarkdown content={entry.guidance} className="review-history-guidance" /> : null}
+                      {entry.previous_error ? <pre className="review-history-error">{entry.previous_error}</pre> : null}
+                    </div>
+                  )
+                })}
+              </div>
+            ) : null}
             {selectedTaskView.error?.trim() ? (() => {
               const stderrTail = (stderrHistory || '').trim()
               const logTail = (stdoutHistory || '').trim()
@@ -3821,7 +3842,20 @@ export default function App() {
                 </div>
               )
             })() : null}
-            {selectedTaskView.pending_gate ? (
+            {selectedTaskView.pending_gate === 'before_implement' ? (
+              <div className="preview-box plan-gate-banner">
+                <p className="field-label">
+                  Plan ready for review.{' '}
+                  <button className="link-button" onClick={() => setTaskDetailTab('plan')}>
+                    View and edit the plan
+                  </button>{' '}
+                  before approving.
+                </p>
+                <button className="button button-primary" onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}>
+                  Approve gate
+                </button>
+              </div>
+            ) : selectedTaskView.pending_gate ? (
               <div className="preview-box">
                 <p className="field-label">
                   Pending gate: <strong>{humanizeLabel(selectedTaskView.pending_gate)}</strong>
@@ -3855,6 +3889,151 @@ export default function App() {
             ) : null}
           </div>
         ) : null}
+        {effectiveTaskDetailTab === 'plan' ? (() => {
+          const planRevisions = selectedTaskPlan?.revisions || []
+          const selectedPlanRevision = selectedPlanRevisionId
+            ? (planRevisions.find((r) => r.id === selectedPlanRevisionId) || null)
+            : null
+          const latestPlanRevision = selectedTaskPlan?.latest_revision_id
+            ? (planRevisions.find((r) => r.id === selectedTaskPlan.latest_revision_id) || null)
+            : null
+          const effectiveRevision = selectedPlanRevision || latestPlanRevision
+          const planContent = (effectiveRevision?.content || '').trim()
+          const isRefining = !!(selectedTaskPlan?.active_refine_job
+            && (selectedTaskPlan.active_refine_job.status === 'queued' || selectedTaskPlan.active_refine_job.status === 'running'))
+          return (
+            <div className="task-detail-section-body">
+              {selectedTaskView.pending_gate === 'before_implement' ? (
+                <div className="preview-box plan-gate-banner">
+                  <p className="field-label">Plan ready for review. Approve to proceed with implementation.</p>
+                  <button className="button button-primary" onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}>
+                    Approve gate
+                  </button>
+                </div>
+              ) : null}
+              <div className="plan-tab-mode-switcher">
+                <button className={`button ${planTabMode === 'view' ? 'is-active' : ''}`} onClick={() => setPlanTabMode('view')}>View</button>
+                <button className={`button ${planTabMode === 'edit' ? 'is-active' : ''}`} onClick={() => {
+                  if (planTabMode !== 'edit') {
+                    const text = planContent
+                    const seeded = planManualSeedRef.current
+                    const wasSeeded = seeded.taskId === selectedTaskView.id && seeded.workerText.trim().length > 0
+                    const sameAsSeeded = wasSeeded && planManualContent.trim() === seeded.workerText.trim()
+                    if (!planManualContent.trim() || sameAsSeeded) {
+                      setPlanManualContent(text)
+                      planManualSeedRef.current = { taskId: selectedTaskView.id, workerText: text }
+                    }
+                  }
+                  setPlanTabMode('edit')
+                }}>Edit</button>
+                <button className={`button ${planTabMode === 'refine' ? 'is-active' : ''}`} onClick={() => setPlanTabMode('refine')}>Refine</button>
+              </div>
+              {planActionMessage ? <p className="field-label" style={{ color: 'var(--color-success, #5cb85c)' }}>{planActionMessage}</p> : null}
+              {planActionError ? <p className="field-label" style={{ color: 'var(--color-danger, #d9534f)' }}>{planActionError}</p> : null}
+              {planTabMode === 'view' ? (
+                <div className="form-stack">
+                  {planRevisions.length > 1 ? (
+                    <>
+                      <label className="field-label" htmlFor="plan-tab-revision-selector">Revision</label>
+                      <select
+                        id="plan-tab-revision-selector"
+                        value={selectedPlanRevisionId}
+                        onChange={(e) => setSelectedPlanRevisionId(e.target.value)}
+                      >
+                        <option value="">(latest)</option>
+                        {planRevisions.map((rev) => (
+                          <option key={rev.id} value={rev.id}>
+                            {rev.id} · {humanizeLabel(rev.source)} · {rev.status}
+                          </option>
+                        ))}
+                      </select>
+                    </>
+                  ) : null}
+                  {planContent ? (
+                    <div className="preview-box">
+                      {effectiveRevision ? (
+                        <p className="task-meta">
+                          {humanizeLabel(effectiveRevision.source)}
+                          {effectiveRevision.step ? ` · ${humanizeLabel(effectiveRevision.step)}` : ''}
+                          {' · '}{humanizeLabel(effectiveRevision.status)}
+                        </p>
+                      ) : null}
+                      <RenderedMarkdown content={planContent} className="plan-content-field" />
+                    </div>
+                  ) : (
+                    <p className="empty">No plan content yet.</p>
+                  )}
+                </div>
+              ) : null}
+              {planTabMode === 'edit' ? (
+                <div className="form-stack">
+                  <textarea
+                    className="plan-content-field"
+                    rows={20}
+                    value={planManualContent}
+                    onChange={(e) => setPlanManualContent(e.target.value)}
+                    placeholder="Edit plan text."
+                  />
+                  <div className="plan-tab-commit-bar">
+                    <button
+                      className="button button-primary"
+                      disabled={planSavingManual || planCommitting || !planManualContent.trim()}
+                      onClick={async () => {
+                        const newRevId = await saveManualPlanRevision(selectedTaskView.id)
+                        if (newRevId) {
+                          await commitPlanRevision(selectedTaskView.id, newRevId)
+                        }
+                      }}
+                    >
+                      {planSavingManual || planCommitting ? 'Saving...' : 'Save & commit'}
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {planTabMode === 'refine' ? (
+                <div className="form-stack">
+                  {isRefining ? (
+                    <div className="refine-banner">
+                      <span className="refine-banner-dot" />
+                      <span>Refining plan...</span>
+                    </div>
+                  ) : null}
+                  <label className="field-label" htmlFor="plan-tab-refine-feedback">Request changes from worker</label>
+                  <div className="planning-refine-inline">
+                    <input
+                      id="plan-tab-refine-feedback"
+                      value={planRefineFeedback}
+                      onChange={(e) => setPlanRefineFeedback(e.target.value)}
+                      placeholder="Describe what should change in the plan."
+                    />
+                    <button
+                      className="button"
+                      onClick={() => void refineTaskPlan(selectedTaskView.id)}
+                      disabled={planJobLoading || isRefining || !planRefineFeedback.trim()}
+                    >
+                      {planJobLoading || isRefining ? 'Refining...' : 'Refine'}
+                    </button>
+                  </div>
+                  <div className="preview-box">
+                    <p className="field-label">Worker output{isRefining ? ' (live)' : ''}</p>
+                    <pre className="task-log-output plan-content-field planning-worker-output">{planRefineStdout || ' '}</pre>
+                  </div>
+                  {!isRefining && planRevisions.length > 0 ? (
+                    <div className="plan-tab-commit-bar">
+                      <button
+                        className="button button-primary"
+                        disabled={planCommitting || (!selectedPlanRevisionId && !selectedTaskPlan?.latest_revision_id)}
+                        onClick={() => void commitPlanRevision(selectedTaskView.id, selectedPlanRevisionId || selectedTaskPlan?.latest_revision_id || '')}
+                      >
+                        {planCommitting ? 'Committing...' : 'Commit this revision'}
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
+          )
+        })() : null}
         {taskDetailTab === 'configuration' ? (
           <div className="task-detail-section-body">
               <div className="form-stack">
@@ -3909,6 +4088,33 @@ export default function App() {
                   {(configLocked ? (selectedTaskView.dependency_policy || 'prudent') : editTaskDependencyPolicy) === 'prudent' && 'Prefer existing deps. Only add new ones when manual implementation would be unreliable or complex.'}
                   {(configLocked ? (selectedTaskView.dependency_policy || 'prudent') : editTaskDependencyPolicy) === 'strict' && 'No new dependencies allowed. Work only with what is already installed.'}
                 </p>
+                <label className="field-label">Project commands override</label>
+                {configLocked ? (
+                  selectedTaskView.project_commands && Object.keys(selectedTaskView.project_commands).length > 0 ? (
+                    <pre className="task-meta" style={{ whiteSpace: 'pre-wrap', fontSize: '0.85em' }}>{JSON.stringify(selectedTaskView.project_commands, null, 2)}</pre>
+                  ) : (
+                    <p className="task-meta">Not set (using global defaults)</p>
+                  )
+                ) : (
+                  <div className="json-editor-group">
+                    <textarea
+                      className="json-editor-textarea"
+                      rows={6}
+                      value={editTaskProjectCommands}
+                      onChange={(event) => setEditTaskProjectCommands(event.target.value)}
+                      placeholder={PROJECT_COMMANDS_EXAMPLE}
+                      disabled={taskActionPending === 'save'}
+                    />
+                    <div className="inline-actions">
+                      <button type="button" className="button button-xs"
+                        onClick={() => handleFormatJsonField('Project commands', editTaskProjectCommands, setEditTaskProjectCommands)}
+                      >Format</button>
+                      <button type="button" className="button button-xs"
+                        onClick={() => setEditTaskProjectCommands('')}
+                      >Clear</button>
+                    </div>
+                  </div>
+                )}
                 {!configLocked ? (
                   <div className="inline-actions">
                     <button
@@ -4026,7 +4232,7 @@ export default function App() {
           <div className="task-detail-section-body">
             <div className="list-stack">
               {collaborationLoading ? <p className="field-label">Loading activity...</p> : null}
-              {collaborationTimeline.slice(0, 8).map((event) => (
+              {(showAllActivity ? collaborationTimeline : collaborationTimeline.slice(0, 8)).map((event) => (
                 <div className="row-card timeline-event-card" key={event.id}>
                   <div>
                     <p className="task-title">{event.summary || humanizeLabel(event.type)}</p>
@@ -4043,6 +4249,11 @@ export default function App() {
                   ) : null}
                 </div>
               ))}
+              {collaborationTimeline.length > 8 ? (
+                <button className="link-button" onClick={() => setShowAllActivity((prev) => !prev)}>
+                  {showAllActivity ? 'Show fewer' : `Show all (${collaborationTimeline.length}) events`}
+                </button>
+              ) : null}
               {collaborationTimeline.length === 0 && !collaborationLoading ? <p className="empty">No activity for this task yet.</p> : null}
               {collaborationError ? <p className="error-banner">{collaborationError}</p> : null}
             </div>
@@ -4355,7 +4566,7 @@ export default function App() {
     }
 
     const resolvedProviderForTask = (task: TaskRecord): string => {
-      const step = String(task.current_step || '').trim() || (task.task_type === 'plan' ? 'plan' : 'implement')
+      const step = String(task.current_step || '').trim() || (isPlanningTaskType(task.task_type) ? 'plan' : 'implement')
       return routingByStep.get(step)?.provider || workerDefaultProvider
     }
 
@@ -4948,7 +5159,7 @@ export default function App() {
   }
 
   function renderPlanning(): JSX.Element {
-    const allTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => t.task_type === 'plan' || t.task_type === 'plan_only')
+    const allTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => isPlanningTaskType(t.task_type))
     const planningTask = allTasks.find((t) => t.id === planningTaskId) || null
     const planRevisions = selectedTaskPlan?.revisions || []
     const selectedPlanRevision = selectedPlanRevisionId
@@ -4965,7 +5176,7 @@ export default function App() {
       ? summarizePlanDiff(effectiveWorkerPlanRevision.content || '', selectedPlanParentRevision.content || '')
       : null
     const effectiveGenerateRevisionId = planGenerateRevisionId || selectedPlanRevisionId || selectedTaskPlan?.latest_revision_id || ''
-    const workerPlanContent = (effectiveWorkerPlanRevision?.content || selectedTaskPlan?.latest?.content || '').trim()
+    const workerPlanContent = (effectiveWorkerPlanRevision?.content || '').trim()
     const isRefining = !!(selectedTaskPlan?.active_refine_job
       && (selectedTaskPlan.active_refine_job.status === 'queued' || selectedTaskPlan.active_refine_job.status === 'running'))
     const workerOutputDisplay = planRefineStdout || ' '
@@ -4980,7 +5191,7 @@ export default function App() {
 
     function openCreatePlanTaskModal(): void {
       setCreateTab('task')
-      setNewTaskType('plan')
+      setNewTaskType('initiative_plan')
       setWorkOpen(true)
     }
 
@@ -5375,7 +5586,7 @@ export default function App() {
                 ) : null}
                 {taskStatus === 'in_review' ? (
                   <>
-                    <button className="button button-primary" onClick={() => void transitionTask(selectedTaskView.id, 'done')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'done' ? 'Approving...' : 'Approve'}</button>
+                    <button className="button button-primary" onClick={() => void approveTask(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'done' ? 'Approving...' : 'Approve'}</button>
                     <input
                       className="review-guidance-input"
                       value={reviewGuidance}
@@ -5421,7 +5632,7 @@ export default function App() {
               <div className="tab-row">
                 <button className={`tab ${createTab === 'task' ? 'is-active' : ''}`} onClick={() => setCreateTab('task')}>Create Task</button>
                 <button className={`tab ${createTab === 'import' ? 'is-active' : ''}`} onClick={() => setCreateTab('import')}>Import PRD</button>
-                <button className={`tab ${createTab === 'quick' ? 'is-active' : ''}`} onClick={() => setCreateTab('quick')}>Quick Action</button>
+                <button className={`tab ${createTab === 'terminal' ? 'is-active' : ''}`} onClick={() => setCreateTab('terminal')}>Terminal</button>
               </div>
             </div>
 
@@ -5433,9 +5644,22 @@ export default function App() {
                   <label className="field-label" htmlFor="task-description">Description</label>
                   <textarea id="task-description" rows={4} value={newTaskDescription} onChange={(event) => setNewTaskDescription(event.target.value)} />
                   <label className="field-label" htmlFor="task-type">Task Type</label>
-                  <select id="task-type" value={newTaskType} onChange={(event) => setNewTaskType(event.target.value)}>
+                  <select
+                    id="task-type"
+                    value={newTaskType}
+                    onChange={(event) => {
+                      const value = event.target.value
+                      if (value === 'auto' && autoPipelineNeedsManualSelection) {
+                        setError('Auto selection is locked after low confidence. Please select a specific pipeline for this task.')
+                        return
+                      }
+                      setNewTaskType(value)
+                    }}
+                  >
                     {TASK_TYPE_OPTIONS.map((taskType) => (
-                      <option key={taskType} value={taskType}>{humanizeLabel(taskType)}</option>
+                      <option key={taskType} value={taskType} disabled={taskType === 'auto' && autoPipelineNeedsManualSelection}>
+                        {humanizeLabel(taskType)}
+                      </option>
                     ))}
                   </select>
                   <label className="field-label">Priority</label>
@@ -5540,6 +5764,15 @@ export default function App() {
                         onChange={(event) => setNewTaskWorkerModel(event.target.value)}
                         placeholder="gpt-5-codex"
                       />
+                      <label className="field-label" htmlFor="task-project-commands">Project commands override (optional)</label>
+                      <textarea
+                        id="task-project-commands"
+                        className="json-editor-textarea"
+                        rows={4}
+                        value={newTaskProjectCommands}
+                        onChange={(event) => setNewTaskProjectCommands(event.target.value)}
+                        placeholder={PROJECT_COMMANDS_EXAMPLE}
+                      />
                       <label className="field-label" htmlFor="task-metadata">Metadata JSON object (optional)</label>
                       <textarea
                         id="task-metadata"
@@ -5577,31 +5810,9 @@ export default function App() {
                 </div>
               ) : null}
 
-              {createTab === 'quick' ? (
+              {createTab === 'terminal' ? (
                 <div className="form-stack">
-                  <form className="form-stack" onSubmit={(event) => void submitQuickAction(event)}>
-                    <p className="hint">Quick Action is ephemeral. Promote explicitly if you want it on the board.</p>
-                    <label className="field-label" htmlFor="quick-prompt">Prompt</label>
-                    <textarea id="quick-prompt" rows={6} value={quickPrompt} onChange={(event) => setQuickPrompt(event.target.value)} required />
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <button className="button button-primary" type="submit">Run Quick Action</button>
-                      <label htmlFor="quick-timeout" className="field-label" style={{ margin: 0, whiteSpace: 'nowrap' }}>Timeout (s)</label>
-                      <input id="quick-timeout" type="number" min={10} max={600} step={10} placeholder="120" value={quickTimeout} onChange={(event) => setQuickTimeout(event.target.value)} style={{ width: '80px' }} />
-                    </div>
-                  </form>
-                  <QuickActionDetailPanel
-                    quickActions={quickActions}
-                    selectedQuickActionId={selectedQuickActionId}
-                    selectedQuickActionDetail={selectedQuickActionDetail}
-                    selectedQuickActionLoading={selectedQuickActionLoading}
-                    selectedQuickActionError={`${selectedQuickActionError}${selectedQuickActionErrorAt ? ` at ${selectedQuickActionErrorAt}` : ''}`}
-                    onSelectQuickAction={setSelectedQuickActionId}
-                    onPromoteQuickAction={(quickActionId) => void promoteQuickAction(quickActionId)}
-                    onRefreshQuickActionDetail={() => void loadQuickActionDetail(selectedQuickActionId)}
-                    onRetryLoadQuickActionDetail={() => void loadQuickActionDetail(selectedQuickActionId)}
-                    liveStdout={quickActionStdout}
-                    liveStderr={quickActionStderr}
-                  />
+                  <TerminalPanel projectDir={projectDir} />
                 </div>
               ) : null}
             </div>
