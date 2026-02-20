@@ -1099,6 +1099,17 @@ class LiveWorkerAdapter:
         return f"Human intervention required ({count} {suffix}): {first}"
 
     def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        return self._execute_step(task=task, step=step, attempt=attempt, persist=True)
+
+    def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        """Like run_step but does not persist the task to storage.
+
+        Use for synthetic/throwaway tasks (e.g. pipeline classification,
+        dependency analysis) where the task object is only a prompt carrier.
+        """
+        return self._execute_step(task=task, step=step, attempt=attempt, persist=False)
+
+    def _execute_step(self, *, task: Task, step: str, attempt: int, persist: bool) -> StepResult:
         # 1. Resolve worker
         try:
             cfg = self._container.config.load()
@@ -1170,9 +1181,12 @@ class LiveWorkerAdapter:
             "started_at": now_iso(),
         }
         task.metadata["active_logs"] = log_meta
-        self._container.tasks.upsert(task)
+        if persist:
+            self._container.tasks.upsert(task)
 
         def _check_task_cancelled() -> bool:
+            if not persist:
+                return False
             fresh = self._container.tasks.get(task.id)
             return fresh is not None and fresh.status == "cancelled"
 
@@ -1197,7 +1211,8 @@ class LiveWorkerAdapter:
                 task.metadata = {}
             task.metadata.pop("active_logs", None)
             task.metadata["last_logs"] = {**log_meta, "finished_at": now_iso()}
-            self._container.tasks.upsert(task)
+            if persist:
+                self._container.tasks.upsert(task)
 
         # 4. Map result
         step_result = self._map_result(result, spec, step, task)

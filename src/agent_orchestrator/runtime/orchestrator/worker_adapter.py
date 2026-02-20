@@ -21,6 +21,14 @@ class WorkerAdapter(Protocol):
     def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
         ...
 
+    def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        """Like run_step but does not persist the task to storage.
+
+        Use for synthetic/throwaway tasks (e.g. pipeline classification,
+        dependency analysis) where the task object is only a prompt carrier.
+        """
+        ...
+
 
 class DefaultWorkerAdapter:
     """Default adapter used in local-first mode.
@@ -79,6 +87,9 @@ class DefaultWorkerAdapter:
                         fp.write_text(str(content), encoding="utf-8")
 
         return StepResult(status="ok")
+
+    def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        return self.run_step(task=task, step=step, attempt=attempt)
 
     def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path) -> str:
         return ""

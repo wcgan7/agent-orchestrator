@@ -2317,7 +2317,7 @@ _Pending: will be populated by the report step._
         )
 
         try:
-            result = self.worker_adapter.run_step(task=synthetic, step="analyze_deps", attempt=1)
+            result = self.worker_adapter.run_step_ephemeral(task=synthetic, step="analyze_deps", attempt=1)
             if result.status == "ok" and result.dependency_edges:
                 self._apply_dependency_edges(candidates, result.dependency_edges, all_tasks)
         except Exception:
