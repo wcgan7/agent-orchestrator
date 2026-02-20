@@ -71,6 +71,36 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {}
 }
 
+// JSDOM's default getContext throws; xterm expects a usable 2D context.
+HTMLCanvasElement.prototype.getContext = (() =>
+  ({
+    fillRect: () => {},
+    clearRect: () => {},
+    getImageData: () => ({ data: new Uint8ClampedArray(4) }),
+    putImageData: () => {},
+    createImageData: () => ({ data: new Uint8ClampedArray(4) }),
+    setTransform: () => {},
+    drawImage: () => {},
+    save: () => {},
+    fillText: () => {},
+    restore: () => {},
+    beginPath: () => {},
+    moveTo: () => {},
+    lineTo: () => {},
+    closePath: () => {},
+    stroke: () => {},
+    translate: () => {},
+    scale: () => {},
+    rotate: () => {},
+    arc: () => {},
+    fill: () => {},
+    measureText: () => ({ width: 0 }),
+    transform: () => {},
+    rect: () => {},
+    clip: () => {},
+    createLinearGradient: () => ({ addColorStop: () => {} }),
+  }) as unknown as CanvasRenderingContext2D) as typeof HTMLCanvasElement.prototype.getContext
+
 // Avoid real WebSocket connections in tests.
 class WebSocketMock {
   static CONNECTING = 0

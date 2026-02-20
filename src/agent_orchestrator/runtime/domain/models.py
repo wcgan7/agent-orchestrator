@@ -188,44 +188,54 @@ class RunRecord:
 
 
 @dataclass
-class QuickActionRun:
-    id: str = field(default_factory=lambda: _id("qrun"))
-    prompt: str = ""
-    status: str = "queued"
+class TerminalSession:
+    id: str = field(default_factory=lambda: _id("term"))
+    project_id: str = ""
+    status: str = "starting"
+    shell: str = ""
+    cwd: str = ""
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
-    result_summary: Optional[str] = None
-    promoted_task_id: Optional[str] = None
-    kind: Optional[str] = None
-    command: Optional[str] = None
     exit_code: Optional[int] = None
-    stdout_path: Optional[str] = None
-    stderr_path: Optional[str] = None
-    timeout_seconds: Optional[int] = None
+    pid: Optional[int] = None
+    cols: int = 120
+    rows: int = 36
+    audit_log_path: Optional[str] = None
+    output_log_path: Optional[str] = None
+    last_error: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "QuickActionRun":
+    def from_dict(cls, data: dict[str, Any]) -> "TerminalSession":
         raw_exit = data.get("exit_code")
         exit_code = int(raw_exit) if raw_exit is not None else None
-        raw_timeout = data.get("timeout_seconds")
-        timeout_seconds = int(raw_timeout) if raw_timeout is not None else None
+        raw_pid = data.get("pid")
+        pid = int(raw_pid) if raw_pid is not None else None
+        try:
+            cols = int(data.get("cols") or 120)
+        except (TypeError, ValueError):
+            cols = 120
+        try:
+            rows = int(data.get("rows") or 36)
+        except (TypeError, ValueError):
+            rows = 36
         return cls(
-            id=str(data.get("id") or _id("qrun")),
-            prompt=str(data.get("prompt") or ""),
-            status=str(data.get("status") or "queued"),
+            id=str(data.get("id") or _id("term")),
+            project_id=str(data.get("project_id") or ""),
+            status=str(data.get("status") or "starting"),
+            shell=str(data.get("shell") or ""),
+            cwd=str(data.get("cwd") or ""),
             started_at=data.get("started_at"),
             finished_at=data.get("finished_at"),
-            result_summary=data.get("result_summary"),
-            promoted_task_id=data.get("promoted_task_id"),
-            kind=data.get("kind"),
-            command=data.get("command"),
             exit_code=exit_code,
-            stdout_path=data.get("stdout_path"),
-            stderr_path=data.get("stderr_path"),
-            timeout_seconds=timeout_seconds,
+            pid=pid,
+            cols=cols,
+            rows=rows,
+            audit_log_path=data.get("audit_log_path"),
+            output_log_path=data.get("output_log_path"),
+            last_error=data.get("last_error"),
         )
 
 

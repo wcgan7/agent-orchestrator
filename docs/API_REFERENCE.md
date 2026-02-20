@@ -110,12 +110,14 @@ Legacy compatibility fields are still included:
 - `POST /import/prd/commit`
 - `GET /import/{job_id}`
 
-## Quick Actions
+## Terminal
 
-- `POST /quick-actions`
-- `GET /quick-actions`
-- `GET /quick-actions/{quick_action_id}`
-- `POST /quick-actions/{quick_action_id}/promote`
+- `POST /terminal/session`
+- `GET /terminal/session`
+- `POST /terminal/session/{session_id}/input`
+- `POST /terminal/session/{session_id}/resize`
+- `POST /terminal/session/{session_id}/stop`
+- `GET /terminal/session/{session_id}/logs`
 
 ## Review Queue
 
@@ -212,7 +214,7 @@ Supported channels:
 - `queue`
 - `agents`
 - `review`
-- `quick_actions`
+- `terminal`
 - `notifications`
 - `system`
 

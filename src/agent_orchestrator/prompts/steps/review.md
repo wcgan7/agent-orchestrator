@@ -42,7 +42,9 @@ Documentation check:
 - Raise at least a medium-severity finding when required documentation is missing or stale.
 
 Output requirements:
-- Return findings only; no conversational text.
+- Return JSON only; no conversational text or markdown fences.
+- Respond with valid JSON matching this schema:
+  `{"findings": [{"severity": "critical|high|medium|low", "category": "string", "summary": "string", "file": "path", "line": 0, "suggested_fix": "string", "status": "open|resolved"}]}`
 - If no material issues remain and objective/acceptance criteria are fully satisfied, return zero findings.
 - Each finding must include:
   - severity (`critical|high|medium|low`)
@@ -51,5 +53,6 @@ Output requirements:
   - file
   - line (if known)
   - suggested_fix
+  - status (`open|resolved`, default to `open`)
 - Findings must be specific, evidence-based, and reproducible.
 - Do not speculate. Do not suppress or down-rank valid findings.

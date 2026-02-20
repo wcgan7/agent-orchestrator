@@ -12,6 +12,7 @@ from agent_orchestrator.runtime.orchestrator.service import OrchestratorService
 from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter
 from agent_orchestrator.runtime.storage.bootstrap import ensure_state_root
 from agent_orchestrator.runtime.storage.container import Container
+from agent_orchestrator.pipelines.registry import BUILTIN_TEMPLATES
 
 
 @pytest.fixture()
@@ -60,14 +61,296 @@ def test_init_creates_canonical_and_worktree_copy(service: OrchestratorService, 
     assert task.id in content
     assert task.task_type in content
     assert "## Plan" in content
-    assert "## Analysis" in content
     assert "## Implementation Log" in content
     assert "## Verification Results" in content
     assert "## Review Findings" in content
     assert "## Fix Log" in content
+    assert "## Analysis" not in content
+    assert "## Profiling Baseline" not in content
+    assert "## Final Report" not in content
 
     # Metadata should be set
     assert task.metadata["workdoc_path"] == str(canonical)
+
+
+def test_init_verify_only_uses_minimal_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Verify only",
+        description="Run checks only",
+        task_type="verify_only",
+        priority="P2",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Verification Results" in content
+    assert "## Final Report" in content
+    assert "## Plan" not in content
+    assert "## Analysis" not in content
+    assert "## Implementation Log" not in content
+    assert "## Review Findings" not in content
+    assert "## Fix Log" not in content
+
+
+def test_init_plan_only_uses_planning_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Initiative plan",
+        description="Define initiative scope and split to tasks",
+        task_type="plan_only",
+        priority="P2",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Analysis" in content
+    assert "## Plan" in content
+    assert "## Generated Tasks" in content
+    assert "## Final Report" in content
+    assert "## Implementation Log" not in content
+    assert "## Review Findings" not in content
+    assert "## Fix Log" not in content
+
+
+def test_init_security_audit_uses_scan_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Security sweep",
+        description="Run dependency and code scans",
+        task_type="security",
+        priority="P1",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Dependency Scan Findings" in content
+    assert "## Code Scan Findings" in content
+    assert "## Security Report" in content
+    assert "## Generated Remediation Tasks" in content
+    assert "## Plan" not in content
+    assert "## Implementation Log" not in content
+    assert "## Review Findings" not in content
+    assert "## Fix Log" not in content
+
+
+def test_init_repo_review_uses_review_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Repository review",
+        description="Assess repo health and plan improvements",
+        task_type="repo_review",
+        priority="P2",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Repository Analysis" in content
+    assert "## Initiative Plan" in content
+    assert "## Generated Tasks" in content
+    assert "## Implementation Log" not in content
+    assert "## Verification Results" not in content
+    assert "## Review Findings" not in content
+    assert "## Fix Log" not in content
+
+
+def test_init_research_uses_minimal_research_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Research topic",
+        description="Investigate architecture alternatives",
+        task_type="research",
+        priority="P2",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Research Analysis" in content
+    assert "## Final Report" in content
+    assert "## Plan" not in content
+    assert "## Implementation Log" not in content
+    assert "## Verification Results" not in content
+    assert "## Review Findings" not in content
+    assert "## Fix Log" not in content
+
+
+def test_init_review_uses_review_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Code review",
+        description="Review changes and report findings",
+        task_type="review",
+        priority="P2",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Review Analysis" in content
+    assert "## Review Findings" in content
+    assert "## Final Report" in content
+    assert "## Implementation Log" not in content
+    assert "## Verification Results" not in content
+    assert "## Fix Log" not in content
+
+
+def test_init_bug_fix_uses_bug_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Fix auth crash",
+        description="Resolve null pointer in auth flow",
+        task_type="bug",
+        priority="P1",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Reproduction Evidence" in content
+    assert "## Diagnosis" in content
+    assert "## Fix Implementation" in content
+    assert "## Verification Results" in content
+    assert "## Review Findings" in content
+    assert "## Fix Log" in content
+    assert "## Plan" not in content
+    assert "## Final Report" not in content
+
+
+def test_init_refactor_uses_refactor_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Refactor auth flow",
+        description="Restructure auth internals without behavior changes",
+        task_type="refactor",
+        priority="P2",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Refactor Analysis" in content
+    assert "## Refactor Plan" in content
+    assert "## Refactor Implementation" in content
+    assert "## Verification Results" in content
+    assert "## Review Findings" in content
+    assert "## Fix Log" in content
+    assert "## Final Report" not in content
+    assert "## Profiling Baseline" not in content
+
+
+def test_init_performance_uses_performance_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Optimize API latency",
+        description="Improve p95 response time under load",
+        task_type="performance",
+        priority="P1",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Profiling Baseline" in content
+    assert "## Optimization Plan" in content
+    assert "## Optimization Implementation" in content
+    assert "## Benchmark Results" in content
+    assert "## Review Findings" in content
+    assert "## Fix Log" in content
+    assert "## Final Report" not in content
+    assert "## Verification Results" not in content
+
+
+def test_init_test_uses_test_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Improve auth tests",
+        description="Add missing integration coverage",
+        task_type="test",
+        priority="P2",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Coverage Analysis" in content
+    assert "## Test Implementation" in content
+    assert "## Verification Results" in content
+    assert "## Review Findings" in content
+    assert "## Fix Log" in content
+    assert "## Plan" not in content
+    assert "## Final Report" not in content
+
+
+def test_init_docs_uses_docs_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Docs refresh",
+        description="Update onboarding and API usage docs",
+        task_type="docs",
+        priority="P2",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Documentation Analysis" in content
+    assert "## Documentation Updates" in content
+    assert "## Verification Results" in content
+    assert "## Review Findings" in content
+    assert "## Fix Log" in content
+    assert "## Plan" not in content
+    assert "## Final Report" not in content
+
+
+def test_init_hotfix_uses_hotfix_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Urgent auth fix",
+        description="Patch production login issue",
+        task_type="hotfix",
+        priority="P0",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Hotfix Implementation" in content
+    assert "## Verification Results" in content
+    assert "## Review Findings" in content
+    assert "## Fix Log" in content
+    assert "## Plan" not in content
+    assert "## Analysis" not in content
+    assert "## Final Report" not in content
+
+
+def test_init_chore_uses_chore_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Formatting cleanup",
+        description="Apply standard formatting rules",
+        task_type="chore",
+        priority="P3",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Chore Implementation" in content
+    assert "## Verification Results" in content
+    assert "## Plan" not in content
+    assert "## Review Findings" not in content
+    assert "## Fix Log" not in content
+    assert "## Final Report" not in content
+
+
+def test_init_spike_uses_spike_template(service: OrchestratorService, project_dir: Path) -> None:
+    task = Task(
+        title="Evaluate caching strategy",
+        description="Timebox an exploratory prototype",
+        task_type="spike",
+        priority="P2",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text()
+    assert "## Spike Analysis" in content
+    assert "## Prototype Notes" in content
+    assert "## Final Report" in content
+    assert "## Review Findings" not in content
+    assert "## Fix Log" not in content
+    assert "## Verification Results" not in content
+
+
+def test_builtin_pipelines_use_dedicated_templates(service: OrchestratorService) -> None:
+    """All built-in pipelines should avoid falling back to generic workdoc template."""
+    representative_task_types = {
+        "feature": "feature",
+        "bug_fix": "bug",
+        "refactor": "refactor",
+        "research": "research",
+        "docs": "docs",
+        "test": "test",
+        "repo_review": "repo_review",
+        "security_audit": "security",
+        "review": "review",
+        "performance": "performance",
+        "hotfix": "hotfix",
+        "spike": "spike",
+        "chore": "chore",
+        "plan_only": "initiative_plan",
+        "verify_only": "verify_only",
+    }
+    assert set(representative_task_types.keys()) == set(BUILTIN_TEMPLATES.keys())
+
+    for pipeline_id, task_type in representative_task_types.items():
+        task = Task(title=f"Template check {pipeline_id}", task_type=task_type)
+        template = service._workdoc_template_for_task(task)
+        assert template != service._GENERIC_WORKDOC_TEMPLATE
 
 
 def test_bootstrap_adds_workdoc_gitignore_entry(project_dir: Path) -> None:
@@ -180,6 +463,26 @@ def test_sync_fallback_appends_summary(service: OrchestratorService, task: Task,
     assert "_Pending: will be populated by the plan step._" not in content
 
 
+def test_sync_fallback_writes_analyze_to_analysis_section(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Analyze summaries should be persisted into ## Analysis."""
+    task = Task(
+        title="Refactor auth module",
+        description="Consolidate auth checks",
+        task_type="refactor",
+        priority="P2",
+    )
+    service._init_workdoc(task, project_dir)
+
+    service._sync_workdoc(task, "analyze", project_dir, "Current state: duplicated auth checks in two modules.")
+
+    canonical = service._workdoc_canonical_path(task.id)
+    content = canonical.read_text()
+    assert "Current state: duplicated auth checks in two modules." in content
+    assert "_Pending: will be populated by the analyze step._" not in content
+
+
 def test_sync_fallback_appends_under_existing_content(service: OrchestratorService, task: Task, project_dir: Path) -> None:
     """When placeholder is already replaced, summary appends under the heading."""
     service._init_workdoc(task, project_dir)
@@ -250,6 +553,66 @@ def test_sync_implement_fix_ignores_worker_changes_and_formats_cycles(
     assert "Fixed null check in parser." in content
     assert "### Fix Cycle 3" in content
     assert "Adjusted edge-case tests." in content
+
+
+def test_sync_report_ignores_worker_changes_and_uses_summary(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Report step should be orchestrator-managed and append into Final Report."""
+    task = Task(
+        title="Research report",
+        description="Investigate DB options",
+        task_type="research",
+        priority="P2",
+    )
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+    worktree = service._workdoc_worktree_path(project_dir)
+    before = canonical.read_text()
+
+    modified = worktree.read_text().replace(
+        "_Pending: will be populated by the report step._",
+        "worker-edited report text",
+    )
+    worktree.write_text(modified, encoding="utf-8")
+
+    service._sync_workdoc(task, "report", project_dir, "Final status: done with known risk A.")
+
+    content = canonical.read_text()
+    assert content != modified
+    assert "Final status: done with known risk A." in content
+    assert "worker-edited report text" not in content
+    assert content != before
+
+
+def test_sync_profile_ignores_worker_changes_and_uses_summary(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Profile step should be orchestrator-managed and append into Profiling Baseline."""
+    task = Task(
+        title="Performance baseline",
+        description="Profile request latency",
+        task_type="performance",
+        priority="P1",
+    )
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+    worktree = service._workdoc_worktree_path(project_dir)
+    before = canonical.read_text()
+
+    modified = worktree.read_text().replace(
+        "_Pending: will be populated by the profile step._",
+        "worker-edited profile text",
+    )
+    worktree.write_text(modified, encoding="utf-8")
+
+    service._sync_workdoc(task, "profile", project_dir, "Baseline p95=220ms, cpu=78% under load test.")
+
+    content = canonical.read_text()
+    assert content != modified
+    assert "Baseline p95=220ms, cpu=78% under load test." in content
+    assert "worker-edited profile text" not in content
+    assert content != before
 
 
 def test_sync_noop_when_no_canonical(service: OrchestratorService, task: Task, project_dir: Path) -> None:

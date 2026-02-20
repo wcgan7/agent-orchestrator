@@ -55,14 +55,6 @@ Run task:
 agent-orchestrator [--project-dir PATH] task run <task_id>
 ```
 
-## Quick Action
-
-```bash
-agent-orchestrator [--project-dir PATH] quick-action "prompt text"
-```
-
-Quick actions are ephemeral by default and do not create board tasks unless promoted later.
-
 ## Orchestrator
 
 Status:

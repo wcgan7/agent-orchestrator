@@ -43,7 +43,9 @@ def _make_adapter(tmp_path: Path, *, default_model: str) -> tuple[LiveWorkerAdap
         "providers": {
             "codex": {
                 "type": "codex",
-                "command": f"{fake_worker} {{project_dir}}/.captured-worker-args.txt",
+                # Keep --full-auto pre-set so codex command builder doesn't inject it
+                # ahead of our fake worker output-file argument.
+                "command": f"{fake_worker} {{project_dir}}/.captured-worker-args.txt --full-auto",
             }
         },
     }

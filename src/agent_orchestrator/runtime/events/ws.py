@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import threading
 from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import WebSocket
+
+logger = logging.getLogger(__name__)
 
 
 CHANNELS = {
@@ -14,7 +17,7 @@ CHANNELS = {
     "queue",
     "agents",
     "review",
-    "quick_actions",
+    "terminal",
     "notifications",
     "system",
 }
@@ -93,7 +96,7 @@ class WebSocketHub:
                 elif action == "ping":
                     await websocket.send_text(json.dumps({"channel": "system", "type": "pong", "payload": {}}))
         except Exception:
-            pass
+            logger.debug("WebSocket client loop terminated with exception", exc_info=True)
         finally:
             self._clients.pop(cid, None)
 
@@ -126,7 +129,7 @@ class WebSocketHub:
             self.attach_loop(loop)
             loop.create_task(self.publish(event))
         except RuntimeError:
-            pass
+            logger.debug("No running event loop available for publish_sync", exc_info=True)
 
 
 hub = WebSocketHub()

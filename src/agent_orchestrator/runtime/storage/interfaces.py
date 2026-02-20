@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
-from ..domain.models import AgentRecord, PlanRefineJob, PlanRevision, QuickActionRun, ReviewCycle, RunRecord, Task
+from ..domain.models import AgentRecord, PlanRefineJob, PlanRevision, ReviewCycle, RunRecord, Task, TerminalSession
 
 
 class TaskRepository(ABC):
@@ -60,17 +60,17 @@ class AgentRepository(ABC):
         raise NotImplementedError
 
 
-class QuickActionRepository(ABC):
+class TerminalSessionRepository(ABC):
     @abstractmethod
-    def list(self) -> list[QuickActionRun]:
+    def list(self) -> list[TerminalSession]:
         raise NotImplementedError
 
     @abstractmethod
-    def get(self, quick_action_id: str) -> Optional[QuickActionRun]:
+    def get(self, session_id: str) -> Optional[TerminalSession]:
         raise NotImplementedError
 
     @abstractmethod
-    def upsert(self, quick_action: QuickActionRun) -> QuickActionRun:
+    def upsert(self, session: TerminalSession) -> TerminalSession:
         raise NotImplementedError
 
 
