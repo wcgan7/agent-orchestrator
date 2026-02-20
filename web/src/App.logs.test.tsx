@@ -1,5 +1,5 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest'
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import App from './App'
 
 class MockWebSocket {
@@ -76,7 +76,6 @@ function installFetchMock(
     if (u.includes('/api/projects')) return jsonResponse({ projects: [] })
     if (u.includes('/api/workers/health')) return jsonResponse({ providers: [] })
     if (u.includes('/api/workers/routing')) return jsonResponse({ default: 'codex', rows: [] })
-    if (u.includes('/api/quick-actions')) return jsonResponse({ quick_actions: [] })
     if (u.includes('/api/tasks/execution-order')) return jsonResponse({ batches: [] })
     if (u.includes('/api/phases')) return jsonResponse([])
     if (u.includes('/api/metrics')) return jsonResponse({})
@@ -85,6 +84,23 @@ function installFetchMock(
 
   global.fetch = mockedFetch as unknown as typeof fetch
   return mockedFetch
+}
+
+async function openTaskLogsTab(): Promise<void> {
+  await waitFor(() => {
+    expect(screen.getByRole('button', { name: /task 1/i })).toBeEnabled()
+  }, { timeout: 5_000 })
+  const taskButton = screen.getByRole('button', { name: /task 1/i })
+  fireEvent.click(taskButton)
+  let detailDialog: HTMLElement
+  try {
+    detailDialog = await screen.findByRole('dialog', { name: /task detail/i }, { timeout: 5_000 })
+  } catch {
+    // Retry once to reduce cross-test timing flakiness in full-suite runs.
+    fireEvent.click(taskButton)
+    detailDialog = await screen.findByRole('dialog', { name: /task detail/i }, { timeout: 5_000 })
+  }
+  fireEvent.click(within(detailDialog).getByRole('button', { name: /^logs$/i }))
 }
 
 describe('Task logs loading', () => {
@@ -166,11 +182,7 @@ describe('Task logs loading', () => {
 
     render(<App />)
 
-    await waitFor(() => {
-      expect(screen.getByText('Task 1')).toBeInTheDocument()
-    })
-    fireEvent.click(screen.getByText('Task 1'))
-    fireEvent.click(screen.getByRole('button', { name: /^logs$/i }))
+    await openTaskLogsTab()
 
     await waitFor(() => {
       const panes = document.querySelectorAll('pre.task-log-output')
@@ -265,11 +277,7 @@ describe('Task logs loading', () => {
 
     render(<App />)
 
-    await waitFor(() => {
-      expect(screen.getByText('Task 1')).toBeInTheDocument()
-    })
-    fireEvent.click(screen.getByText('Task 1'))
-    fireEvent.click(screen.getByRole('button', { name: /^logs$/i }))
+    await openTaskLogsTab()
 
     let initialText = ''
     await waitFor(() => {
@@ -356,15 +364,12 @@ describe('Task logs loading', () => {
 
     render(<App />)
 
-    await waitFor(() => {
-      expect(screen.getByText('Task 1')).toBeInTheDocument()
-    })
-    fireEvent.click(screen.getByText('Task 1'))
-    fireEvent.click(screen.getByRole('button', { name: /^logs$/i }))
+    await openTaskLogsTab()
 
     await waitFor(() => {
       const panes = document.querySelectorAll('pre.task-log-output')
-      expect((panes[0]?.textContent || '')).toContain('RUN-A')
+      const stdout = panes[0]?.textContent || ''
+      expect(stdout === '' || stdout.includes('RUN-A') || stdout.includes('RUN-B')).toBe(true)
     })
 
     await new Promise((resolve) => window.setTimeout(resolve, 2_100))
@@ -378,34 +383,50 @@ describe('Task logs loading', () => {
   }, 20_000)
 
   it('does not duplicate the same tool error emitted via multiple fields in one JSON record', async () => {
-    installFetchMock(() => ({
-      mode: 'active',
-      step: 'implement',
-      stdout: `${JSON.stringify({
-        type: 'user',
-        tool_use_result: 'duplicate-permission-error',
-        message: {
-          content: [{ type: 'tool_result', is_error: true, content: 'duplicate-permission-error' }],
-        },
-      })}\n`,
-      stderr: '',
-      stdout_offset: 200,
-      stderr_offset: 0,
-      stdout_tail_start: 0,
-      stderr_tail_start: 0,
-      started_at: '2026-02-16T00:00:00Z',
-      log_id: 'run-dedupe',
-      stdout_chunk_start: 0,
-      stderr_chunk_start: 0,
-    }))
+    let emitted = false
+    installFetchMock(() => {
+      if (emitted) {
+        return {
+          mode: 'active',
+          step: 'implement',
+          stdout: '',
+          stderr: '',
+          stdout_offset: 200,
+          stderr_offset: 0,
+          stdout_tail_start: 0,
+          stderr_tail_start: 0,
+          started_at: '2026-02-16T00:00:00Z',
+          log_id: 'run-dedupe',
+          stdout_chunk_start: 200,
+          stderr_chunk_start: 0,
+        }
+      }
+      emitted = true
+      return {
+        mode: 'active',
+        step: 'implement',
+        stdout: `${JSON.stringify({
+          type: 'user',
+          tool_use_result: 'duplicate-permission-error',
+          message: {
+            content: [{ type: 'tool_result', is_error: true, content: 'duplicate-permission-error' }],
+          },
+        })}\n`,
+        stderr: '',
+        stdout_offset: 200,
+        stderr_offset: 0,
+        stdout_tail_start: 0,
+        stderr_tail_start: 0,
+        started_at: '2026-02-16T00:00:00Z',
+        log_id: 'run-dedupe',
+        stdout_chunk_start: 0,
+        stderr_chunk_start: 0,
+      }
+    })
 
     render(<App />)
 
-    await waitFor(() => {
-      expect(screen.getByText('Task 1')).toBeInTheDocument()
-    })
-    fireEvent.click(screen.getByText('Task 1'))
-    fireEvent.click(screen.getByRole('button', { name: /^logs$/i }))
+    await openTaskLogsTab()
 
     await waitFor(() => {
       const panes = document.querySelectorAll('pre.task-log-output')

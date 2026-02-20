@@ -9,13 +9,13 @@ from pathlib import Path
 from typing import Any, Callable, Generic, Optional, TypeVar
 
 from ...io_utils import FileLock
-from ..domain.models import AgentRecord, PlanRefineJob, PlanRevision, QuickActionRun, ReviewCycle, RunRecord, Task, now_iso
+from ..domain.models import AgentRecord, PlanRefineJob, PlanRevision, ReviewCycle, RunRecord, Task, TerminalSession, now_iso
 from .interfaces import (
     AgentRepository,
     EventRepository,
     PlanRefineJobRepository,
     PlanRevisionRepository,
-    QuickActionRepository,
+    TerminalSessionRepository,
     ReviewRepository,
     RunRepository,
     TaskRepository,
@@ -275,42 +275,39 @@ class FileAgentRepository(AgentRepository):
                 return True
 
 
-class FileQuickActionRepository(QuickActionRepository):
+class FileTerminalSessionRepository(TerminalSessionRepository):
     def __init__(self, path: Path, lock_path: Path) -> None:
-        self._repo = _YamlCollectionRepo[QuickActionRun](
+        self._repo = _YamlCollectionRepo[TerminalSession](
             path,
             lock_path,
-            "quick_actions",
-            loader=QuickActionRun.from_dict,
+            "terminal_sessions",
+            loader=TerminalSession.from_dict,
             dumper=lambda q: q.to_dict(),
         )
 
-    def list(self) -> list[QuickActionRun]:
+    def list(self) -> list[TerminalSession]:
         with self._repo._thread_lock:
             with self._repo._lock:
                 return self._repo._load()
 
-    def get(self, quick_action_id: str) -> Optional[QuickActionRun]:
+    def get(self, session_id: str) -> Optional[TerminalSession]:
         for run in self.list():
-            if run.id == quick_action_id:
+            if run.id == session_id:
                 return run
         return None
 
-    def upsert(self, quick_action: QuickActionRun) -> QuickActionRun:
+    def upsert(self, session: TerminalSession) -> TerminalSession:
         with self._repo._thread_lock:
             with self._repo._lock:
                 runs = self._repo._load()
                 for idx, existing in enumerate(runs):
-                    if existing.id == quick_action.id:
-                        # Preserve promotion linkage across async status updates.
-                        if existing.promoted_task_id and not quick_action.promoted_task_id:
-                            quick_action.promoted_task_id = existing.promoted_task_id
-                        runs[idx] = quick_action
+                    if existing.id == session.id:
+                        runs[idx] = session
                         self._repo._save(runs)
-                        return quick_action
-                runs.append(quick_action)
+                        return session
+                runs.append(session)
                 self._repo._save(runs)
-        return quick_action
+        return session
 
 
 class FileEventRepository(EventRepository):

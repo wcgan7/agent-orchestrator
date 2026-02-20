@@ -80,7 +80,7 @@ describe('App default route', () => {
     await waitFor(() => {
       expect(screen.getAllByRole('button', { name: /Create Task/i }).length).toBeGreaterThan(0)
       expect(screen.getByRole('button', { name: /Import PRD/i })).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: /Quick Action/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Terminal/i })).toBeInTheDocument()
     })
   })
 
@@ -130,6 +130,241 @@ describe('App default route', () => {
     expect(body.parent_id).toBe('task-parent-01')
     expect(body.pipeline_template).toEqual(['plan', 'implement', 'verify'])
     expect(body.metadata).toEqual({ area: 'payments' })
+  })
+
+  it('auto-classifies pipeline and submits resolved task_type on high confidence', async () => {
+    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
+    mockedFetch.mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      if (u.includes('/api/tasks/classify-pipeline') && method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            pipeline_id: 'docs',
+            task_type: 'docs',
+            confidence: 'high',
+            reason: 'Documentation-only request.',
+            allowed_pipelines: ['feature', 'docs'],
+          }),
+        })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/') && method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({ task: { id: 'task-1' } }) })
+      }
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({ ok: true, json: async () => ({ columns: { backlog: [], queued: [], in_progress: [], in_review: [], blocked: [], done: [] } }) })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/agents')) {
+        return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      }
+      if (u.includes('/api/projects')) {
+        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+
+    render(<App />)
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: /^Create Work$/i }).length).toBeGreaterThan(0)
+    })
+
+    fireEvent.click(screen.getAllByRole('button', { name: /^Create Work$/i })[0])
+    const titleInput = screen.getByLabelText(/Title/i)
+    fireEvent.change(titleInput, { target: { value: 'Refresh README' } })
+    fireEvent.submit(titleInput.closest('form') as HTMLFormElement)
+
+    await waitFor(() => {
+      const createCall = mockedFetch.mock.calls.find(([url, callInit]) => {
+        return String(url).includes('/api/tasks') && !String(url).includes('/api/tasks/') && String((callInit as RequestInit | undefined)?.method || '').toUpperCase() === 'POST'
+      })
+      expect(createCall).toBeTruthy()
+    })
+
+    const createCall = mockedFetch.mock.calls.find(([url, callInit]) => {
+      return String(url).includes('/api/tasks') && !String(url).includes('/api/tasks/') && String((callInit as RequestInit | undefined)?.method || '').toUpperCase() === 'POST'
+    })
+    expect(createCall).toBeTruthy()
+    const body = JSON.parse(String((createCall?.[1] as RequestInit).body))
+    expect(body.task_type).toBe('docs')
+    expect(body.classifier_pipeline_id).toBe('docs')
+    expect(body.classifier_confidence).toBe('high')
+  })
+
+  it('requires manual pipeline selection after low-confidence auto classification', async () => {
+    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
+    mockedFetch.mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      if (u.includes('/api/tasks/classify-pipeline') && method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            pipeline_id: 'feature',
+            task_type: 'feature',
+            confidence: 'low',
+            reason: 'Task intent is ambiguous.',
+            allowed_pipelines: ['feature', 'docs'],
+          }),
+        })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/') && method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({ task: { id: 'task-1' } }) })
+      }
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({ ok: true, json: async () => ({ columns: { backlog: [], queued: [], in_progress: [], in_review: [], blocked: [], done: [] } }) })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/agents')) {
+        return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      }
+      if (u.includes('/api/projects')) {
+        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+
+    render(<App />)
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: /^Create Work$/i }).length).toBeGreaterThan(0)
+    })
+
+    fireEvent.click(screen.getAllByRole('button', { name: /^Create Work$/i })[0])
+    const titleInput = screen.getByLabelText(/Title/i)
+    fireEvent.change(titleInput, { target: { value: 'Help with stuff' } })
+    fireEvent.submit(titleInput.closest('form') as HTMLFormElement)
+
+    await waitFor(() => {
+      expect(screen.getByText(/Auto classification is low confidence/i)).toBeInTheDocument()
+    })
+
+    const typeSelect = screen.getByLabelText(/Task Type/i) as HTMLSelectElement
+    const autoOption = Array.from(typeSelect.options).find((o) => o.value === 'auto')
+    expect(autoOption?.disabled).toBe(true)
+
+    const createCallsAfterLow = mockedFetch.mock.calls.filter(([url, callInit]) => {
+      return String(url).includes('/api/tasks') && !String(url).includes('/api/tasks/') && String((callInit as RequestInit | undefined)?.method || '').toUpperCase() === 'POST'
+    })
+    expect(createCallsAfterLow.length).toBe(0)
+
+    fireEvent.change(typeSelect, { target: { value: 'feature' } })
+    fireEvent.submit(titleInput.closest('form') as HTMLFormElement)
+
+    await waitFor(() => {
+      const createCall = mockedFetch.mock.calls.find(([url, callInit]) => {
+        return String(url).includes('/api/tasks') && !String(url).includes('/api/tasks/') && String((callInit as RequestInit | undefined)?.method || '').toUpperCase() === 'POST'
+      })
+      expect(createCall).toBeTruthy()
+    })
+
+    const createCall = mockedFetch.mock.calls.find(([url, callInit]) => {
+      return String(url).includes('/api/tasks') && !String(url).includes('/api/tasks/') && String((callInit as RequestInit | undefined)?.method || '').toUpperCase() === 'POST'
+    })
+    expect(createCall).toBeTruthy()
+    const body = JSON.parse(String((createCall?.[1] as RequestInit).body))
+    expect(body.task_type).toBe('feature')
+    expect(body.classifier_confidence).toBe('low')
+    expect(body.was_user_override).toBe(true)
+  })
+
+  it('does not leak stale classifier metadata into unrelated manual submit', async () => {
+    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
+    let createAttempts = 0
+    mockedFetch.mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      if (u.includes('/api/tasks/classify-pipeline') && method === 'POST') {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            pipeline_id: 'docs',
+            task_type: 'docs',
+            confidence: 'high',
+            reason: 'Documentation-only request.',
+            allowed_pipelines: ['feature', 'docs'],
+          }),
+        })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/') && method === 'POST') {
+        createAttempts += 1
+        if (createAttempts === 1) {
+          return Promise.resolve({ ok: false, text: async () => 'create failed once' })
+        }
+        return Promise.resolve({ ok: true, json: async () => ({ task: { id: 'task-1' } }) })
+      }
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({ ok: true, json: async () => ({ columns: { backlog: [], queued: [], in_progress: [], in_review: [], blocked: [], done: [] } }) })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/agents')) {
+        return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      }
+      if (u.includes('/api/projects')) {
+        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+
+    render(<App />)
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: /^Create Work$/i }).length).toBeGreaterThan(0)
+    })
+
+    fireEvent.click(screen.getAllByRole('button', { name: /^Create Work$/i })[0])
+    const titleInput = screen.getByLabelText(/Title/i)
+    const typeSelect = screen.getByLabelText(/Task Type/i)
+    fireEvent.change(titleInput, { target: { value: 'Refresh README' } })
+    fireEvent.submit(titleInput.closest('form') as HTMLFormElement)
+
+    await waitFor(() => {
+      expect(createAttempts).toBe(1)
+    })
+
+    fireEvent.change(typeSelect, { target: { value: 'feature' } })
+    fireEvent.change(titleInput, { target: { value: 'Build auth API' } })
+    fireEvent.submit(titleInput.closest('form') as HTMLFormElement)
+
+    await waitFor(() => {
+      const createCalls = mockedFetch.mock.calls.filter(([url, callInit]) => {
+        return String(url).includes('/api/tasks') && !String(url).includes('/api/tasks/') && String((callInit as RequestInit | undefined)?.method || '').toUpperCase() === 'POST'
+      })
+      expect(createCalls.length).toBeGreaterThan(1)
+    })
+
+    const createCalls = mockedFetch.mock.calls.filter(([url, callInit]) => {
+      return String(url).includes('/api/tasks') && !String(url).includes('/api/tasks/') && String((callInit as RequestInit | undefined)?.method || '').toUpperCase() === 'POST'
+    })
+    const secondBody = JSON.parse(String((createCalls[1][1] as RequestInit).body))
+    expect(secondBody.task_type).toBe('feature')
+    expect(secondBody.classifier_pipeline_id).toBeUndefined()
+    expect(secondBody.classifier_confidence).toBeUndefined()
+    expect(secondBody.classifier_reason).toBeUndefined()
+    expect(secondBody.was_user_override).toBeUndefined()
   })
 
   it('opens task detail modal when clicking a kanban card', async () => {

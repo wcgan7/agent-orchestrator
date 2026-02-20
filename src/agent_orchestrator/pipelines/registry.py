@@ -107,12 +107,10 @@ REFACTOR_PIPELINE = PipelineTemplate(
 RESEARCH_PIPELINE = PipelineTemplate(
     id="research",
     display_name="Research",
-    description="Gather information, analyze, summarize findings.",
+    description="Analyze findings and produce a report.",
     task_types=("research",),
     steps=(
-        StepDef(name="gather", display_name="Gather"),
         StepDef(name="analyze", display_name="Analyze"),
-        StepDef(name="summarize", display_name="Summarize"),
         StepDef(name="report", display_name="Report", required=False),
     ),
 )
@@ -120,11 +118,12 @@ RESEARCH_PIPELINE = PipelineTemplate(
 DOCS_PIPELINE = PipelineTemplate(
     id="docs",
     display_name="Documentation",
-    description="Analyze code, write documentation, review, commit.",
+    description="Analyze docs scope, write documentation, verify docs quality, review, commit.",
     task_types=("docs",),
     steps=(
         StepDef(name="analyze", display_name="Analyze Code"),
         StepDef(name="implement", display_name="Write Docs"),
+        StepDef(name="verify", display_name="Verify Docs"),
         StepDef(name="review", display_name="Review"),
         StepDef(name="commit", display_name="Commit"),
     ),
@@ -147,11 +146,11 @@ TEST_PIPELINE = PipelineTemplate(
 REPO_REVIEW_PIPELINE = PipelineTemplate(
     id="repo_review",
     display_name="Repository Review",
-    description="Scan codebase, analyze findings, generate improvement tasks.",
+    description="Analyze repository state, produce an initiative plan, and generate improvement tasks.",
     task_types=("repo_review",),
     steps=(
-        StepDef(name="scan", display_name="Scan"),
         StepDef(name="analyze", display_name="Analyze"),
+        StepDef(name="initiative_plan", display_name="Initiative Plan"),
         StepDef(name="generate_tasks", display_name="Generate Tasks"),
     ),
 )
@@ -216,9 +215,8 @@ SPIKE_PIPELINE = PipelineTemplate(
     description="Timeboxed exploration with throwaway prototyping. No commit.",
     task_types=("spike",),
     steps=(
-        StepDef(name="gather", display_name="Gather Context"),
+        StepDef(name="analyze", display_name="Analyze Context"),
         StepDef(name="prototype", display_name="Prototype"),
-        StepDef(name="summarize", display_name="Summarize Findings"),
         StepDef(name="report", display_name="Report"),
     ),
 )
@@ -237,25 +235,13 @@ CHORE_PIPELINE = PipelineTemplate(
 
 PLAN_ONLY_PIPELINE = PipelineTemplate(
     id="plan_only",
-    display_name="Plan Only",
-    description="Analyze and produce a plan or spec without implementing.",
-    task_types=("plan_only", "plan"),
+    display_name="Initiative Plan",
+    description="Initiative-level planning with decomposition into executable tasks.",
+    task_types=("initiative_plan", "plan_only", "plan", "decompose"),
     steps=(
         StepDef(name="analyze", display_name="Analyze"),
-        StepDef(name="plan", display_name="Plan"),
-        StepDef(name="report", display_name="Report"),
-    ),
-)
-
-DECOMPOSE_PIPELINE = PipelineTemplate(
-    id="decompose",
-    display_name="Decompose",
-    description="Break a large task into implementable subtasks.",
-    task_types=("decompose",),
-    steps=(
-        StepDef(name="analyze", display_name="Analyze Scope"),
-        StepDef(name="plan", display_name="Plan Breakdown"),
-        StepDef(name="generate_tasks", display_name="Generate Subtasks"),
+        StepDef(name="initiative_plan", display_name="Initiative Plan"),
+        StepDef(name="generate_tasks", display_name="Generate Tasks"),
     ),
 )
 
@@ -288,7 +274,6 @@ BUILTIN_TEMPLATES: dict[str, PipelineTemplate] = {
         SPIKE_PIPELINE,
         CHORE_PIPELINE,
         PLAN_ONLY_PIPELINE,
-        DECOMPOSE_PIPELINE,
         VERIFY_ONLY_PIPELINE,
     ]
 }

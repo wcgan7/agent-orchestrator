@@ -4,7 +4,7 @@
 
 Agent Orchestrator is an orchestration-first AI engineering control center.
 The primary unit is a `Task`. You can create tasks directly, import them from a PRD,
-or run one-off quick actions.
+or use an embedded terminal for direct interactive shell work.
 
 Primary UI surfaces:
 - Board
@@ -37,7 +37,7 @@ Open:
 
 - Task: persistent, board-backed work item.
 - Import Job: PRD parse/preview/commit workflow that creates tasks + dependencies.
-- Quick Action: ephemeral one-off run; can be promoted into a task.
+- Terminal Session: interactive PTY-backed shell session scoped to the active project.
 - Review Queue: tasks waiting for human approval (`in_review`).
 - Agent: worker process entry in orchestrator pool.
 
@@ -45,7 +45,7 @@ Open:
 
 Statuses:
 - `backlog`
-- `ready`
+- `queued`
 - `in_progress`
 - `in_review`
 - `done`
@@ -67,7 +67,7 @@ Dependency rules:
 
 1. Open `Create Work` -> `Create Task`.
 2. Fill title/description/type/priority.
-3. Move task to `ready` (or use run actions from task detail).
+3. Move task to `queued` (or use run actions from task detail).
 4. Monitor progress in `Execution` and task detail.
 5. Approve in `Review Queue` if task reaches `in_review`.
 
@@ -79,12 +79,12 @@ Dependency rules:
 4. Commit import job to create board tasks.
 5. Track created tasks from board and import job details.
 
-### 3. Run a Quick Action
+### 3. Use Embedded Terminal
 
-1. Open `Create Work` -> `Quick Action`.
-2. Submit prompt.
-3. Review quick action result in detail panel.
-4. Optionally click promote to create a board task.
+1. Open `Create Work` -> `Terminal`.
+2. Start or attach to the active terminal session.
+3. Run commands interactively and monitor live output.
+4. Stop the session when done.
 
 ## Project Management
 
@@ -173,7 +173,7 @@ Used channels:
 - `queue`
 - `agents`
 - `review`
-- `quick_actions`
+- `terminal`
 - `notifications`
 - `system`
 
@@ -189,7 +189,7 @@ Key files:
 - `runs.yaml`
 - `review_cycles.yaml`
 - `agents.yaml`
-- `quick_actions.yaml`
+- `terminal_sessions.yaml`
 - `events.jsonl`
 - `config.yaml`
 
@@ -204,4 +204,4 @@ If legacy state exists, it is archived automatically to:
 - Verify selected project:
   - `GET /` (returns project + project_id)
 - If UI appears stale, confirm `/ws` connectivity and project selection.
-- If a task won’t run, inspect blockers and status (`ready` required).
+- If a task won’t run, inspect blockers and status (`queued` required).

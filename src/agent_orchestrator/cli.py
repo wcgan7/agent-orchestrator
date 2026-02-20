@@ -97,19 +97,6 @@ def _task_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def _quick_action(args: argparse.Namespace) -> int:
-    container, orchestrator = _ctx(args.project_dir)
-    from .runtime.domain.models import QuickActionRun
-    from .runtime.quick_actions.executor import QuickActionExecutor
-
-    bus = EventBus(container.events, container.project_id)
-    run = QuickActionRun(prompt=args.prompt)
-    executor = QuickActionExecutor(container, bus)
-    run = executor.execute(run)
-    sys.stdout.write(json.dumps({'quick_action': run.to_dict()}, indent=2) + '\n')
-    return 0 if run.status == 'completed' else 1
-
-
 def _orchestrator_status(args: argparse.Namespace) -> int:
     _, orchestrator = _ctx(args.project_dir)
     sys.stdout.write(json.dumps(orchestrator.status(), indent=2) + '\n')
@@ -177,10 +164,6 @@ def build_parser() -> argparse.ArgumentParser:
     trun = task_sub.add_parser('run', help='Run a task')
     trun.add_argument('task_id')
     trun.set_defaults(func=_task_run)
-
-    quick = subparsers.add_parser('quick-action', help='Run an ephemeral quick action')
-    quick.add_argument('prompt')
-    quick.set_defaults(func=_quick_action)
 
     orchestrator = subparsers.add_parser('orchestrator', help='Inspect/control orchestrator')
     orch_sub = orchestrator.add_subparsers(dest='orchestrator_cmd', required=True)

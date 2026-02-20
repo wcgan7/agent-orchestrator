@@ -21,3 +21,8 @@ Reporting requirements:
 Scope boundary:
 - Verify execution outcomes only.
 - Do NOT perform acceptance-criteria judgment or approval decisions; that belongs to review.
+
+Output requirements:
+- Return JSON only; no conversational text or markdown fences.
+- Respond with valid JSON matching this schema:
+  `{"status": "pass|fail|skip|environment", "reason_code": "assertion_failure|type_error|lint_violation|tool_missing|config_missing|no_tests|permission_denied|resource_limit|os_incompatibility|infrastructure|unknown", "summary": "one-line summary of results"}`

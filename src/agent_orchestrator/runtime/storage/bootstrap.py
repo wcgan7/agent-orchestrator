@@ -16,7 +16,7 @@ STATE_FILES = {
     "runs": "runs.yaml",
     "review_cycles": "review_cycles.yaml",
     "agents": "agents.yaml",
-    "quick_actions": "quick_actions.yaml",
+    "terminal_sessions": "terminal_sessions.yaml",
     "plan_revisions": "plan_revisions.yaml",
     "plan_refine_jobs": "plan_refine_jobs.yaml",
     "events": "events.jsonl",

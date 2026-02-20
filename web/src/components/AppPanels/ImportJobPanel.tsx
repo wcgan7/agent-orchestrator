@@ -14,6 +14,9 @@ type PreviewEdge = {
 type PrdPreview = {
   nodes: PreviewNode[]
   edges: PreviewEdge[]
+  chunk_count?: number
+  strategy?: string
+  ambiguity_warnings?: string[]
 }
 
 type ImportJobRecord = {
@@ -65,6 +68,9 @@ export function ImportJobPanel({
           {importPreview ? (
             <div className="import-preview-graph">
               <p className="field-label">Preview Graph</p>
+              <p className="task-meta">
+                Chunks: {importPreview.chunk_count ?? '-'} · Strategy: {importPreview.strategy || '-'}
+              </p>
               {importPreview.nodes.map((node) => (
                 <div key={node.id} className="import-node">
                   <span>{node.id}</span>
@@ -79,6 +85,14 @@ export function ImportJobPanel({
               ) : (
                 <p className="field-label">Edges: none</p>
               )}
+              {(importPreview.ambiguity_warnings || []).length > 0 ? (
+                <div className="form-stack">
+                  <p className="field-label">Ambiguity warnings</p>
+                  {(importPreview.ambiguity_warnings || []).map((warning, idx) => (
+                    <p key={`warn-${idx}`} className="task-meta">{warning}</p>
+                  ))}
+                </div>
+              ) : null}
             </div>
           ) : null}
           <button className="button button-primary" onClick={onCommitImport}>Commit to board</button>

@@ -542,6 +542,8 @@ def test_resolve_merge_receives_metadata_and_runs_in_project_dir(tmp_path: Path)
                     "has_conflict_files": "merge_conflict_files" in task.metadata,
                     "conflict_files": dict(task.metadata.get("merge_conflict_files", {})),
                     "other_tasks": list(task.metadata.get("merge_other_tasks", [])),
+                    "current_objective": task.metadata.get("merge_current_objective"),
+                    "other_objectives": list(task.metadata.get("merge_other_objectives", [])),
                     "worktree_dir": task.metadata.get("worktree_dir"),
                 })
                 # Resolve the conflict
@@ -580,6 +582,8 @@ def test_resolve_merge_receives_metadata_and_runs_in_project_dir(tmp_path: Path)
     assert len(meta["other_tasks"]) >= 1
     other_text = " ".join(meta["other_tasks"])
     assert "Alpha" in other_text or "Beta" in other_text
+    assert isinstance(meta["current_objective"], str) and meta["current_objective"].strip()
+    assert len(meta["other_objectives"]) >= 1
 
     # After completion, worktree_dir metadata should be cleaned up
     for tid in [t1.id, t2.id]:
@@ -588,6 +592,8 @@ def test_resolve_merge_receives_metadata_and_runs_in_project_dir(tmp_path: Path)
         assert "worktree_dir" not in task.metadata
         assert "merge_conflict_files" not in task.metadata
         assert "merge_other_tasks" not in task.metadata
+        assert "merge_current_objective" not in task.metadata
+        assert "merge_other_objectives" not in task.metadata
 
 
 # ---------------------------------------------------------------------------
@@ -635,6 +641,8 @@ def test_resolve_merge_worker_exception_handled(tmp_path: Path) -> None:
         assert t is not None
         assert "merge_conflict_files" not in t.metadata
         assert "merge_other_tasks" not in t.metadata
+        assert "merge_current_objective" not in t.metadata
+        assert "merge_other_objectives" not in t.metadata
 
     # The git repo should not be in a dirty merge state
     status = subprocess.run(
@@ -665,20 +673,24 @@ def test_build_step_prompt_resolve_merge() -> None:
                 "auth.py": "<<<<<<< HEAD\nold\n=======\nnew\n>>>>>>> task-xyz",
             },
             "merge_other_tasks": ["- Add OAuth: Implement OAuth2 flow"],
+            "merge_current_objective": "- Task: Fix auth\n  Description: Add JWT support",
+            "merge_other_objectives": ["- Task: Add OAuth\n  Description: Implement OAuth2 flow"],
         },
     )
 
-    prompt = build_step_prompt(task=task, step="resolve_merge", attempt=1, is_codex=True)
+    prompt = build_step_prompt(task=task, step="resolve_merge", attempt=1)
 
-    assert "Resolve the merge conflicts" in prompt
+    assert "Resolve merge conflicts for this task" in prompt
     assert "auth.py" in prompt
     assert "<<<<<<< HEAD" in prompt
     assert "Add OAuth" in prompt
+    assert "Current task objective context" in prompt
+    assert "Other task objective context" in prompt
     assert "BOTH" in prompt
 
-    # For ollama, should also include JSON schema
-    prompt_ollama = build_step_prompt(task=task, step="resolve_merge", attempt=1, is_codex=False)
-    assert "JSON" in prompt_ollama
+    # Resolve merge is not a structured-output step; no JSON schema contract appended.
+    prompt_ollama = build_step_prompt(task=task, step="resolve_merge", attempt=1)
+    assert "Respond with valid JSON matching this schema" not in prompt_ollama
 
 
 # ---------------------------------------------------------------------------

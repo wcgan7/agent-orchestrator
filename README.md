@@ -14,7 +14,7 @@ Execution runs under enforced coding standards and a continuous review-and-fix c
 - Manage a full task lifecycle on a kanban board (`backlog` → `queued` → `in_progress` → `in_review` → `done`, plus `blocked` and `cancelled`).
 - Import PRDs into executable task graphs with dependency edges.
 - Draft, refine, and commit task plans with full revision lineage before execution.
-- Run Quick Actions for one-off work and optionally promote results into tasks.
+- Use an embedded interactive terminal directly in the project directory.
 - Control orchestrator execution (`pause`, `resume`, `drain`, `stop`).
 - Choose a Human-in-the-Loop (HITL) mode per task: **Autopilot**, **Supervised**, **Collaborative**, or **Review Only**.
 - View execution summaries with per-step status, review findings, and commit SHAs in the task detail modal.
@@ -68,12 +68,12 @@ Frontend runs at `http://localhost:3000` by default (proxies `/api` to the backe
 3. Commit the import job.
 4. Review and execute created tasks from the board.
 
-### Run a quick action
+### Use embedded terminal
 
-1. Open **Create Work** → **Quick Action**.
-2. Submit a prompt or command intent.
-3. Inspect result details.
-4. Promote to a task if you want board-tracked follow-up work.
+1. Open **Create Work** → **Terminal**.
+2. Start or attach to the active project terminal session.
+3. Run commands interactively with live output and ANSI support.
+4. Stop the session from the UI when done.
 
 ## Task Lifecycle
 
@@ -89,18 +89,23 @@ Tasks support dependency graphs (validated for cycles), parallel execution with 
 
 Tasks execute through pipeline templates matched to their type:
 
-| Template | Steps |
-|---|---|
-| feature | plan → implement → verify → review → commit |
-| bug_fix | reproduce → diagnose → implement → verify → review → commit |
-| refactor | analyze → plan → implement → verify → review → commit |
-| hotfix | implement → verify → review → commit |
-| docs | analyze → implement → review → commit |
-| test | analyze → implement → verify → review → commit |
-| research | gather → analyze → summarize → report |
-| plan_only | plan |
-
-Additional templates: `repo_review`, `security_audit`, `review`, `performance`, `spike`, `chore`.
+| Pipeline | Use case / intent | Steps / flow |
+|---|---|---|
+| `feature` | Standard feature delivery with planning, quality checks, and commit. | `plan → implement → verify → review → commit` |
+| `bug_fix` | Reproduce and diagnose a bug before fixing and validating. | `reproduce → diagnose → implement → verify → review → commit` |
+| `refactor` | Structured refactor with analysis and explicit plan first. | `analyze → plan → implement → verify → review → commit` |
+| `hotfix` | Fast-path production fix without dedicated diagnosis step. | `implement → verify → review → commit` |
+| `docs` | Documentation updates with quality verification and review. | `analyze → implement → verify → review → commit` |
+| `test` | Add/adjust tests with validation and review before commit. | `analyze → implement → verify → review → commit` |
+| `research` | Investigate and produce a report (no commit step). | `analyze → report` |
+| `repo_review` | Assess repository state, form an initiative plan, then generate execution tasks. | `analyze → initiative_plan → generate_tasks` |
+| `security_audit` | Scan dependencies/code for security issues, report, and emit remediation tasks. | `scan_deps → scan_code → report → generate_tasks` |
+| `review` | Analyze and review existing changes, then produce a report. | `analyze → review → report` |
+| `performance` | Profile baseline, optimize, benchmark, then review and commit. | `profile → plan → implement → benchmark → review → commit` |
+| `spike` | Timeboxed exploratory prototype and recommendation report. | `analyze → prototype → report` |
+| `chore` | Mechanical maintenance work with verification and commit. | `implement → verify → commit` |
+| `plan_only` | Initiative-level planning and decomposition into executable tasks. | `analyze → initiative_plan → generate_tasks` |
+| `verify_only` | Run checks and report status without making code changes. | `verify → report` |
 
 ## API and CLI
 
@@ -122,9 +127,6 @@ agent-orchestrator task create "My task" --priority P1 --task-type feature
 agent-orchestrator task list --status queued
 agent-orchestrator task run <task_id>
 
-# Quick action
-agent-orchestrator quick-action "fix the lint errors in src/utils.py"
-
 # Orchestrator control
 agent-orchestrator orchestrator status
 agent-orchestrator orchestrator control pause
@@ -142,7 +144,7 @@ Runtime state is stored in the selected project directory:
 - `.agent_orchestrator/runs.yaml`
 - `.agent_orchestrator/review_cycles.yaml`
 - `.agent_orchestrator/agents.yaml`
-- `.agent_orchestrator/quick_actions.yaml`
+- `.agent_orchestrator/terminal_sessions.yaml`
 - `.agent_orchestrator/plan_revisions.yaml`
 - `.agent_orchestrator/plan_refine_jobs.yaml`
 - `.agent_orchestrator/events.jsonl`
