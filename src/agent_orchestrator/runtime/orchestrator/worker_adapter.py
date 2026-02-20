@@ -1,3 +1,5 @@
+"""Worker adapter protocol and default deterministic adapter."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -9,6 +11,7 @@ from ..domain.models import RunRecord, Task
 
 @dataclass
 class StepResult:
+    """Represents StepResult."""
     status: str = "ok"
     summary: str | None = None
     findings: list[dict[str, Any]] | None = None
@@ -18,7 +21,9 @@ class StepResult:
 
 
 class WorkerAdapter(Protocol):
+    """Represents WorkerAdapter."""
     def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        """Return run step."""
         ...
 
     def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:
@@ -38,6 +43,7 @@ class DefaultWorkerAdapter:
     """
 
     def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        """Return run step."""
         scripted_steps = task.metadata.get("scripted_steps") if isinstance(task.metadata, dict) else None
         if isinstance(scripted_steps, dict):
             key = f"{step}:{attempt}"
@@ -89,7 +95,9 @@ class DefaultWorkerAdapter:
         return StepResult(status="ok")
 
     def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        """Return run step ephemeral."""
         return self.run_step(task=task, step=step, attempt=attempt)
 
     def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path) -> str:
+        """Return generate run summary."""
         return ""

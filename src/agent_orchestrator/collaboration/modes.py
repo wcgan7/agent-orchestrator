@@ -12,6 +12,7 @@ from typing import Any
 
 
 class HITLMode(str, Enum):
+    """Represents HITLMode."""
     AUTOPILOT = "autopilot"         # agents run freely, humans review after
     SUPERVISED = "supervised"       # agents propose, humans approve each step
     COLLABORATIVE = "collaborative" # humans and agents take turns
@@ -38,6 +39,7 @@ class ModeConfig:
     require_reasoning: bool = False
 
     def to_dict(self) -> dict[str, Any]:
+        """Return to dict."""
         return {
             "mode": self.mode.value,
             "display_name": self.display_name,

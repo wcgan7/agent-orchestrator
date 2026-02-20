@@ -23,6 +23,7 @@ from .config import WorkerProviderSpec
 
 @dataclass(frozen=True)
 class WorkerRunResult:
+    """Represents WorkerRunResult."""
     provider: str
     prompt_path: str
     stdout_path: str

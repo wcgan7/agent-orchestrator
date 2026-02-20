@@ -1,3 +1,5 @@
+"""Storage container and bootstrap exports."""
+
 from .bootstrap import ensure_state_root
 from .container import Container
 

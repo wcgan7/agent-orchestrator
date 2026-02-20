@@ -3,8 +3,10 @@ target-version = "py310"
 
 [lint]
 select = ["D"]
-# Keep Google-style docstrings while allowing class-level documentation to cover __init__/magic methods.
 ignore = ["D105", "D107", "D203", "D213"]
+
+[lint.per-file-ignores]
+"tests/**/*.py" = ["D100", "D103", "D104", "D205", "D209", "D403"]
 
 [lint.pydocstyle]
 convention = "google"

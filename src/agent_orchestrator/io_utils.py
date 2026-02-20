@@ -14,7 +14,7 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     yaml = None
 
-from .utils import _now_iso, _parse_iso
+from .utils import _parse_iso
 
 WINDOWS_LOCK_BYTES = 4096
 

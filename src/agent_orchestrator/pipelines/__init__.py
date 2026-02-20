@@ -1,1 +1,1 @@
-# Flexible pipeline engine package.
+"""Pipeline templates and execution-step registries."""

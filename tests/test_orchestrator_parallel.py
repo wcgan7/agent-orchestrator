@@ -4,12 +4,11 @@ from __future__ import annotations
 import threading
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 from agent_orchestrator.runtime.domain.models import Task
 from agent_orchestrator.runtime.events import EventBus
 from agent_orchestrator.runtime.orchestrator import OrchestratorService
-from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 from agent_orchestrator.runtime.storage.container import Container
 
 
@@ -33,7 +32,6 @@ def test_tick_dispatches_to_thread_pool(tmp_path: Path) -> None:
     """Two ready tasks dispatched via two tick_once calls should run
     concurrently in separate threads."""
     barrier = threading.Barrier(2, timeout=5)
-    completed = threading.Event()
     call_threads: list[str] = []
     lock = threading.Lock()
 

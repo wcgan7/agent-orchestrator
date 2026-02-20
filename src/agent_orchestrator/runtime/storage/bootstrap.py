@@ -1,3 +1,5 @@
+"""Bootstrap helpers for runtime state storage layout."""
+
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -6,7 +8,7 @@ from pathlib import Path
 from .file_repos import FileConfigRepository
 
 try:
-    import yaml
+    import yaml  # type: ignore[import-untyped]
 except ImportError:  # pragma: no cover
     yaml = None
 
@@ -35,6 +37,8 @@ def _schema_version(path: Path) -> int | None:
     if not isinstance(raw, dict):
         return None
     value = raw.get("schema_version")
+    if value is None:
+        return None
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -75,6 +79,7 @@ def _ensure_gitignored(project_dir: Path) -> None:
 
 
 def ensure_state_root(project_dir: Path) -> Path:
+    """Ensure runtime state files/directories exist and return the state root."""
     base = project_dir / ".agent_orchestrator"
     state_root = base
 

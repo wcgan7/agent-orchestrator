@@ -1,3 +1,5 @@
+"""FastAPI routes for orchestrator runtime control and task management."""
+
 from __future__ import annotations
 
 import json
@@ -7,7 +9,7 @@ from hashlib import sha256
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -16,7 +18,15 @@ from ...collaboration.modes import MODE_CONFIGS
 from ...pipelines.registry import PipelineRegistry
 from ...workers.config import WorkerProviderSpec, get_workers_runtime_config
 from ...workers.diagnostics import test_worker
-from ..domain.models import AgentRecord, Task, now_iso
+from ..domain.models import (
+    AgentRecord,
+    ApprovalMode,
+    DependencyPolicy,
+    Priority,
+    Task,
+    TaskStatus,
+    now_iso,
+)
 from ..events.bus import EventBus
 from ..orchestrator.service import OrchestratorService
 from ..storage.container import Container
@@ -24,6 +34,7 @@ from ..terminal.service import TerminalService
 
 
 class CreateTaskRequest(BaseModel):
+    """Represents CreateTaskRequest."""
     title: str
     description: str = ""
     task_type: str = "feature"
@@ -47,12 +58,14 @@ class CreateTaskRequest(BaseModel):
 
 
 class PipelineClassificationRequest(BaseModel):
+    """Represents PipelineClassificationRequest."""
     title: str
     description: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class PipelineClassificationResponse(BaseModel):
+    """Represents PipelineClassificationResponse."""
     pipeline_id: str
     task_type: str
     confidence: Literal["high", "low"]
@@ -61,6 +74,7 @@ class PipelineClassificationResponse(BaseModel):
 
 
 class UpdateTaskRequest(BaseModel):
+    """Represents UpdateTaskRequest."""
     title: Optional[str] = None
     description: Optional[str] = None
     task_type: Optional[str] = None
@@ -77,43 +91,52 @@ class UpdateTaskRequest(BaseModel):
 
 
 class TransitionRequest(BaseModel):
+    """Represents TransitionRequest."""
     status: str
 
 
 class AddDependencyRequest(BaseModel):
+    """Represents AddDependencyRequest."""
     depends_on: str
 
 
 class PrdPreviewRequest(BaseModel):
+    """Represents PrdPreviewRequest."""
     title: Optional[str] = None
     content: str
     default_priority: str = "P2"
 
 
 class PrdCommitRequest(BaseModel):
+    """Represents PrdCommitRequest."""
     job_id: str
 
 
 class StartTerminalSessionRequest(BaseModel):
+    """Represents StartTerminalSessionRequest."""
     cols: Optional[int] = Field(default=120, ge=2, le=500)
     rows: Optional[int] = Field(default=36, ge=2, le=300)
     shell: Optional[str] = None
 
 
 class TerminalInputRequest(BaseModel):
+    """Represents TerminalInputRequest."""
     data: str
 
 
 class TerminalResizeRequest(BaseModel):
+    """Represents TerminalResizeRequest."""
     cols: int = Field(ge=2, le=500)
     rows: int = Field(ge=2, le=300)
 
 
 class StopTerminalSessionRequest(BaseModel):
+    """Represents StopTerminalSessionRequest."""
     signal: Literal["TERM", "KILL"] = "TERM"
 
 
 class PlanRefineRequest(BaseModel):
+    """Represents PlanRefineRequest."""
     base_revision_id: Optional[str] = None
     feedback: str
     instructions: Optional[str] = None
@@ -121,16 +144,19 @@ class PlanRefineRequest(BaseModel):
 
 
 class CommitPlanRequest(BaseModel):
+    """Represents CommitPlanRequest."""
     revision_id: str
 
 
 class CreatePlanRevisionRequest(BaseModel):
+    """Represents CreatePlanRevisionRequest."""
     content: str
     parent_revision_id: Optional[str] = None
     feedback_note: Optional[str] = None
 
 
 class GenerateTasksRequest(BaseModel):
+    """Represents GenerateTasksRequest."""
     source: Optional[Literal["committed", "revision", "override", "latest"]] = None
     revision_id: Optional[str] = None
     plan_override: Optional[str] = None
@@ -138,26 +164,31 @@ class GenerateTasksRequest(BaseModel):
 
 
 class ApproveGateRequest(BaseModel):
+    """Represents ApproveGateRequest."""
     gate: Optional[str] = None
 
 
 class OrchestratorControlRequest(BaseModel):
+    """Represents OrchestratorControlRequest."""
     action: str
 
 
 class OrchestratorSettingsRequest(BaseModel):
+    """Represents OrchestratorSettingsRequest."""
     concurrency: int = Field(2, ge=1, le=128)
     auto_deps: bool = True
     max_review_attempts: int = Field(10, ge=1, le=50)
 
 
 class AgentRoutingSettingsRequest(BaseModel):
+    """Represents AgentRoutingSettingsRequest."""
     default_role: str = "general"
     task_type_roles: dict[str, str] = Field(default_factory=dict)
     role_provider_overrides: dict[str, str] = Field(default_factory=dict)
 
 
 class WorkerProviderSettingsRequest(BaseModel):
+    """Represents WorkerProviderSettingsRequest."""
     type: str = "codex"
     command: Optional[str] = None
     reasoning_effort: Optional[str] = None
@@ -168,6 +199,7 @@ class WorkerProviderSettingsRequest(BaseModel):
 
 
 class WorkersSettingsRequest(BaseModel):
+    """Represents WorkersSettingsRequest."""
     default: str = "codex"
     default_model: Optional[str] = None
     heartbeat_seconds: Optional[int] = Field(None, ge=1, le=3600)
@@ -177,6 +209,7 @@ class WorkersSettingsRequest(BaseModel):
 
 
 class QualityGateSettingsRequest(BaseModel):
+    """Represents QualityGateSettingsRequest."""
     critical: int = Field(0, ge=0)
     high: int = Field(0, ge=0)
     medium: int = Field(0, ge=0)
@@ -184,11 +217,18 @@ class QualityGateSettingsRequest(BaseModel):
 
 
 class DefaultsSettingsRequest(BaseModel):
-    quality_gate: QualityGateSettingsRequest = Field(default_factory=QualityGateSettingsRequest)
+    """Represents DefaultsSettingsRequest."""
+    quality_gate: QualityGateSettingsRequest = QualityGateSettingsRequest(
+        critical=0,
+        high=0,
+        medium=0,
+        low=0,
+    )
     dependency_policy: str = "prudent"
 
 
 class LanguageCommandsRequest(BaseModel):
+    """Represents LanguageCommandsRequest."""
     test: Optional[str] = None
     lint: Optional[str] = None
     typecheck: Optional[str] = None
@@ -196,10 +236,12 @@ class LanguageCommandsRequest(BaseModel):
 
 
 class ProjectSettingsRequest(BaseModel):
+    """Represents ProjectSettingsRequest."""
     commands: Optional[dict[str, LanguageCommandsRequest]] = None
 
 
 class UpdateSettingsRequest(BaseModel):
+    """Represents UpdateSettingsRequest."""
     orchestrator: Optional[OrchestratorSettingsRequest] = None
     agent_routing: Optional[AgentRoutingSettingsRequest] = None
     defaults: Optional[DefaultsSettingsRequest] = None
@@ -208,21 +250,25 @@ class UpdateSettingsRequest(BaseModel):
 
 
 class SpawnAgentRequest(BaseModel):
+    """Represents SpawnAgentRequest."""
     role: str = "general"
     capacity: int = 1
     override_provider: Optional[str] = None
 
 
 class ReviewActionRequest(BaseModel):
+    """Represents ReviewActionRequest."""
     guidance: Optional[str] = None
 
 
 class RetryTaskRequest(BaseModel):
+    """Represents RetryTaskRequest."""
     guidance: Optional[str] = None
     start_from_step: Optional[str] = None
 
 
 class AddFeedbackRequest(BaseModel):
+    """Represents AddFeedbackRequest."""
     task_id: str
     feedback_type: str = "general"
     priority: str = "should"
@@ -232,6 +278,7 @@ class AddFeedbackRequest(BaseModel):
 
 
 class AddCommentRequest(BaseModel):
+    """Represents AddCommentRequest."""
     task_id: str
     file_path: str
     line_number: int = 0
@@ -600,18 +647,18 @@ def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
 
         endpoint = str(raw_item.get("endpoint") or "").strip()
         model = str(raw_item.get("model") or "").strip()
-        provider: dict[str, Any] = {"type": "ollama"}
+        ollama_provider: dict[str, Any] = {"type": "ollama"}
         if endpoint:
-            provider["endpoint"] = endpoint
+            ollama_provider["endpoint"] = endpoint
         if model:
-            provider["model"] = model
+            ollama_provider["model"] = model
         temperature = raw_item.get("temperature")
         if isinstance(temperature, (int, float)):
-            provider["temperature"] = float(temperature)
+            ollama_provider["temperature"] = float(temperature)
         num_ctx = raw_item.get("num_ctx")
         if isinstance(num_ctx, int) and num_ctx > 0:
-            provider["num_ctx"] = num_ctx
-        providers[name] = provider
+            ollama_provider["num_ctx"] = num_ctx
+        providers[name] = ollama_provider
 
     codex = providers.get("codex")
     codex_command = "codex exec"
@@ -1110,6 +1157,7 @@ def create_router(
     resolve_orchestrator: Any,
     job_store: dict[str, dict[str, Any]],
 ) -> APIRouter:
+    """Create the runtime API router."""
     router = APIRouter(prefix="/api", tags=["api"])
     terminal_services: dict[str, TerminalService] = {}
 
@@ -1208,7 +1256,7 @@ def create_router(
         for item in pinned:
             p = Path(str(item.get("path") or "")).resolve()
             discovered.append({"id": item.get("id") or p.name, "path": str(p), "source": "pinned", "is_git": (p / ".git").exists()})
-        dedup: dict[str, dict[str, Any]] = {entry["path"]: entry for entry in discovered}
+        dedup: dict[str, dict[str, Any]] = {str(entry.get("path") or ""): entry for entry in discovered}
         return {"projects": list(dedup.values())}
 
     @router.get("/projects/pinned")
@@ -1322,18 +1370,20 @@ def create_router(
             dep_policy = str((cfg.get("defaults") or {}).get("dependency_policy") or "prudent")
             if dep_policy not in ("permissive", "prudent", "strict"):
                 dep_policy = "prudent"
+        priority = body.priority if body.priority in ("P0", "P1", "P2", "P3") else "P2"
+        approval_mode = body.approval_mode if body.approval_mode in ("human_review", "auto_approve") else "human_review"
         task = Task(
             title=body.title,
             description=body.description,
             task_type=resolved_task_type,
-            priority=body.priority,
+            priority=cast(Priority, priority),
             labels=body.labels,
             blocked_by=body.blocked_by,
             parent_id=body.parent_id,
             pipeline_template=pipeline_steps,
-            approval_mode=body.approval_mode,
+            approval_mode=cast(ApprovalMode, approval_mode),
             hitl_mode=body.hitl_mode,
-            dependency_policy=dep_policy,
+            dependency_policy=cast(DependencyPolicy, dep_policy),
             source=body.source,
             worker_model=(str(body.worker_model).strip() if body.worker_model else None),
             metadata=dict(body.metadata or {}),
@@ -1348,7 +1398,7 @@ def create_router(
             task.metadata["was_user_override"] = bool(body.was_user_override)
         task.metadata["final_pipeline_id"] = final_pipeline_id
         if body.status in ("backlog", "queued"):
-            task.status = body.status
+            task.status = cast(TaskStatus, body.status)
         if task.parent_id:
             parent = container.tasks.get(task.parent_id)
             if parent and task.id not in parent.children_ids:
@@ -1418,7 +1468,9 @@ def create_router(
     @router.get("/tasks/board")
     async def board(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
         container, _, _ = _ctx(project_dir)
-        columns = {name: [] for name in ["backlog", "queued", "in_progress", "in_review", "blocked", "done", "cancelled"]}
+        columns: dict[str, list[dict[str, Any]]] = {
+            name: [] for name in ["backlog", "queued", "in_progress", "in_review", "blocked", "done", "cancelled"]
+        }
         for task in container.tasks.list():
             columns.setdefault(task.status, []).append(_task_payload(task))
         for key, items in columns.items():
@@ -1666,7 +1718,7 @@ def create_router(
             unresolved = _has_unresolved_blockers(container, task)
             if unresolved is not None:
                 raise HTTPException(status_code=400, detail=f"Unresolved blocker: {unresolved}")
-        task.status = target
+        task.status = cast(TaskStatus, target)
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.transitioned", entity_id=task.id, payload={"status": task.status})
@@ -1709,7 +1761,7 @@ def create_router(
                 "previous_error": previous_error.strip(),
             }
         if guidance.strip():
-            history_list: list = task.metadata.setdefault("human_review_actions", [])
+            history_list: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
             history_list.append({"action": "retry", "ts": ts, "guidance": guidance.strip(), "previous_error": previous_error.strip()})
         start_from = (body.start_from_step if body else None) or ""
         if start_from.strip():
@@ -1804,7 +1856,13 @@ def create_router(
             # Remove inferred blocked_by entries and corresponding blocks on blockers
             inferred = task.metadata.get("inferred_deps")
             if isinstance(inferred, list):
-                inferred_from_ids = {dep.get("from") for dep in inferred if isinstance(dep, dict)}
+                inferred_from_ids = {
+                    dep_id
+                    for dep in inferred
+                    if isinstance(dep, dict)
+                    for dep_id in [dep.get("from")]
+                    if isinstance(dep_id, str) and dep_id
+                }
                 task.blocked_by = [bid for bid in task.blocked_by if bid not in inferred_from_ids]
                 for blocker_id in inferred_from_ids:
                     blocker = container.tasks.get(blocker_id)
@@ -1825,7 +1883,7 @@ def create_router(
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         orchestrator = resolve_orchestrator(project_dir)
-        return orchestrator.get_workdoc(task_id)
+        return cast(dict[str, Any], orchestrator.get_workdoc(task_id))
 
     @router.get("/tasks/{task_id}/plan")
     async def get_task_plan(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -1835,7 +1893,7 @@ def create_router(
             raise HTTPException(status_code=404, detail="Task not found")
         orchestrator = resolve_orchestrator(project_dir)
         try:
-            return orchestrator.get_plan_document(task_id)
+            return cast(dict[str, Any], orchestrator.get_plan_document(task_id))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1967,7 +2025,11 @@ def create_router(
 
         # Re-fetch parent to get updated children_ids
         updated_task = container.tasks.get(task_id)
-        children = [_task_payload(container.tasks.get(cid)) for cid in created_ids if container.tasks.get(cid)]
+        children: list[dict[str, Any]] = []
+        for child_id in created_ids:
+            child_task = container.tasks.get(child_id)
+            if child_task is not None:
+                children.append(_task_payload(child_task))
         return {
             "task": _task_payload(updated_task) if updated_task else None,
             "created_task_ids": created_ids,
@@ -2507,7 +2569,7 @@ def create_router(
         task.status = "done"
         ts = now_iso()
         task.metadata["last_review_approval"] = {"ts": ts, "guidance": body.guidance}
-        history: list = task.metadata.setdefault("human_review_actions", [])
+        history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
         history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
         container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={"guidance": body.guidance or ""})
@@ -2525,7 +2587,7 @@ def create_router(
         ts = now_iso()
         task.metadata["requested_changes"] = {"ts": ts, "guidance": body.guidance}
         task.metadata["retry_from_step"] = "implement"
-        history: list = task.metadata.setdefault("human_review_actions", [])
+        history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
         history.append({"action": "request_changes", "ts": ts, "guidance": body.guidance or ""})
         container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.changes_requested", entity_id=task.id, payload={"guidance": body.guidance})
@@ -2716,6 +2778,7 @@ def create_router(
 
 
 def os_access(path: Path) -> bool:
+    """Return whether a directory can be listed by the current process."""
     try:
         list(path.iterdir())
     except Exception:

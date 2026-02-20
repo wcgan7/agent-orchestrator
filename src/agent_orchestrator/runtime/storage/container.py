@@ -1,3 +1,5 @@
+"""Dependency container for runtime repositories."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -17,6 +19,7 @@ from .file_repos import (
 
 
 class Container:
+    """Represents Container."""
     def __init__(self, project_dir: Path) -> None:
         self.project_dir = project_dir.resolve()
         self.state_root = ensure_state_root(self.project_dir)
@@ -36,4 +39,5 @@ class Container:
 
     @property
     def project_id(self) -> str:
+        """Return project id."""
         return self.project_dir.name
