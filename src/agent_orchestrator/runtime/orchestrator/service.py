@@ -604,6 +604,40 @@ class OrchestratorService:
         so = task.metadata.setdefault("step_outputs", {})
         so["plan"] = (target.content or "")[:20_000]
         self.container.tasks.upsert(task)
+
+        # Keep workdoc ## Plan in sync with the committed plan text so manual edits
+        # become the canonical implementation guide immediately.
+        workdoc_path = task.metadata.get("workdoc_path") if isinstance(task.metadata, dict) else None
+        canonical = (
+            Path(workdoc_path)
+            if isinstance(workdoc_path, str) and workdoc_path.strip()
+            else self._workdoc_canonical_path(task.id)
+        )
+        if canonical.exists():
+            text = canonical.read_text(encoding="utf-8")
+            heading = "## Plan"
+            idx = text.find(heading)
+            if idx != -1:
+                after_heading = text.find("\n", idx)
+                if after_heading != -1:
+                    rest = text[after_heading + 1 :]
+                    next_heading = re.search(r"^## ", rest, re.MULTILINE)
+                    section_end = after_heading + 1 + next_heading.start() if next_heading else len(text)
+                    plan_body = (target.content or "").strip() or "_(empty committed plan)_"
+                    updated = text[: after_heading + 1] + plan_body + "\n\n" + text[section_end:]
+                    canonical.write_text(updated, encoding="utf-8")
+                    # Mirror canonical into the active worktree copy if present.
+                    step_project_dir = self._step_project_dir(task)
+                    worktree_copy = self._workdoc_worktree_path(step_project_dir)
+                    if worktree_copy.exists():
+                        worktree_copy.write_text(updated, encoding="utf-8")
+                    self.bus.emit(
+                        channel="tasks",
+                        event_type="workdoc.updated",
+                        entity_id=task.id,
+                        payload={"step": "plan", "source": "plan_commit"},
+                    )
+
         self.bus.emit(
             channel="tasks",
             event_type="plan.revision.committed",
@@ -689,7 +723,8 @@ class OrchestratorService:
     # placeholder_step is the step name used in the template placeholder text.
     _WORKDOC_SECTION_MAP: dict[str, tuple[str, str]] = {
         "plan": ("## Plan", "plan"),
-        "analyze": ("## Plan", "plan"),
+        "analyze": ("## Analysis", "analyze"),
+        "diagnose": ("## Analysis", "analyze"),
         "implement": ("## Implementation Log", "implement"),
         "prototype": ("## Implementation Log", "implement"),
         "implement_fix": ("## Fix Log", None),  # placeholder uses different wording
@@ -716,6 +751,10 @@ class OrchestratorService:
 ## Plan
 
 _Pending: will be populated by the plan step._
+
+## Analysis
+
+_Pending: will be populated by the analyze step._
 
 ## Implementation Log
 
@@ -785,7 +824,9 @@ _Pending: will be populated as needed._
         worktree_copy = self._workdoc_worktree_path(project_dir)
         shutil.copy2(str(canonical), str(worktree_copy))
 
-    def _sync_workdoc(self, task: Task, step: str, project_dir: Path, summary: str | None) -> None:
+    def _sync_workdoc(
+        self, task: Task, step: str, project_dir: Path, summary: str | None, attempt: int | None = None
+    ) -> None:
         """Post-step sync: accept worker changes or fallback-append summary."""
         canonical = self._workdoc_canonical_path(task.id)
         if not canonical.exists():
@@ -798,7 +839,9 @@ _Pending: will be populated as needed._
         worktree_text = worktree_copy.read_text(encoding="utf-8")
 
         changed = False
-        if worktree_text != canonical_text:
+        orchestrator_managed_steps = {"verify", "benchmark", "reproduce", "implement_fix"}
+        allow_worker_workdoc_write = step not in orchestrator_managed_steps
+        if worktree_text != canonical_text and allow_worker_workdoc_write:
             # Worker updated the file — accept as new canonical
             canonical.write_text(worktree_text, encoding="utf-8")
             changed = True
@@ -813,6 +856,9 @@ _Pending: will be populated as needed._
             else:
                 placeholder = "_Pending: will be populated as needed._"
             trimmed = summary.strip()
+            if step == "implement_fix":
+                cycle_num = int(attempt or 1)
+                trimmed = f"### Fix Cycle {cycle_num}\n{trimmed}"
             if placeholder in canonical_text:
                 updated = canonical_text.replace(placeholder, trimmed, 1)
             else:
@@ -856,6 +902,14 @@ _Pending: will be populated as needed._
         lines: list[str] = [
             f"### Review Cycle {cycle.attempt} — {cycle.decision}",
         ]
+        counts = cycle.open_counts or {}
+        lines.append(
+            "Open findings: "
+            f"critical={int(counts.get('critical', 0))}, "
+            f"high={int(counts.get('high', 0))}, "
+            f"medium={int(counts.get('medium', 0))}, "
+            f"low={int(counts.get('low', 0))}"
+        )
         for f in cycle.findings:
             if f.file and f.line:
                 loc = f" ({f.file}:{f.line})"
@@ -863,7 +917,12 @@ _Pending: will be populated as needed._
                 loc = f" ({f.file})"
             else:
                 loc = ""
-            lines.append(f"- **[{f.severity}]** {f.summary}{loc}")
+            category = f"[{f.category}] " if f.category else ""
+            lines.append(f"- **[{f.severity}]** {category}{f.summary}{loc}")
+            if f.suggested_fix:
+                lines.append(f"  - Suggested fix: {f.suggested_fix}")
+            if f.status and f.status != "open":
+                lines.append(f"  - Status: {f.status}")
         block = "\n".join(lines)
 
         placeholder = "_Pending: will be populated by the review step._"
@@ -1203,7 +1262,7 @@ _Pending: will be populated as needed._
             raise self._Cancelled()
 
         # Post-step workdoc sync (before other bookkeeping that may upsert task).
-        self._sync_workdoc(task, step, step_project_dir, result.summary)
+        self._sync_workdoc(task, step, step_project_dir, result.summary, attempt=attempt)
 
         step_log: dict[str, Any] = {"step": step, "status": result.status, "ts": now_iso(), "started_at": step_started, "summary": result.summary}
         if result.human_blocking_issues:

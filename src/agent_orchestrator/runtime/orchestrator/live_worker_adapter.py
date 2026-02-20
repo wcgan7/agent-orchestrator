@@ -31,7 +31,8 @@ _VERIFY_STEPS = {"verify", "benchmark", "reproduce"}
 _REVIEW_STEPS = {"review"}
 _REPORT_STEPS = {"report", "summarize"}
 _SCAN_STEPS = {"scan", "scan_deps", "scan_code", "gather"}
-_TASK_GEN_STEPS = {"generate_tasks", "diagnose"}
+_TASK_GEN_STEPS = {"generate_tasks"}
+_DIAGNOSIS_STEPS = {"diagnose"}
 _MERGE_RESOLVE_STEPS = {"resolve_merge"}
 _DEP_ANALYSIS_STEPS = {"analyze_deps"}
 
@@ -39,6 +40,7 @@ _DEP_ANALYSIS_STEPS = {"analyze_deps"}
 # None = inject all available outputs (for reporting/summarize steps).
 _STEP_OUTPUT_INJECTION: dict[str, tuple[str, ...] | None] = {
     "implementation": ("plan", "analyze", "reproduce", "diagnose", "profile", "gather"),
+    "diagnosis": ("reproduce",),
     "review": ("verify", "benchmark"),
     "reporting": None,
     "task_generation": ("plan", "analyze", "scan", "scan_deps", "scan_code"),
@@ -64,6 +66,7 @@ _STEP_PROMPT_FILES: dict[str, str] = {
     "reporting": "steps/report.md",
     "scanning": "steps/scan.md",
     "task_generation": "steps/task_generation.md",
+    "diagnosis": "steps/diagnose.md",
     "merge_resolution": "steps/merge_resolution.md",
     "dependency_analysis": "steps/dependency_analysis.md",
     "general": "steps/general.md",
@@ -72,23 +75,30 @@ _STEP_PROMPT_FILES: dict[str, str] = {
 _LANGUAGE_DEFAULTS: dict[str, str] = {
     "python": (
         "### Python defaults\n"
-        "- Google-style docstrings. Type hints (Python 3.10+ syntax)."
+        "- Google-style docstrings.\n"
+        "- Type hints (Python 3.10+ syntax) on public APIs.\n"
+        "- Prefer precise typing; avoid untyped public interfaces."
     ),
     "typescript": (
         "### TypeScript defaults\n"
-        "- JSDoc on exported symbols. Strict tsconfig (no `any`)."
+        "- JSDoc on exported symbols where helpful.\n"
+        "- Strict TypeScript; avoid `any` (prefer `unknown` + narrowing).\n"
+        "- Preserve null/undefined safety."
     ),
     "javascript": (
         "### JavaScript defaults\n"
-        "- JSDoc on exported symbols."
+        "- JSDoc on exported symbols and non-trivial params/returns.\n"
+        "- Keep runtime validation clear at module boundaries."
     ),
     "go": (
         "### Go defaults\n"
-        "- Godoc conventions on exported symbols."
+        "- Godoc conventions on exported symbols.\n"
+        "- Return errors with context; avoid panics in library paths."
     ),
     "rust": (
         "### Rust defaults\n"
-        "- `///` doc comments on public items."
+        "- `///` doc comments on public items.\n"
+        "- Prefer `Result` propagation over `unwrap`/`expect` outside tests/tools."
     ),
 }
 
@@ -203,6 +213,8 @@ def _step_category(step: str) -> str:
         return "scanning"
     if step in _TASK_GEN_STEPS:
         return "task_generation"
+    if step in _DIAGNOSIS_STEPS:
+        return "diagnosis"
     if step in _MERGE_RESOLVE_STEPS:
         return "merge_resolution"
     if step in _DEP_ANALYSIS_STEPS:
@@ -228,21 +240,48 @@ _WORKDOC_STEP_INSTRUCTIONS: dict[str, str] = {
     "fix": (
         "## Working Document\n"
         "A working document is available at `.workdoc.md` in the project root.\n"
-        "Read the full document for context on prior work. Append to the `## Fix Log`\n"
-        "section what was fixed and why. Write the file back when done."
+        "Read the full document for context on prior work.\n"
+        "Do NOT modify `.workdoc.md` in this step — the orchestrator appends\n"
+        "structured fix-cycle entries to `## Fix Log`."
     ),
     "verification": (
         "## Working Document\n"
         "A working document is available at `.workdoc.md` in the project root.\n"
-        "Read the implementation context for what was changed. Update the\n"
-        "`## Verification Results` section with test/lint/typecheck output.\n"
-        "Write the file back when done."
+        "Read the implementation context for what was changed.\n"
+        "Do NOT modify `.workdoc.md` in this step — the orchestrator writes\n"
+        "normalized verification results after classification."
     ),
     "review": (
         "## Working Document\n"
         "A working document is available at `.workdoc.md` in the project root.\n"
         "Read it for full context on the plan, implementation, and verification.\n"
         "Do NOT modify the file — the orchestrator will append review findings."
+    ),
+}
+
+_WORKDOC_STEP_INSTRUCTIONS_BY_STEP: dict[str, str] = {
+    "analyze": (
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it to understand the task context, then **replace** the `## Analysis` section's\n"
+        "placeholder with your analysis. Write the file back when done."
+    ),
+    "prototype": (
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read the `## Plan` section for context when present. As you work,\n"
+        "update the `## Implementation Log` section with prototype notes:\n"
+        "- hypotheses tested,\n"
+        "- experiments run,\n"
+        "- observed results,\n"
+        "- decision recommendation.\n"
+        "Write the file back when done."
+    ),
+    "diagnose": (
+        "## Working Document\n"
+        "A working document is available at `.workdoc.md` in the project root.\n"
+        "Read it to understand the task context, then **replace** the `## Analysis` section's\n"
+        "placeholder with your diagnosis. Write the file back when done."
     ),
 }
 
@@ -254,6 +293,9 @@ def _workdoc_prompt_section(step: str) -> str:
     """Return the workdoc instruction block for a step, or empty string."""
     if step in _WORKDOC_SKIP_STEPS:
         return ""
+    step_specific = _WORKDOC_STEP_INSTRUCTIONS_BY_STEP.get(step)
+    if step_specific:
+        return step_specific
     category = _step_category(step)
     return _WORKDOC_STEP_INSTRUCTIONS.get(category, "")
 
@@ -324,9 +366,42 @@ _CATEGORY_JSON_SCHEMAS: dict[str, str] = {
     "reporting": '{"summary": "detailed report text"}',
     "scanning": '{"findings": [{"severity": "critical|high|medium|low", "category": "string", "summary": "string", "file": "path"}]}',
     "task_generation": '{"tasks": [{"title": "string", "description": "string", "task_type": "feature|bugfix|research", "priority": "P0|P1|P2|P3", "depends_on": [0, 1]}]}',
+    "diagnosis": '{"diagnosis": "string describing root cause and fix strategy"}',
     "merge_resolution": '{"status": "ok|error", "summary": "string"}',
     "dependency_analysis": '{"edges": [{"from": "task_id_first", "to": "task_id_depends", "reason": "why"}]}',
     "general": '{"status": "ok|error", "summary": "string"}',
+}
+
+_STEP_JSON_SCHEMA_OVERRIDES: dict[str, str] = {
+    "analyze": '{"analysis": "string describing the analysis"}',
+    "diagnose": '{"diagnosis": "string describing root cause and fix strategy"}',
+}
+
+_REVIEW_ALLOWED_SEVERITIES = {"critical", "high", "medium", "low"}
+_REVIEW_ALLOWED_CATEGORIES = {
+    "correctness",
+    "reliability",
+    "security",
+    "performance",
+    "api_contract",
+    "documentation",
+    "maintainability",
+    "test_coverage",
+    "other",
+}
+_VERIFY_ALLOWED_STATUSES = {"pass", "fail", "skip", "environment"}
+_VERIFY_ALLOWED_REASON_CODES = {
+    "assertion_failure",
+    "type_error",
+    "lint_violation",
+    "tool_missing",
+    "config_missing",
+    "no_tests",
+    "permission_denied",
+    "resource_limit",
+    "os_incompatibility",
+    "infrastructure",
+    "unknown",
 }
 
 _PLAN_PREAMBLE_PREFIXES: tuple[str, ...] = (
@@ -395,7 +470,17 @@ def build_step_prompt(
 ) -> str:
     """Build a prompt from Task fields with step-specific instructions."""
     category = _step_category(step)
-    instruction = load_prompt(_STEP_PROMPT_FILES[category])
+    if step == "plan_refine":
+        instruction_name = "steps/plan_refine.md"
+    elif step == "analyze":
+        instruction_name = "steps/analyze.md"
+    elif step == "diagnose":
+        instruction_name = "steps/diagnose.md"
+    elif step == "prototype":
+        instruction_name = "steps/prototype.md"
+    else:
+        instruction_name = _STEP_PROMPT_FILES[category]
+    instruction = load_prompt(instruction_name)
     preamble = load_prompt("preamble.md")
     guardrails = load_prompt("guardrails.md")
 
@@ -455,9 +540,10 @@ def build_step_prompt(
     if task.description:
         parts.append(f"Description: {task.description}")
     parts.append(f"Type: {task.task_type}")
-    parts.append(f"Priority: {task.priority}")
-    parts.append(f"Step: {step}")
-    if attempt > 1:
+    if category != "planning" and step not in {"implement", "implement_fix", "review", "verify", "diagnose"}:
+        parts.append(f"Priority: {task.priority}")
+        parts.append(f"Step: {step}")
+    if attempt > 1 and step != "implement":
         parts.append(f"Attempt: {attempt}")
 
     # Inject workdoc instructions for steps that use the working document.
@@ -467,8 +553,14 @@ def build_step_prompt(
         parts.append(workdoc_block)
 
     # Inject outputs from prior pipeline steps.
+    # For implement/implement_fix, rely on the workdoc as the single source of truth.
     step_outputs = task.metadata.get("step_outputs") if isinstance(task.metadata, dict) else None
-    if isinstance(step_outputs, dict) and step_outputs and category in _STEP_OUTPUT_INJECTION:
+    if (
+        isinstance(step_outputs, dict)
+        and step_outputs
+        and category in _STEP_OUTPUT_INJECTION
+        and step not in {"implement", "implement_fix"}
+    ):
         inject_keys = _STEP_OUTPUT_INJECTION[category]
         if inject_keys is None:
             inject_keys = tuple(step_outputs.keys())
@@ -479,11 +571,50 @@ def build_step_prompt(
                 parts.append(f"## Output from prior '{key}' step")
                 parts.append(val.strip())
 
-    # Include review findings for fix steps
+    is_fix_step = step == "implement_fix"
     review_findings = task.metadata.get("review_findings") if isinstance(task.metadata, dict) else None
-    if review_findings and isinstance(review_findings, list):
+
+    # Insert a dedicated remediation payload section for implement_fix.
+    has_review_findings = bool(review_findings and isinstance(review_findings, list))
+    has_verify_failure = (
+        isinstance(task.metadata, dict)
+        and isinstance(task.metadata.get("verify_failure"), str)
+        and task.metadata.get("verify_failure", "").strip()
+    )
+    has_verify_output = (
+        isinstance(task.metadata, dict)
+        and isinstance(task.metadata.get("verify_output"), str)
+        and task.metadata.get("verify_output", "").strip()
+    )
+    has_verify_reason_code = (
+        isinstance(task.metadata, dict)
+        and isinstance(task.metadata.get("verify_reason_code"), str)
+        and task.metadata.get("verify_reason_code", "").strip()
+    )
+    retry_guidance = task.metadata.get("retry_guidance") if isinstance(task.metadata, dict) else None
+    requested_changes = task.metadata.get("requested_changes") if isinstance(task.metadata, dict) else None
+    has_previous_error = False
+    has_feedback = False
+    has_requested = False
+    if isinstance(retry_guidance, dict):
+        prev_error = str(retry_guidance.get("previous_error") or "").strip()
+        guidance_text = str(retry_guidance.get("guidance") or "").strip()
+        has_previous_error = bool(prev_error)
+        has_feedback = bool(guidance_text)
+    if isinstance(requested_changes, dict):
+        requested_text = str(requested_changes.get("guidance") or "").strip()
+        has_requested = bool(requested_text)
+
+    if is_fix_step and (
+        has_review_findings or has_verify_failure or has_verify_output or has_verify_reason_code or has_previous_error
+    ):
         parts.append("")
-        parts.append("Review findings to address:")
+        parts.append("## Issues to fix")
+
+    # Include review findings for fix steps.
+    if review_findings and isinstance(review_findings, list) and is_fix_step:
+        parts.append("")
+        parts.append("### Review findings to address")
         for finding in review_findings:
             if isinstance(finding, dict):
                 sev = finding.get("severity", "medium")
@@ -495,7 +626,7 @@ def build_step_prompt(
 
     # Include review history for review and fix steps
     review_history = task.metadata.get("review_history") if isinstance(task.metadata, dict) else None
-    if review_history and isinstance(review_history, list):
+    if review_history and isinstance(review_history, list) and step in {"review", "implement_fix"}:
         parts.append("")
         parts.append("## Previous review cycle history")
         parts.append(
@@ -562,12 +693,9 @@ def build_step_prompt(
         if not is_codex:
             parts.append("")
             parts.append("Return a full rewritten plan in the `plan` field.")
-    if category == "planning":
+    if category == "planning" and step != "analyze":
         parts.append("")
-        parts.append("## Planning output requirements")
-        parts.append("- Return only the final plan body.")
-        parts.append("- Do not include prefaces, tool logs, or follow-up questions.")
-        parts.append("- For refinements, return the full rewritten plan, not just a change summary.")
+        parts.append(load_prompt("partials/plan_output_format.md"))
 
     # Include merge conflict context for resolve_merge step
     if category == "merge_resolution" and isinstance(task.metadata, dict):
@@ -591,38 +719,54 @@ def build_step_prompt(
                       "Ensure BOTH this task's and the other task(s)' objectives are preserved.")
 
     # Include verify failure context for fix steps.
-    if isinstance(task.metadata, dict) and category in ("implementation", "fix"):
+    if isinstance(task.metadata, dict) and is_fix_step:
         verify_failure = task.metadata.get("verify_failure")
         if verify_failure:
             parts.append("")
-            parts.append("## Verification failure to fix")
+            parts.append("### Verification failure")
             parts.append(f"  {verify_failure}")
+        verify_reason_code = task.metadata.get("verify_reason_code")
+        if isinstance(verify_reason_code, str) and verify_reason_code.strip():
+            parts.append("")
+            parts.append("### Verification reason code")
+            parts.append(f"  {verify_reason_code.strip()}")
         verify_output = task.metadata.get("verify_output")
         if isinstance(verify_output, str) and verify_output.strip():
             parts.append("")
-            parts.append("## Verification output (test/lint/typecheck logs)")
+            parts.append("### Verification output (test/lint/typecheck logs)")
             parts.append(verify_output.strip())
 
-    # Inject human feedback from previous review or retry.
-    if isinstance(task.metadata, dict):
+    # Inject previous attempt error as a concrete issue to fix.
+    if isinstance(task.metadata, dict) and is_fix_step:
         retry_guidance = task.metadata.get("retry_guidance")
         if isinstance(retry_guidance, dict):
             prev_error = str(retry_guidance.get("previous_error") or "").strip()
             if prev_error:
                 parts.append("")
-                parts.append("## Previous attempt error")
+                parts.append("### Previous attempt error")
                 parts.append(prev_error)
+
+    # Inject guidance/adjustments from previous review or retry.
+    if isinstance(task.metadata, dict):
+        retry_guidance = task.metadata.get("retry_guidance")
+        requested_changes = task.metadata.get("requested_changes")
+        if is_fix_step and (
+            (isinstance(retry_guidance, dict) and str(retry_guidance.get("guidance") or "").strip())
+            or (isinstance(requested_changes, dict) and str(requested_changes.get("guidance") or "").strip())
+        ):
+            parts.append("")
+            parts.append("## Requested adjustments")
+        if isinstance(retry_guidance, dict) and is_fix_step:
             text = str(retry_guidance.get("guidance") or "").strip()
             if text:
                 parts.append("")
-                parts.append("## Feedback from previous attempt")
+                parts.append("### Feedback from previous attempt")
                 parts.append(text)
-        requested_changes = task.metadata.get("requested_changes")
-        if isinstance(requested_changes, dict):
+        if isinstance(requested_changes, dict) and is_fix_step:
             text = str(requested_changes.get("guidance") or "").strip()
             if text:
                 parts.append("")
-                parts.append("## Requested changes from reviewer")
+                parts.append("### Requested changes from reviewer")
                 parts.append(text)
 
     # Inject style guidelines and language defaults for implementation and review steps
@@ -654,7 +798,9 @@ def build_step_prompt(
 
     if not is_codex:
         # Add JSON schema instruction for ollama
-        schema = _CATEGORY_JSON_SCHEMAS.get(category, _CATEGORY_JSON_SCHEMAS["general"])
+        schema = _STEP_JSON_SCHEMA_OVERRIDES.get(step) or _CATEGORY_JSON_SCHEMAS.get(
+            category, _CATEGORY_JSON_SCHEMAS["general"]
+        )
         parts.append("")
         parts.append(f"Respond with valid JSON matching this schema: {schema}")
 
@@ -737,6 +883,79 @@ def _extract_json_value(text: str) -> Any | None:
     except json.JSONDecodeError:
         return None
     return value if isinstance(value, (dict, list)) else None
+
+
+def _normalize_review_findings(raw_findings: Any) -> list[dict[str, Any]]:
+    """Normalize raw findings to a stable actionable schema."""
+    if not isinstance(raw_findings, list):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in raw_findings:
+        if not isinstance(item, dict):
+            continue
+
+        summary = str(item.get("summary") or "").strip()
+        if not summary:
+            continue
+
+        severity = str(item.get("severity") or "medium").strip().lower()
+        if severity == "info":
+            continue
+        if severity not in _REVIEW_ALLOWED_SEVERITIES:
+            severity = "medium"
+
+        category = str(item.get("category") or "other").strip().lower().replace(" ", "_")
+        if category not in _REVIEW_ALLOWED_CATEGORIES:
+            category = "other"
+
+        file_raw = item.get("file")
+        file_path = str(file_raw).strip() if file_raw is not None else ""
+
+        line_raw = item.get("line")
+        line_num: int | None
+        try:
+            line_num = int(line_raw)
+            if line_num <= 0:
+                line_num = None
+        except (TypeError, ValueError):
+            line_num = None
+
+        suggested_fix = str(item.get("suggested_fix") or "").strip()
+
+        status = str(item.get("status") or "open").strip().lower()
+        if status in {"fixed", "closed", "done"}:
+            status = "resolved"
+        elif status not in {"open", "resolved"}:
+            status = "open"
+
+        normalized.append(
+            {
+                "severity": severity,
+                "category": category,
+                "summary": summary,
+                "file": file_path,
+                "line": line_num,
+                "suggested_fix": suggested_fix,
+                "status": status,
+            }
+        )
+    return normalized
+
+
+def _normalize_verify_reason_code(value: Any) -> str:
+    reason = str(value or "").strip().lower()
+    return reason if reason in _VERIFY_ALLOWED_REASON_CODES else "unknown"
+
+
+def _format_verify_summary(summary: Any, reason_code: str) -> str | None:
+    text = str(summary).strip() if summary is not None else ""
+    if not text and reason_code == "unknown":
+        return None
+    if not text:
+        return f"[reason_code={reason_code}]"
+    if reason_code == "unknown":
+        return text
+    return f"{text} [reason_code={reason_code}]"
 
 
 class LiveWorkerAdapter:
@@ -991,7 +1210,12 @@ class LiveWorkerAdapter:
             return StepResult(status="ok", summary=response_text[:500])
 
         status_val = str(parsed.get("status", "")).lower().strip()
-        summary = parsed.get("summary")
+        if status_val not in _VERIFY_ALLOWED_STATUSES:
+            status_val = "fail"
+        reason_code = _normalize_verify_reason_code(parsed.get("reason_code"))
+        summary = _format_verify_summary(parsed.get("summary"), reason_code)
+        if isinstance(task.metadata, dict):
+            task.metadata["verify_reason_code"] = reason_code
         if status_val == "fail":
             return StepResult(status="error", summary=str(summary) if summary else response_text[:500])
         if status_val == "environment":
@@ -1041,7 +1265,7 @@ class LiveWorkerAdapter:
 
         findings = parsed.get("findings")
         if isinstance(findings, list):
-            return StepResult(status="ok", findings=findings)
+            return StepResult(status="ok", findings=_normalize_review_findings(findings))
 
         return StepResult(status="ok", summary=response_text[:500])
 
@@ -1142,10 +1366,19 @@ class LiveWorkerAdapter:
         if category == "planning" and result.response_text:
             parsed = _extract_json(result.response_text)
             if isinstance(parsed, dict):
-                summary = parsed.get("plan") or parsed.get("summary")
+                summary = parsed.get("analysis") if step == "analyze" else None
+                summary = summary or parsed.get("plan") or parsed.get("summary")
                 if summary:
                     return StepResult(status="ok", summary=_normalize_planning_text(str(summary))[:20000])
             return StepResult(status="ok", summary=_normalize_planning_text(result.response_text)[:20000])
+
+        if category == "diagnosis" and result.response_text:
+            parsed = _extract_json(result.response_text)
+            if isinstance(parsed, dict):
+                summary = parsed.get("diagnosis") or parsed.get("summary")
+                if summary:
+                    return StepResult(status="ok", summary=str(summary).strip()[:20000])
+            return StepResult(status="ok", summary=result.response_text.strip()[:20000])
 
         if category == "task_generation" and result.response_text:
             parsed_value = _extract_json_value(result.response_text)
@@ -1185,6 +1418,8 @@ class LiveWorkerAdapter:
         if category == "review" or category == "scanning":
             findings = parsed.get("findings")
             if isinstance(findings, list):
+                if category == "review":
+                    return StepResult(status="ok", findings=_normalize_review_findings(findings))
                 return StepResult(status="ok", findings=findings)
 
         if category == "task_generation":
@@ -1198,8 +1433,8 @@ class LiveWorkerAdapter:
             mapped_status = "ok" if status in ("ok", "pass") else "error"
             return StepResult(status=mapped_status, summary=summary)
 
-        # For planning, implementation, reporting — extract summary
-        summary = parsed.get("summary") or parsed.get("plan")
+        # For planning, implementation, reporting, diagnosis — extract summary
+        summary = parsed.get("summary") or parsed.get("plan") or parsed.get("diagnosis")
         return StepResult(status="ok", summary=str(summary) if summary else None)
 
     # ------------------------------------------------------------------

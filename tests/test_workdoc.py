@@ -60,6 +60,7 @@ def test_init_creates_canonical_and_worktree_copy(service: OrchestratorService, 
     assert task.id in content
     assert task.task_type in content
     assert "## Plan" in content
+    assert "## Analysis" in content
     assert "## Implementation Log" in content
     assert "## Verification Results" in content
     assert "## Review Findings" in content
@@ -200,6 +201,57 @@ def test_sync_fallback_appends_under_existing_content(service: OrchestratorServi
     assert "Lint clean." in content
 
 
+def test_sync_verify_ignores_worker_changes_and_uses_summary(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Verify step should not accept worker edits to workdoc; orchestrator writes summary."""
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+    worktree = service._workdoc_worktree_path(project_dir)
+    before = canonical.read_text()
+
+    # Worker attempts to mutate verification section directly.
+    modified = worktree.read_text().replace(
+        "_Pending: will be populated by the verify step._",
+        "worker-edited verification text",
+    )
+    worktree.write_text(modified, encoding="utf-8")
+
+    service._sync_workdoc(task, "verify", project_dir, "orchestrator verify summary")
+
+    content = canonical.read_text()
+    assert content != modified
+    assert "orchestrator verify summary" in content
+    assert "worker-edited verification text" not in content
+    assert content != before
+
+
+def test_sync_implement_fix_ignores_worker_changes_and_formats_cycles(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """implement_fix writes should be orchestrator-managed with cycle headings."""
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+    worktree = service._workdoc_worktree_path(project_dir)
+
+    # Worker tries to write directly to Fix Log; should be ignored.
+    modified = worktree.read_text().replace(
+        "_Pending: will be populated as needed._",
+        "worker-edited fix log",
+    )
+    worktree.write_text(modified, encoding="utf-8")
+
+    service._sync_workdoc(task, "implement_fix", project_dir, "Fixed null check in parser.", attempt=2)
+    service._sync_workdoc(task, "implement_fix", project_dir, "Adjusted edge-case tests.", attempt=3)
+
+    content = canonical.read_text()
+    assert "worker-edited fix log" not in content
+    assert "### Fix Cycle 2" in content
+    assert "Fixed null check in parser." in content
+    assert "### Fix Cycle 3" in content
+    assert "Adjusted edge-case tests." in content
+
+
 def test_sync_noop_when_no_canonical(service: OrchestratorService, task: Task, project_dir: Path) -> None:
     """When canonical doesn't exist, sync should be a no-op."""
     service._sync_workdoc(task, "plan", project_dir, "some summary")
@@ -226,6 +278,33 @@ def test_sync_no_heading_for_unknown_step(service: OrchestratorService, task: Ta
     service._sync_workdoc(task, "commit", project_dir, "committed SHA abc123")
 
     assert canonical.read_text() == before
+
+
+def test_commit_plan_revision_updates_workdoc_plan_section(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Committing a plan revision should refresh the workdoc ## Plan section."""
+    service.container.tasks.upsert(task)
+    service._init_workdoc(task, project_dir)
+
+    base = service.create_plan_revision(
+        task_id=task.id,
+        content="Initial plan text",
+        source="worker_plan",
+        step="plan",
+    )
+    manual = service.create_plan_revision(
+        task_id=task.id,
+        content="Manually edited committed plan",
+        source="human_edit",
+        parent_revision_id=base.id,
+    )
+
+    service.commit_plan_revision(task.id, manual.id)
+
+    content = service._workdoc_canonical_path(task.id).read_text()
+    assert "Manually edited committed plan" in content
+    assert "_Pending: will be populated by the plan step._" not in content
 
 
 # ------------------------------------------------------------------
@@ -261,7 +340,9 @@ def test_review_sync_appends_findings(service: OrchestratorService, task: Task, 
     content = canonical.read_text()
     assert "### Review Cycle 1" in content
     assert "changes_requested" in content
+    assert "Open findings: critical=0, high=1, medium=0, low=1" in content
     assert "SQL injection risk" in content
+    assert "[security]" in content
     assert "app/db.py:42" in content
     assert "Missing docstring" in content
     assert "_Pending: will be populated by the review step._" not in content
@@ -317,6 +398,38 @@ def test_review_sync_appends_multiple_cycles(service: OrchestratorService, task:
     assert "### Review Cycle 2" in content
     assert "Issue from cycle 1" in content
     assert "Issue from cycle 2" in content
+
+
+def test_review_sync_includes_suggested_fix_and_status(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    service._init_workdoc(task, project_dir)
+    findings = [
+        ReviewFinding(
+            id="f1",
+            task_id=task.id,
+            severity="high",
+            category="correctness",
+            summary="Null access in edge path",
+            file="app/core.py",
+            line=7,
+            suggested_fix="Guard for None before dereference.",
+            status="resolved",
+        ),
+    ]
+    cycle = ReviewCycle(
+        task_id=task.id,
+        attempt=1,
+        findings=findings,
+        open_counts={"critical": 0, "high": 0, "medium": 0, "low": 0},
+        decision="approved",
+    )
+    service._sync_workdoc_review(task, cycle, project_dir)
+
+    content = service._workdoc_canonical_path(task.id).read_text()
+    assert "[correctness]" in content
+    assert "Suggested fix: Guard for None before dereference." in content
+    assert "Status: resolved" in content
 
 
 # ------------------------------------------------------------------

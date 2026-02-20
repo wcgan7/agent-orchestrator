@@ -518,6 +518,45 @@ def test_ollama_review_parses_findings(adapter: LiveWorkerAdapter) -> None:
     assert len(result.findings) == 1
     assert result.findings[0]["severity"] == "high"
     assert result.findings[0]["summary"] == "SQL injection"
+    assert result.findings[0]["category"] == "security"
+
+
+def test_ollama_review_normalizes_findings(adapter: LiveWorkerAdapter) -> None:
+    response_json = (
+        '{"findings": ['
+        '{"severity": "info", "category": "style", "summary": "Looks great"},'
+        '{"severity": "urgent", "category": "bug", "summary": "Breaks output", "line": "0"}'
+        ']}'
+    )
+    run_result = _make_run_result(exit_code=0, response_text=response_json)
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_OLLAMA_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ),
+    ):
+        result = adapter.run_step(task=_make_task(), step="review", attempt=1)
+
+    assert result.status == "ok"
+    assert result.findings is not None
+    assert len(result.findings) == 1
+    finding = result.findings[0]
+    assert finding["severity"] == "medium"  # unknown -> medium
+    assert finding["category"] == "other"   # unknown -> other
+    assert finding["line"] is None          # non-positive -> None
+    assert finding["status"] == "open"      # default
 
 
 # ---------------------------------------------------------------------------
@@ -601,19 +640,74 @@ def test_prompt_includes_task_context() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 9. Prompt includes review findings for fix steps
+# 8b. implement prompt keeps task context minimal
 # ---------------------------------------------------------------------------
 
 
-def test_prompt_includes_review_findings_for_fix() -> None:
+def test_implement_prompt_omits_priority_step_attempt() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(task=task, step="implement", attempt=2, is_codex=True)
+
+    assert "Priority:" not in prompt
+    assert "Step:" not in prompt
+    assert "Attempt:" not in prompt
+
+
+def test_review_prompt_omits_priority_and_step() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(task=task, step="review", attempt=2, is_codex=True)
+
+    assert "Priority:" not in prompt
+    assert "Step:" not in prompt
+    assert "Attempt: 2" in prompt
+
+
+def test_verify_prompt_omits_priority_and_step() -> None:
+    task = _make_task()
+    prompt = build_step_prompt(task=task, step="verify", attempt=2, is_codex=True)
+
+    assert "Priority:" not in prompt
+    assert "Step:" not in prompt
+    assert "Attempt: 2" in prompt
+
+
+def test_diagnose_prompt_omits_priority_and_step() -> None:
+    task = _make_task(task_type="bug")
+    prompt = build_step_prompt(task=task, step="diagnose", attempt=1, is_codex=True)
+
+    assert "Priority:" not in prompt
+    assert "Step:" not in prompt
+
+
+def test_implement_prompt_omits_review_history() -> None:
+    task = _make_task(metadata={
+        "review_history": [
+            {"attempt": 1, "decision": "changes_requested", "findings": [{"severity": "high", "summary": "x", "status": "open"}]}
+        ]
+    })
+    prompt = build_step_prompt(task=task, step="implement", attempt=1, is_codex=True)
+
+    assert "## Previous review cycle history" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# 9. implement_fix prompt includes remediation payload
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_fix_includes_review_findings_injection() -> None:
     findings = [
         {"severity": "high", "summary": "Missing null check", "file": "auth.py", "line": 42}
     ]
     task = _make_task(metadata={"review_findings": findings})
     prompt = build_step_prompt(task=task, step="implement_fix", attempt=2, is_codex=True)
 
+    assert "## Issues to fix" in prompt
+    assert "### Review findings to address" in prompt
     assert "Missing null check" in prompt
     assert "auth.py" in prompt
+    assert "Priority:" not in prompt
+    assert "Step:" not in prompt
     assert "Attempt: 2" in prompt
 
 
@@ -680,12 +774,20 @@ def test_prompt_codex_no_json_schema() -> None:
     assert "Respond with valid JSON" not in prompt
 
 
-def test_prompt_planning_has_output_requirements() -> None:
+def test_prompt_planning_includes_shared_output_format() -> None:
     task = _make_task()
     prompt = build_step_prompt(task=task, step="plan_refine", attempt=1, is_codex=True)
-    assert "Planning output requirements" in prompt
-    assert "Return only the final plan body" in prompt
-    assert "not just a change summary" in prompt
+    assert "Output format (use these exact section headings)" in prompt
+    assert "## Objective" in prompt
+    assert "## Verification Plan" in prompt
+    assert "Return the full rewritten plan, not a delta summary." in prompt
+
+
+def test_prompt_ollama_diagnose_includes_diagnosis_schema() -> None:
+    task = _make_task(task_type="bug")
+    prompt = build_step_prompt(task=task, step="diagnose", attempt=1, is_codex=False)
+    assert "Respond with valid JSON" in prompt
+    assert '"diagnosis"' in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -777,6 +879,73 @@ def test_ollama_verify_fail(adapter: LiveWorkerAdapter) -> None:
     assert result.summary == "3 tests failed"
 
 
+def test_codex_verify_formatter_includes_reason_code_on_fail(adapter: LiveWorkerAdapter) -> None:
+    raw_result = _make_run_result(exit_code=0, response_text="pytest output")
+    fmt_result = _make_run_result(
+        exit_code=0,
+        response_text='{"status":"fail","reason_code":"type_error","summary":"mypy failed"}',
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            side_effect=[raw_result, fmt_result],
+        ),
+    ):
+        result = adapter.run_step(task=_make_task(), step="verify", attempt=1)
+
+    assert result.status == "error"
+    assert result.summary is not None
+    assert "mypy failed" in result.summary
+    assert "reason_code=type_error" in result.summary
+
+
+def test_codex_verify_formatter_environment_sets_note_with_reason(adapter: LiveWorkerAdapter) -> None:
+    task = _make_task()
+    raw_result = _make_run_result(exit_code=0, response_text="pytest output")
+    fmt_result = _make_run_result(
+        exit_code=0,
+        response_text='{"status":"environment","reason_code":"permission_denied","summary":"Semaphore blocked"}',
+    )
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            side_effect=[raw_result, fmt_result],
+        ),
+    ):
+        result = adapter.run_step(task=task, step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert result.summary is not None
+    assert "Semaphore blocked" in result.summary
+    assert "reason_code=permission_denied" in result.summary
+    assert task.metadata.get("verify_environment_note") == result.summary
+    assert task.metadata.get("verify_reason_code") == "permission_denied"
+
+
 def test_task_generation_parses_top_level_array(adapter: LiveWorkerAdapter) -> None:
     response = "```json\n[{\"title\":\"Task A\",\"task_type\":\"feature\",\"priority\":\"P1\"}]\n```"
     run_result = _make_run_result(exit_code=0, response_text=response)
@@ -843,8 +1012,8 @@ def test_planning_prompt_has_planning_rules() -> None:
 def test_implementation_prompt_has_impl_rules() -> None:
     task = _make_task()
     prompt = build_step_prompt(task=task, step="implement", attempt=1, is_codex=True)
-    assert "entire step fully" in prompt
-    assert "inconsistent state" in prompt
+    assert "Complete the step end-to-end" in prompt
+    assert "source of truth" in prompt
 
 
 def test_review_prompt_has_severity_guidance() -> None:
@@ -859,8 +1028,8 @@ def test_verification_prompt_has_testing_rules() -> None:
     task = _make_task()
     prompt = build_step_prompt(task=task, step="verify", attempt=1, is_codex=True)
     assert "test" in prompt.lower()
-    assert "Do not bypass" in prompt
-    assert "do not\nmask failures" in prompt.lower() or "do not mask failures" in prompt.lower()
+    assert "Do not fabricate results" in prompt
+    assert "Do not silently skip checks" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -1217,21 +1386,21 @@ def test_run_step_reads_project_commands_from_config(container: Container, adapt
 class TestStepOutputInjection:
     """Tests for prior step output injection into build_step_prompt."""
 
-    def test_plan_output_injected_for_implementation(self) -> None:
+    def test_plan_output_not_injected_for_implementation(self) -> None:
         task = _make_task(metadata={"step_outputs": {"plan": "Use adapter pattern."}})
         prompt = build_step_prompt(task=task, step="implement", attempt=1, is_codex=True)
-        assert "## Output from prior 'plan' step" in prompt
-        assert "Use adapter pattern." in prompt
+        assert "## Output from prior 'plan' step" not in prompt
+        assert "Use adapter pattern." not in prompt
 
-    def test_analyze_and_plan_both_injected_for_implementation(self) -> None:
+    def test_analyze_and_plan_not_injected_for_implementation(self) -> None:
         task = _make_task(metadata={
             "step_outputs": {"analyze": "Found 3 modules.", "plan": "Refactor X."}
         })
         prompt = build_step_prompt(task=task, step="implement", attempt=1, is_codex=True)
-        assert "## Output from prior 'plan' step" in prompt
-        assert "## Output from prior 'analyze' step" in prompt
-        assert "Found 3 modules." in prompt
-        assert "Refactor X." in prompt
+        assert "## Output from prior 'plan' step" not in prompt
+        assert "## Output from prior 'analyze' step" not in prompt
+        assert "Found 3 modules." not in prompt
+        assert "Refactor X." not in prompt
 
     def test_verify_output_injected_for_review(self) -> None:
         task = _make_task(metadata={"step_outputs": {"verify": "All tests pass."}})
@@ -1252,6 +1421,16 @@ class TestStepOutputInjection:
         prompt = build_step_prompt(task=task, step="generate_tasks", attempt=1, is_codex=True)
         assert "## Output from prior 'plan' step" in prompt
         assert "Split into 3 subtasks." in prompt
+
+    def test_only_reproduce_injected_for_diagnose(self) -> None:
+        task = _make_task(
+            task_type="bug",
+            metadata={"step_outputs": {"reproduce": "Fails on null payload", "plan": "Old plan text"}},
+        )
+        prompt = build_step_prompt(task=task, step="diagnose", attempt=1, is_codex=True)
+        assert "## Output from prior 'reproduce' step" in prompt
+        assert "Fails on null payload" in prompt
+        assert "## Output from prior 'plan' step" not in prompt
 
     def test_no_injection_for_verification(self) -> None:
         task = _make_task(metadata={"step_outputs": {"plan": "Some plan."}})
@@ -1279,9 +1458,38 @@ class TestStepOutputInjection:
             "review_findings": [{"severity": "high", "summary": "Missing null check"}],
         })
         prompt = build_step_prompt(task=task, step="implement_fix", attempt=1, is_codex=True)
-        assert "## Output from prior 'plan' step" in prompt
-        assert "Fix the bug." in prompt
+        assert "## Output from prior 'plan' step" not in prompt
+        assert "Fix the bug." not in prompt
         assert "Missing null check" in prompt
+
+    def test_fix_includes_verify_failure_and_output(self) -> None:
+        task = _make_task(metadata={
+            "verify_failure": "pytest failed",
+            "verify_reason_code": "assertion_failure",
+            "verify_output": "E   AssertionError: expected 1",
+        })
+        prompt = build_step_prompt(task=task, step="implement_fix", attempt=1, is_codex=True)
+        assert "## Issues to fix" in prompt
+        assert "### Verification failure" in prompt
+        assert "pytest failed" in prompt
+        assert "### Verification reason code" in prompt
+        assert "assertion_failure" in prompt
+        assert "### Verification output (test/lint/typecheck logs)" in prompt
+        assert "AssertionError" in prompt
+
+    def test_fix_includes_retry_and_requested_guidance(self) -> None:
+        task = _make_task(metadata={
+            "retry_guidance": {"previous_error": "timed out", "guidance": "narrow scope"},
+            "requested_changes": {"guidance": "add edge-case test"},
+        })
+        prompt = build_step_prompt(task=task, step="implement_fix", attempt=2, is_codex=True)
+        assert "## Issues to fix" in prompt
+        assert "### Previous attempt error" in prompt
+        assert "timed out" in prompt
+        assert "### Feedback from previous attempt" in prompt
+        assert "narrow scope" in prompt
+        assert "### Requested changes from reviewer" in prompt
+        assert "edge-case test" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -1297,6 +1505,23 @@ class TestWorkdocPromptInstructions:
         assert "## Plan" in prompt
         assert ".workdoc.md" in prompt
 
+    def test_prompt_includes_workdoc_instructions_for_analyze(self) -> None:
+        task = _make_task()
+        prompt = build_step_prompt(task=task, step="analyze", attempt=1, is_codex=True)
+        assert "## Working Document" in prompt
+        assert "## Analysis" in prompt
+        assert ".workdoc.md" in prompt
+        assert "## Objective Interpreted" in prompt
+        assert "## Implementation Phases" not in prompt
+
+    def test_prompt_includes_workdoc_instructions_for_diagnose(self) -> None:
+        task = _make_task(task_type="bug")
+        prompt = build_step_prompt(task=task, step="diagnose", attempt=1, is_codex=True)
+        assert "## Working Document" in prompt
+        assert "## Analysis" in prompt
+        assert ".workdoc.md" in prompt
+        assert "## Root Cause Analysis" in prompt
+
     def test_prompt_includes_workdoc_instructions_for_implement(self) -> None:
         task = _make_task()
         prompt = build_step_prompt(task=task, step="implement", attempt=1, is_codex=True)
@@ -1304,17 +1529,27 @@ class TestWorkdocPromptInstructions:
         assert "## Implementation Log" in prompt
         assert ".workdoc.md" in prompt
 
+    def test_prompt_includes_workdoc_instructions_for_prototype(self) -> None:
+        task = _make_task(task_type="spike")
+        prompt = build_step_prompt(task=task, step="prototype", attempt=1, is_codex=True)
+        assert "## Working Document" in prompt
+        assert "## Implementation Log" in prompt
+        assert "prototype notes" in prompt
+        assert "hypotheses tested" in prompt
+        assert "Build a timeboxed prototype" in prompt
+
     def test_prompt_includes_workdoc_instructions_for_verify(self) -> None:
         task = _make_task()
         prompt = build_step_prompt(task=task, step="verify", attempt=1, is_codex=True)
         assert "## Working Document" in prompt
-        assert "## Verification Results" in prompt
+        assert "Do NOT modify `.workdoc.md`" in prompt
 
     def test_prompt_includes_workdoc_instructions_for_implement_fix(self) -> None:
         task = _make_task()
         prompt = build_step_prompt(task=task, step="implement_fix", attempt=1, is_codex=True)
         assert "## Working Document" in prompt
         assert "## Fix Log" in prompt
+        assert "Do NOT modify `.workdoc.md`" in prompt
 
     def test_prompt_includes_workdoc_instructions_for_review(self) -> None:
         task = _make_task()
