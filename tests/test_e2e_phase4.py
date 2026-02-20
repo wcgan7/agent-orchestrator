@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from agent_orchestrator.server.api import create_app
 from agent_orchestrator.runtime.orchestrator import DefaultWorkerAdapter
+from agent_orchestrator.runtime.domain.models import Task
 from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 
 
@@ -20,6 +21,42 @@ class _FileWritingAdapter(DefaultWorkerAdapter):
             if wt:
                 (Path(wt) / f"change-{task.id}-{attempt}.txt").write_text("impl\n")
         return result
+
+
+class _PrdImportWorkerAdapter(DefaultWorkerAdapter):
+    def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        if step == "generate_tasks":
+            parsed = task.metadata.get("parsed_prd") if isinstance(task.metadata, dict) else None
+            candidates = parsed.get("task_candidates") if isinstance(parsed, dict) else None
+            if not isinstance(candidates, list) or not candidates:
+                lines = [line.strip() for line in str(task.description or "").splitlines()]
+                fallback = [line[2:].strip() for line in lines if line.startswith("- ") and line[2:].strip()]
+                candidates = [{"title": title, "priority": "P2"} for title in fallback]
+            if isinstance(candidates, list):
+                generated: list[dict[str, object]] = []
+                prev: str | None = None
+                for idx, item in enumerate(candidates, start=1):
+                    if not isinstance(item, dict):
+                        continue
+                    ref_id = f"prd_{idx}"
+                    generated.append(
+                        {
+                            "id": ref_id,
+                            "title": str(item.get("title") or f"Imported PRD task {idx}"),
+                            "task_type": "feature",
+                            "priority": str(item.get("priority") or "P2"),
+                            "depends_on": [prev] if prev else [],
+                            "metadata": {
+                                "generated_ref_id": ref_id,
+                                "generated_depends_on": [prev] if prev else [],
+                                "source_chunk_id": item.get("source_chunk_id"),
+                                "source_section_path": item.get("source_section_path"),
+                            },
+                        }
+                    )
+                    prev = ref_id
+                return StepResult(status="ok", generated_tasks=generated)
+        return super().run_step(task=task, step=step, attempt=attempt)
 
 
 def test_pin_create_run_review_approve_done(tmp_path: Path) -> None:
@@ -43,7 +80,7 @@ def test_pin_create_run_review_approve_done(tmp_path: Path) -> None:
 
 
 def test_import_dependency_execution_order(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    app = create_app(project_dir=tmp_path, worker_adapter=_PrdImportWorkerAdapter())
     with TestClient(app) as client:
         preview = client.post('/api/import/prd/preview', json={'content': '- Step A\n- Step B'}).json()
         commit = client.post('/api/import/prd/commit', json={'job_id': preview['job_id']}).json()
@@ -60,20 +97,13 @@ def test_import_dependency_execution_order(tmp_path: Path) -> None:
         assert second_run.status_code == 200
 
 
-def test_quick_action_stays_off_board_until_promoted(tmp_path: Path) -> None:
+def test_terminal_session_stays_off_board(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        quick = client.post('/api/quick-actions', json={'prompt': 'One-off command'}).json()['quick_action']
+        session = client.post('/api/terminal/session', json={}).json()['session']
+        assert session['id']
         tasks_before = client.get('/api/tasks').json()['tasks']
         assert tasks_before == []
-
-        promote = client.post(f"/api/quick-actions/{quick['id']}/promote", json={})
-        assert promote.status_code == 200
-        task_id = promote.json()['task']['id']
-
-        tasks_after = client.get('/api/tasks').json()['tasks']
-        ids = [task['id'] for task in tasks_after]
-        assert task_id in ids
 
 
 def test_findings_loop_until_zero_open_then_done(tmp_path: Path) -> None:

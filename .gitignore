@@ -32,7 +32,13 @@ htmlcov/
 .DS_Store
 
 .tmp/
+.vite/
+node_modules/
+.agent_orchestrator/
 
 .prd_runner/
 .prd_runner.bak-*/
 .prd_runner.bak-*
+
+# Agent Orchestrator runtime data
+.workdoc.md

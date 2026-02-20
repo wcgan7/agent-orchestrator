@@ -8,9 +8,69 @@ from fastapi.testclient import TestClient
 
 from agent_orchestrator.server.api import create_app
 from agent_orchestrator.runtime.orchestrator import DefaultWorkerAdapter
-from agent_orchestrator.runtime.domain.models import QuickActionRun, Task
+from agent_orchestrator.runtime.domain.models import Task
+from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 from agent_orchestrator.runtime.storage.bootstrap import ensure_state_root
 from agent_orchestrator.runtime.storage.container import Container
+
+
+class _ClassifierWorkerAdapter(DefaultWorkerAdapter):
+    def __init__(self, *, summary: str, status: str = "ok") -> None:
+        super().__init__()
+        self._summary = summary
+        self._status = status
+
+    def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        if step == "pipeline_classify":
+            return StepResult(status=self._status, summary=self._summary)
+        return super().run_step(task=task, step=step, attempt=attempt)
+
+
+class _PrdImportWorkerAdapter(DefaultWorkerAdapter):
+    """Deterministic PRD import adapter for tests without runtime scripted metadata."""
+
+    def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        if step == "generate_tasks":
+            parsed = task.metadata.get("parsed_prd") if isinstance(task.metadata, dict) else None
+            candidates = parsed.get("task_candidates") if isinstance(parsed, dict) else None
+            if not isinstance(candidates, list) or not candidates:
+                lines = [line.strip() for line in str(task.description or "").splitlines()]
+                fallback = [line[2:].strip() for line in lines if line.startswith("- ") and line[2:].strip()]
+                candidates = [{"title": title, "priority": "P2"} for title in fallback]
+            if isinstance(candidates, list):
+                generated: list[dict[str, object]] = []
+                prev: str | None = None
+                for idx, item in enumerate(candidates, start=1):
+                    if not isinstance(item, dict):
+                        continue
+                    ref_id = f"prd_{idx}"
+                    generated.append(
+                        {
+                            "id": ref_id,
+                            "title": str(item.get("title") or f"Imported PRD task {idx}"),
+                            "task_type": "feature",
+                            "priority": str(item.get("priority") or "P2"),
+                            "depends_on": [prev] if prev else [],
+                            "metadata": {
+                                "generated_ref_id": ref_id,
+                                "generated_depends_on": [prev] if prev else [],
+                                "source_chunk_id": item.get("source_chunk_id"),
+                                "source_section_path": item.get("source_section_path"),
+                            },
+                        }
+                    )
+                    prev = ref_id
+                return StepResult(status="ok", generated_tasks=generated)
+        return super().run_step(task=task, step=step, attempt=attempt)
+
+
+def _create_plan_revision(client: TestClient, task_id: str, content: str, *, parent_revision_id: str | None = None) -> str:
+    payload: dict[str, object] = {"content": content}
+    if parent_revision_id:
+        payload["parent_revision_id"] = parent_revision_id
+    resp = client.post(f"/api/tasks/{task_id}/plan/revisions", json=payload)
+    assert resp.status_code == 200
+    return str(resp.json()["revision"]["id"])
 
 
 def test_cutover_archives_legacy_state(tmp_path: Path) -> None:
@@ -108,34 +168,135 @@ def test_review_actions_require_in_review_state(tmp_path: Path) -> None:
         assert changes.status_code == 400
 
 
-def test_quick_action_promotion_is_singleton(tmp_path: Path) -> None:
+def test_classify_pipeline_endpoint_high_confidence(tmp_path: Path) -> None:
+    app = create_app(
+        project_dir=tmp_path,
+        worker_adapter=_ClassifierWorkerAdapter(
+            summary='{"pipeline_id":"docs","confidence":"high","reason":"Documentation-only request."}'
+        ),
+    )
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/tasks/classify-pipeline",
+            json={"title": "Update README", "description": "Refresh setup instructions"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["pipeline_id"] == "docs"
+        assert body["task_type"] == "docs"
+        assert body["confidence"] == "high"
+
+
+def test_classify_pipeline_endpoint_invalid_output_downgrades_to_low(tmp_path: Path) -> None:
+    app = create_app(
+        project_dir=tmp_path,
+        worker_adapter=_ClassifierWorkerAdapter(summary="not-json-output"),
+    )
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/tasks/classify-pipeline",
+            json={"title": "Something vague", "description": "Need help"},
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["confidence"] == "low"
+        assert body["pipeline_id"] == "feature"
+
+
+def test_create_task_rejects_auto_without_high_confidence_classification(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        qrun = client.post("/api/quick-actions", json={"prompt": "Do thing"}).json()["quick_action"]
+        resp = client.post(
+            "/api/tasks",
+            json={"title": "Auto create", "task_type": "auto"},
+        )
+        assert resp.status_code == 400
+        assert "high-confidence classifier result" in resp.json()["detail"]
 
-        first = client.post(f"/api/quick-actions/{qrun['id']}/promote", json={})
+
+def test_create_task_accepts_auto_with_high_confidence_classification(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "title": "Auto create docs",
+                "task_type": "auto",
+                "classifier_pipeline_id": "docs",
+                "classifier_confidence": "high",
+                "classifier_reason": "Docs-only update",
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()["task"]
+        assert body["task_type"] == "docs"
+        metadata = body.get("metadata") or {}
+        assert metadata["classifier_pipeline_id"] == "docs"
+        assert metadata["classifier_confidence"] == "high"
+        assert metadata["final_pipeline_id"] == "docs"
+
+
+def test_create_task_drops_invalid_classifier_metadata_for_manual_task(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "title": "Manual task with bogus classifier metadata",
+                "task_type": "feature",
+                "classifier_pipeline_id": "not_a_pipeline",
+                "classifier_confidence": "high",
+                "classifier_reason": "bogus",
+                "was_user_override": True,
+            },
+        )
+        assert resp.status_code == 200
+        body = resp.json()["task"]
+        metadata = body.get("metadata") or {}
+        assert "classifier_pipeline_id" not in metadata
+        assert "classifier_confidence" not in metadata
+        assert "classifier_reason" not in metadata
+        assert "was_user_override" not in metadata
+        assert metadata["final_pipeline_id"] == "feature"
+
+
+def test_terminal_session_is_singleton_per_project(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        first = client.post("/api/terminal/session", json={"cols": 100, "rows": 30})
         assert first.status_code == 200
-        assert first.json()["already_promoted"] is False
-        task_id = first.json()["task"]["id"]
+        first_session = first.json()["session"]
+        assert first_session["status"] in {"running", "starting"}
 
-        second = client.post(f"/api/quick-actions/{qrun['id']}/promote", json={})
+        second = client.post("/api/terminal/session", json={"cols": 120, "rows": 40})
         assert second.status_code == 200
-        assert second.json()["already_promoted"] is True
-        assert second.json()["task"]["id"] == task_id
-
-        tasks = client.get("/api/tasks").json()["tasks"]
-        assert [task["id"] for task in tasks].count(task_id) == 1
+        second_session = second.json()["session"]
+        assert second_session["id"] == first_session["id"]
 
 
-def test_quick_action_pending_limit_returns_429(tmp_path: Path) -> None:
-    container = Container(tmp_path)
-    for idx in range(32):
-        container.quick_actions.upsert(QuickActionRun(prompt=f"Run {idx}", status="running"))
-
+def test_terminal_session_io_logs_and_stop(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        response = client.post("/api/quick-actions", json={"prompt": "git status"})
-        assert response.status_code == 429
+        start = client.post("/api/terminal/session", json={})
+        assert start.status_code == 200
+        session = start.json()["session"]
+        session_id = session["id"]
+
+        write = client.post(f"/api/terminal/session/{session_id}/input", json={"data": "echo hello\n"})
+        assert write.status_code == 200
+
+        output_text = ""
+        for _ in range(40):
+            logs = client.get(f"/api/terminal/session/{session_id}/logs?offset=0&max_bytes=262144")
+            assert logs.status_code == 200
+            output_text = str(logs.json().get("output") or "")
+            if "hello" in output_text:
+                break
+            time.sleep(0.05)
+        assert "hello" in output_text
+
+        stop = client.post(f"/api/terminal/session/{session_id}/stop", json={"signal": "TERM"})
+        assert stop.status_code == 200
 
 
 def test_project_pin_requires_git_unless_override(tmp_path: Path) -> None:
@@ -157,7 +318,7 @@ def test_project_pin_requires_git_unless_override(tmp_path: Path) -> None:
 
 
 def test_import_preview_commit_creates_dependency_chain(tmp_path: Path) -> None:
-    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    app = create_app(project_dir=tmp_path, worker_adapter=_PrdImportWorkerAdapter())
     with TestClient(app) as client:
         preview = client.post(
             "/api/import/prd/preview",
@@ -195,6 +356,29 @@ def test_import_job_persists_when_in_memory_cache_is_empty(tmp_path: Path) -> No
         loaded = client.get(f"/api/import/{job_id}")
         assert loaded.status_code == 200
         assert loaded.json()["job"]["id"] == job_id
+
+
+def test_import_preview_stores_original_and_parsed_prd_artifacts(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        content = "Feature: checkout\n\n- Add API endpoint\n- Add UI flow\n"
+        preview = client.post(
+            "/api/import/prd/preview",
+            json={"content": content, "default_priority": "P1"},
+        )
+        assert preview.status_code == 200
+        payload = preview.json()
+        assert payload["preview"]["chunk_count"] >= 1
+        assert payload["preview"]["strategy"] in {"heading_section", "paragraph_fallback", "token_window"}
+
+        job_id = payload["job_id"]
+        job_resp = client.get(f"/api/import/{job_id}")
+        assert job_resp.status_code == 200
+        job = job_resp.json()["job"]
+        assert job["original_prd"]["content"] == content
+        assert job["original_prd"]["checksum_sha256"]
+        assert job["parsed_prd"]["chunk_count"] >= 1
+        assert len(job["parsed_prd"]["task_candidates"]) >= 1
 
 
 def test_health_endpoints_available(tmp_path: Path) -> None:
@@ -640,40 +824,30 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
 
 
 def test_get_task_plan(tmp_path: Path) -> None:
-    """GET /api/tasks/{id}/plan returns stored plan history."""
+    """GET /api/tasks/{id}/plan returns revision-based plan history."""
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        # Create a task with plans in metadata
-        task = client.post(
-            "/api/tasks",
-            json={
-                "title": "Plan query test",
-                "metadata": {
-                    "plans": [
-                        {"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Plan A"},
-                        {"step": "plan", "ts": "2025-01-01T00:01:00Z", "content": "Plan B"},
-                    ]
-                },
-            },
-        ).json()["task"]
+        task = client.post("/api/tasks", json={"title": "Plan query test"}).json()["task"]
+        first_revision_id = _create_plan_revision(client, task["id"], "Plan A")
+        _create_plan_revision(client, task["id"], "Plan B", parent_revision_id=first_revision_id)
 
         resp = client.get(f"/api/tasks/{task['id']}/plan")
         assert resp.status_code == 200
         body = resp.json()
-        assert len(body["plans"]) == 2
-        assert body["latest"]["content"] == "Plan B"
-        assert body["latest"]["step"] == "plan"
+        assert len(body["revisions"]) == 2
+        assert body["latest_revision_id"] == body["revisions"][-1]["id"]
+        assert body["revisions"][-1]["content"] == "Plan B"
 
         # Non-existent task → 404
         resp_404 = client.get("/api/tasks/nonexistent/plan")
         assert resp_404.status_code == 404
 
-        # Task with no plans → empty list
+        # Task with no revisions → empty list
         task_no_plan = client.post("/api/tasks", json={"title": "No plan"}).json()["task"]
         resp_empty = client.get(f"/api/tasks/{task_no_plan['id']}/plan")
         assert resp_empty.status_code == 200
-        assert resp_empty.json()["plans"] == []
-        assert resp_empty.json()["latest"] is None
+        assert resp_empty.json()["revisions"] == []
+        assert resp_empty.json()["latest_revision_id"] is None
 
 
 def test_generate_tasks_endpoint(tmp_path: Path) -> None:
@@ -687,9 +861,6 @@ def test_generate_tasks_endpoint(tmp_path: Path) -> None:
                 "title": "Generate from plan",
                 "status": "backlog",
                 "metadata": {
-                    "plans": [
-                        {"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Build auth"},
-                    ],
                     "scripted_generated_tasks": [
                         {"title": "Login endpoint", "task_type": "feature", "priority": "P1"},
                         {"title": "Session store", "task_type": "feature", "priority": "P2"},
@@ -697,6 +868,7 @@ def test_generate_tasks_endpoint(tmp_path: Path) -> None:
                 },
             },
         ).json()["task"]
+        _create_plan_revision(client, task["id"], "Build auth")
 
         resp = client.post(f"/api/tasks/{task['id']}/generate-tasks", json={})
         assert resp.status_code == 200
@@ -718,15 +890,13 @@ def test_generate_tasks_endpoint_returns_400_when_worker_outputs_no_tasks(tmp_pa
                 "title": "Generate no output",
                 "status": "backlog",
                 "metadata": {
-                    "plans": [
-                        {"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Build auth"},
-                    ],
                     "scripted_steps": {
                         "generate_tasks": {"status": "ok", "summary": "No decomposition possible."}
                     },
                 },
             },
         ).json()["task"]
+        _create_plan_revision(client, task["id"], "Build auth")
 
         resp = client.post(f"/api/tasks/{task['id']}/generate-tasks", json={"source": "latest"})
         assert resp.status_code == 400
@@ -775,13 +945,13 @@ def test_plan_refine_job_lifecycle_and_commit(tmp_path: Path) -> None:
             json={
                 "title": "Iterative plan",
                 "metadata": {
-                    "plans": [{"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Initial plan"}],
                     "scripted_steps": {
                         "plan_refine": {"status": "ok", "summary": "Refined plan with rollout"}
                     },
                 },
             },
         ).json()["task"]
+        _create_plan_revision(client, task["id"], "Initial plan")
 
         initial_doc = client.get(f"/api/tasks/{task['id']}/plan").json()
         assert len(initial_doc["revisions"]) == 1
@@ -823,6 +993,48 @@ def test_plan_refine_job_lifecycle_and_commit(tmp_path: Path) -> None:
         assert doc_after_commit["committed_revision_id"] == result_revision_id
 
 
+def test_initiative_plan_refine_uses_initiative_refine_step(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Initiative refine",
+                "task_type": "initiative_plan",
+                "metadata": {
+                    "scripted_steps": {
+                        "initiative_plan_refine": {"status": "ok", "summary": "Refined initiative plan with updated sequencing"}
+                    },
+                },
+            },
+        ).json()["task"]
+        _create_plan_revision(client, task["id"], "Initial initiative plan")
+
+        initial_doc = client.get(f"/api/tasks/{task['id']}/plan").json()
+        base_revision_id = initial_doc["latest_revision_id"]
+
+        queued = client.post(
+            f"/api/tasks/{task['id']}/plan/refine",
+            json={"base_revision_id": base_revision_id, "feedback": "Adjust sequencing by risk"},
+        )
+        assert queued.status_code == 200
+        job_id = queued.json()["job"]["id"]
+
+        status = ""
+        for _ in range(50):
+            job = client.get(f"/api/tasks/{task['id']}/plan/jobs/{job_id}").json()["job"]
+            status = job["status"]
+            if status in {"completed", "failed", "cancelled"}:
+                break
+            time.sleep(0.05)
+        assert status == "completed"
+
+        result_revision_id = job["result_revision_id"]
+        doc = client.get(f"/api/tasks/{task['id']}/plan").json()
+        refined = next(item for item in doc["revisions"] if item["id"] == result_revision_id)
+        assert refined["step"] == "initiative_plan_refine"
+
+
 def test_plan_refine_failure_path(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
@@ -831,11 +1043,11 @@ def test_plan_refine_failure_path(tmp_path: Path) -> None:
             json={
                 "title": "Broken refine",
                 "metadata": {
-                    "plans": [{"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Base"}],
                     "scripted_steps": {"plan_refine": {"status": "error", "summary": "worker failed"}},
                 },
             },
         ).json()["task"]
+        _create_plan_revision(client, task["id"], "Base")
 
         queued = client.post(
             f"/api/tasks/{task['id']}/plan/refine",
@@ -874,11 +1086,11 @@ def test_plan_refine_emit_error_does_not_mark_job_failed(tmp_path: Path, monkeyp
             json={
                 "title": "Refine resilient finalize",
                 "metadata": {
-                    "plans": [{"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Base plan"}],
                     "scripted_steps": {"plan_refine": {"status": "ok", "summary": "Refined output"}},
                 },
             },
         ).json()["task"]
+        _create_plan_revision(client, task["id"], "Base plan")
 
         queued = client.post(
             f"/api/tasks/{task['id']}/plan/refine",
@@ -909,11 +1121,11 @@ def test_generate_tasks_with_explicit_plan_sources(tmp_path: Path) -> None:
             json={
                 "title": "Source selection",
                 "metadata": {
-                    "plans": [{"step": "plan", "ts": "2025-01-01T00:00:00Z", "content": "Base plan"}],
                     "scripted_generated_tasks": [{"title": "From selected source", "task_type": "feature"}],
                 },
             },
         ).json()["task"]
+        _create_plan_revision(client, task["id"], "Base plan")
 
         plan_doc = client.get(f"/api/tasks/{task['id']}/plan").json()
         latest_revision_id = plan_doc["latest_revision_id"]

@@ -42,7 +42,7 @@ describe('Planning panel', () => {
       description: 'Plan this',
       priority: 'P2',
       status: 'queued',
-      task_type: 'plan',
+      task_type: 'initiative_plan',
       blocked_by: [],
       blocks: [],
     }
@@ -121,7 +121,6 @@ describe('Planning panel', () => {
       if (u.includes('/api/projects')) return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
       if (u.includes('/api/workers/health')) return Promise.resolve({ ok: true, json: async () => ({ providers: [] }) })
       if (u.includes('/api/workers/routing')) return Promise.resolve({ ok: true, json: async () => ({ default: 'codex', rows: [] }) })
-      if (u.includes('/api/quick-actions')) return Promise.resolve({ ok: true, json: async () => ({ quick_actions: [] }) })
       if (u.includes('/api/tasks/execution-order')) return Promise.resolve({ ok: true, json: async () => ({ batches: [] }) })
       if (u.includes('/api/phases')) return Promise.resolve({ ok: true, json: async () => ([]) })
       if (u.includes('/api/metrics')) return Promise.resolve({ ok: true, json: async () => ({}) })
@@ -197,7 +196,7 @@ describe('Planning worker output', () => {
       description: 'Plan this',
       priority: 'P2',
       status: 'in_progress',
-      task_type: 'plan',
+      task_type: 'initiative_plan',
       blocked_by: [],
       blocks: [],
     }
@@ -381,7 +380,6 @@ describe('Planning worker output', () => {
       if (u.includes('/api/projects')) return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
       if (u.includes('/api/workers/health')) return Promise.resolve({ ok: true, json: async () => ({ providers: [] }) })
       if (u.includes('/api/workers/routing')) return Promise.resolve({ ok: true, json: async () => ({ default: 'codex', rows: [] }) })
-      if (u.includes('/api/quick-actions')) return Promise.resolve({ ok: true, json: async () => ({ quick_actions: [] }) })
       if (u.includes('/api/tasks/execution-order')) return Promise.resolve({ ok: true, json: async () => ({ batches: [] }) })
       if (u.includes('/api/phases')) return Promise.resolve({ ok: true, json: async () => ([]) })
       if (u.includes('/api/metrics')) return Promise.resolve({ ok: true, json: async () => ({}) })
@@ -445,7 +443,7 @@ describe('Planning generate output', () => {
       description: 'Plan this',
       priority: 'P2',
       status: 'in_progress',
-      task_type: 'plan',
+      task_type: 'initiative_plan',
       blocked_by: [],
       blocks: [],
     }
@@ -620,7 +618,6 @@ describe('Planning generate output', () => {
       if (u.includes('/api/projects')) return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
       if (u.includes('/api/workers/health')) return Promise.resolve({ ok: true, json: async () => ({ providers: [] }) })
       if (u.includes('/api/workers/routing')) return Promise.resolve({ ok: true, json: async () => ({ default: 'codex', rows: [] }) })
-      if (u.includes('/api/quick-actions')) return Promise.resolve({ ok: true, json: async () => ({ quick_actions: [] }) })
       if (u.includes('/api/tasks/execution-order')) return Promise.resolve({ ok: true, json: async () => ({ batches: [] }) })
       if (u.includes('/api/phases')) return Promise.resolve({ ok: true, json: async () => ([]) })
       if (u.includes('/api/metrics')) return Promise.resolve({ ok: true, json: async () => ({}) })

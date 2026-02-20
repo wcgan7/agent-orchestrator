@@ -1,14 +1,14 @@
 import { FormEvent, useEffect, useRef, useState } from 'react'
 import { buildApiUrl, buildAuthHeaders } from './api'
 import { ImportJobPanel } from './components/AppPanels/ImportJobPanel'
-import { QuickActionDetailPanel } from './components/AppPanels/QuickActionDetailPanel'
+import { TerminalPanel } from './components/AppPanels/TerminalPanel'
 import HITLModeSelector from './components/HITLModeSelector/HITLModeSelector'
 import Markdown from 'react-markdown'
 import { humanizeLabel } from './ui/labels'
 import './styles/orchestrator.css'
 
 type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
-type CreateTab = 'task' | 'import' | 'quick'
+type CreateTab = 'task' | 'import' | 'terminal'
 type TaskDetailTab = 'overview' | 'plan' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
 type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition'
 
@@ -87,6 +87,9 @@ type PreviewEdge = {
 type PrdPreview = {
   nodes: PreviewNode[]
   edges: PreviewEdge[]
+  chunk_count?: number
+  strategy?: string
+  ambiguity_warnings?: string[]
 }
 
 type OrchestratorStatus = {
@@ -137,19 +140,6 @@ type PinnedProjectRef = {
   id: string
   path: string
   pinned_at?: string
-}
-
-type QuickActionRecord = {
-  id: string
-  prompt: string
-  status: string
-  started_at?: string | null
-  finished_at?: string | null
-  result_summary?: string | null
-  promoted_task_id?: string | null
-  kind?: string | null
-  command?: string | null
-  exit_code?: number | null
 }
 
 type TaskLogsSnapshot = {
@@ -347,14 +337,12 @@ type TaskPlanDocument = {
   committed_revision_id?: string | null
   revisions: PlanRevisionRecord[]
   active_refine_job?: PlanRefineJobRecord | null
-  plans: Array<{ step?: string | null; ts?: string | null; content?: string }>
-  latest?: { step?: string | null; ts?: string | null; content?: string } | null
 }
 
 const STORAGE_PROJECT = 'agent-orchestrator-project'
 const STORAGE_ROUTE = 'agent-orchestrator-route'
 const ADD_REPO_VALUE = '__add_new_repo__'
-const WS_RELOAD_CHANNELS = new Set(['tasks', 'queue', 'agents', 'review', 'quick_actions', 'notifications'])
+const WS_RELOAD_CHANNELS = new Set(['tasks', 'queue', 'agents', 'review', 'terminal', 'notifications'])
 const LOG_CHUNK_CHARS = 200_000
 const LOG_HISTORY_MAX_CHARS = 5_000_000
 const LOG_NEAR_BOTTOM_PX = 120
@@ -392,8 +380,9 @@ const ROUTES: Array<{ key: RouteKey; label: string }> = [
 ]
 
 const TASK_TYPE_OPTIONS = [
+  'auto',
   'feature',
-  'plan',
+  'initiative_plan',
   'bug',
   'refactor',
   'research',
@@ -402,6 +391,10 @@ const TASK_TYPE_OPTIONS = [
   'security',
   'performance',
 ]
+
+function isPlanningTaskType(taskType: string | undefined | null): boolean {
+  return taskType === 'initiative_plan' || taskType === 'plan_only' || taskType === 'plan'
+}
 
 const DEFAULT_COLLABORATION_MODES: CollaborationMode[] = [
   { mode: 'autopilot', display_name: 'Autopilot', description: 'Agents run freely.' },
@@ -977,21 +970,12 @@ function normalizeTaskPlan(payload: unknown): TaskPlanDocument {
     : {}
   const revisionsRaw = Array.isArray(root.revisions) ? root.revisions : []
   const revisions = revisionsRaw.map((item) => normalizePlanRevision(item)).filter((item): item is PlanRevisionRecord => item !== null)
-  const plansRaw = Array.isArray(root.plans) ? root.plans : []
-  const plans = plansRaw
-    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object' && !Array.isArray(item))
-    .map((item) => ({ step: item.step ? String(item.step) : null, ts: item.ts ? String(item.ts) : null, content: item.content ? String(item.content) : '' }))
-  const latestRaw = root.latest && typeof root.latest === 'object' && !Array.isArray(root.latest)
-    ? root.latest as Record<string, unknown>
-    : null
   return {
     task_id: String(root.task_id || ''),
     latest_revision_id: root.latest_revision_id ? String(root.latest_revision_id) : null,
     committed_revision_id: root.committed_revision_id ? String(root.committed_revision_id) : null,
     revisions,
     active_refine_job: normalizePlanRefineJob(root.active_refine_job || null),
-    plans,
-    latest: latestRaw ? { step: latestRaw.step ? String(latestRaw.step) : null, ts: latestRaw.ts ? String(latestRaw.ts) : null, content: latestRaw.content ? String(latestRaw.content) : '' } : null,
   }
 }
 
@@ -1314,7 +1298,6 @@ export default function App() {
   const [workerHealthRefreshing, setWorkerHealthRefreshing] = useState(false)
   const [projects, setProjects] = useState<ProjectRef[]>([])
   const [pinnedProjects, setPinnedProjects] = useState<PinnedProjectRef[]>([])
-  const [quickActions, setQuickActions] = useState<QuickActionRecord[]>([])
   const [executionBatches, setExecutionBatches] = useState<string[][]>([])
   const [executionCompleted, setExecutionCompleted] = useState<string[]>([])
   const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null)
@@ -1379,7 +1362,13 @@ export default function App() {
 
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskDescription, setNewTaskDescription] = useState('')
-  const [newTaskType, setNewTaskType] = useState('feature')
+  const [newTaskType, setNewTaskType] = useState('auto')
+  const [autoPipelineNeedsManualSelection, setAutoPipelineNeedsManualSelection] = useState(false)
+  const [pendingPipelineClassification, setPendingPipelineClassification] = useState<{
+    pipeline_id: string
+    confidence: 'high' | 'low'
+    reason: string
+  } | null>(null)
   const [newTaskPriority, setNewTaskPriority] = useState('P2')
   const [newTaskLabels, setNewTaskLabels] = useState('')
   const [newTaskBlockedBy, setNewTaskBlockedBy] = useState('')
@@ -1444,17 +1433,6 @@ export default function App() {
   const [selectedImportJobError, setSelectedImportJobError] = useState('')
   const [selectedImportJobErrorAt, setSelectedImportJobErrorAt] = useState('')
 
-  const [quickPrompt, setQuickPrompt] = useState('')
-  const [quickTimeout, setQuickTimeout] = useState('')
-  const [selectedQuickActionId, setSelectedQuickActionId] = useState('')
-  const [selectedQuickActionDetail, setSelectedQuickActionDetail] = useState<QuickActionRecord | null>(null)
-  const [selectedQuickActionLoading, setSelectedQuickActionLoading] = useState(false)
-  const [selectedQuickActionError, setSelectedQuickActionError] = useState('')
-  const [selectedQuickActionErrorAt, setSelectedQuickActionErrorAt] = useState('')
-  const [quickActionStdout, setQuickActionStdout] = useState('')
-  const [quickActionStderr, setQuickActionStderr] = useState('')
-  const [quickActionStdoutOffset, setQuickActionStdoutOffset] = useState(0)
-  const [quickActionStderrOffset, setQuickActionStderrOffset] = useState(0)
   const [reviewGuidance, setReviewGuidance] = useState('')
   const [retryFromStep, setRetryFromStep] = useState('')
   const [showAllActivity, setShowAllActivity] = useState(false)
@@ -1506,7 +1484,6 @@ export default function App() {
   const [settingsDependencyPolicy, setSettingsDependencyPolicy] = useState(DEFAULT_SETTINGS.defaults.dependency_policy)
 
   const selectedTaskIdRef = useRef(selectedTaskId)
-  const selectedQuickActionIdRef = useRef(selectedQuickActionId)
   const selectedImportJobIdRef = useRef(selectedImportJobId)
   const activeProjectIdRef = useRef(activeProjectId)
   const projectDirRef = useRef(projectDir)
@@ -1528,7 +1505,7 @@ export default function App() {
     if (!explicitTab && selectedTaskId) {
       // Auto-switch to plan tab when task is paused at before_implement gate
       const matchedTask = Object.values(board.columns).flat().find((t) => t.id === selectedTaskId)
-      if (matchedTask?.pending_gate === 'before_implement' && matchedTask.task_type !== 'plan') {
+      if (matchedTask?.pending_gate === 'before_implement' && !isPlanningTaskType(matchedTask.task_type)) {
         setTaskDetailTab('plan')
       } else {
         setTaskDetailTab('overview')
@@ -1554,10 +1531,6 @@ export default function App() {
     setShowAllActivity(false)
     setPlanTabMode('view')
   }, [selectedTaskId])
-
-  useEffect(() => {
-    selectedQuickActionIdRef.current = selectedQuickActionId
-  }, [selectedQuickActionId])
 
   useEffect(() => {
     selectedImportJobIdRef.current = selectedImportJobId
@@ -1660,7 +1633,7 @@ export default function App() {
 
   useEffect(() => {
     if (route !== 'planning') return
-    const planTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => t.task_type === 'plan' || t.task_type === 'plan_only')
+    const planTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => isPlanningTaskType(t.task_type))
     if (planTasks.length === 0) {
       if (planningTaskId) setPlanningTaskId('')
       return
@@ -2474,85 +2447,6 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [selectedTaskId, selectedTaskPlan?.active_refine_job?.status, projectDir])
 
-  async function loadQuickActionDetail(quickActionId: string): Promise<void> {
-    if (!quickActionId) {
-      setSelectedQuickActionDetail(null)
-      return
-    }
-    setSelectedQuickActionLoading(true)
-    setSelectedQuickActionError('')
-    setSelectedQuickActionErrorAt('')
-    try {
-      const payload = await requestJson<{ quick_action: QuickActionRecord }>(buildApiUrl(`/api/quick-actions/${quickActionId}`, projectDir))
-      if (selectedQuickActionIdRef.current !== quickActionId) return
-      setSelectedQuickActionDetail(payload.quick_action ?? null)
-    } catch (err) {
-      if (selectedQuickActionIdRef.current !== quickActionId) return
-      setSelectedQuickActionDetail(null)
-      const detail = err instanceof Error ? err.message : 'unknown error'
-      setSelectedQuickActionError(`Failed to load quick action detail (${detail})`)
-      setSelectedQuickActionErrorAt(new Date().toLocaleTimeString())
-    } finally {
-      setSelectedQuickActionLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    if (!selectedQuickActionId) return
-    void loadQuickActionDetail(selectedQuickActionId)
-    // Reset log state when quick action changes
-    setQuickActionStdout('')
-    setQuickActionStderr('')
-    setQuickActionStdoutOffset(0)
-    setQuickActionStderrOffset(0)
-  }, [selectedQuickActionId, projectDir])
-
-  // Poll logs for active quick actions
-  useEffect(() => {
-    if (!selectedQuickActionId) return
-    const detail = selectedQuickActionDetail
-    if (!detail) return
-    if (detail.status !== 'queued' && detail.status !== 'running') return
-
-    let stdoutOff = quickActionStdoutOffset
-    let stderrOff = quickActionStderrOffset
-    let cancelled = false
-
-    async function poll(): Promise<void> {
-      try {
-        const resp = await requestJson<{
-          stdout: string
-          stderr: string
-          stdout_offset: number
-          stderr_offset: number
-          status: string
-          finished_at: string | null
-        }>(buildApiUrl(`/api/quick-actions/${selectedQuickActionId}/logs?stdout_offset=${stdoutOff}&stderr_offset=${stderrOff}`, projectDir))
-        if (cancelled) return
-        if (resp.stdout) {
-          setQuickActionStdout((prev) => prev + resp.stdout)
-        }
-        if (resp.stderr) {
-          setQuickActionStderr((prev) => prev + resp.stderr)
-        }
-        stdoutOff = resp.stdout_offset
-        stderrOff = resp.stderr_offset
-        setQuickActionStdoutOffset(stdoutOff)
-        setQuickActionStderrOffset(stderrOff)
-        // If finished, refresh the detail to get final status
-        if (resp.finished_at) {
-          void loadQuickActionDetail(selectedQuickActionId)
-        }
-      } catch {
-        // Ignore transient fetch errors during polling
-      }
-    }
-
-    void poll()
-    const timer = window.setInterval(() => void poll(), 2_000)
-    return () => { cancelled = true; window.clearInterval(timer) }
-  }, [selectedQuickActionId, selectedQuickActionDetail?.status, projectDir])
-
   function toErrorMessage(prefix: string, err: unknown): string {
     const detail = err instanceof Error ? err.message : 'unknown error'
     return `${prefix} (${detail})`
@@ -2613,27 +2507,6 @@ export default function App() {
     }
   }
 
-  async function refreshQuickActionsSurface(): Promise<void> {
-    const refreshProjectDir = projectDirRef.current
-    try {
-      const payload = await requestJson<{ quick_actions: QuickActionRecord[] }>(buildApiUrl('/api/quick-actions', refreshProjectDir))
-      if (refreshProjectDir !== projectDirRef.current) {
-        return
-      }
-      setQuickActions(payload.quick_actions || [])
-
-      const selectedQuickAction = String(selectedQuickActionIdRef.current || '').trim()
-      if (selectedQuickAction) {
-        void loadQuickActionDetail(selectedQuickAction)
-      }
-    } catch (err) {
-      if (refreshProjectDir !== projectDirRef.current) {
-        return
-      }
-      setError(toErrorMessage('Failed to refresh quick actions surface', err))
-    }
-  }
-
   async function reloadAll(): Promise<void> {
     const requestSeq = reloadAllSeqRef.current + 1
     reloadAllSeqRef.current = requestSeq
@@ -2646,7 +2519,6 @@ export default function App() {
         agentData,
         projectData,
         pinnedData,
-        quickActionData,
         executionOrderData,
         metricsData,
         workerHealthData,
@@ -2657,7 +2529,6 @@ export default function App() {
         requestJson<{ agents: AgentRecord[] }>(buildApiUrl('/api/agents', projectDir)),
         requestJson<{ projects: ProjectRef[] }>(buildApiUrl('/api/projects', projectDir)),
         requestJson<{ items: PinnedProjectRef[] }>(buildApiUrl('/api/projects/pinned', projectDir)),
-        requestJson<{ quick_actions: QuickActionRecord[] }>(buildApiUrl('/api/quick-actions', projectDir)),
         requestJson<{ batches: string[][]; completed?: string[] }>(buildApiUrl('/api/tasks/execution-order', projectDir)),
         requestJson<unknown>(buildApiUrl('/api/metrics', projectDir)).catch(() => null),
         requestJson<unknown>(buildApiUrl('/api/workers/health', projectDir)).catch(() => ({ providers: [] })),
@@ -2671,7 +2542,6 @@ export default function App() {
       setAgents(agentData.agents || [])
       setProjects(projectData.projects || [])
       setPinnedProjects(pinnedData.items || [])
-      setQuickActions(quickActionData.quick_actions || [])
       setExecutionBatches(executionOrderData.batches || [])
       setExecutionCompleted(executionOrderData.completed || [])
       setMetrics(normalizeMetrics(metricsData))
@@ -2708,11 +2578,9 @@ export default function App() {
 
         const refreshTasks = channels.has('tasks') || channels.has('queue') || channels.has('review') || channels.has('notifications')
         const refreshAgents = channels.has('agents') || channels.has('notifications')
-        const refreshQuickActions = channels.has('quick_actions')
         const ops: Array<Promise<void>> = []
         if (refreshTasks) ops.push(refreshTasksSurface())
         if (refreshAgents) ops.push(refreshAgentsSurface())
-        if (refreshQuickActions) ops.push(refreshQuickActionsSurface())
         if (ops.length > 0) {
           await Promise.all(ops)
         }
@@ -2752,7 +2620,7 @@ export default function App() {
     let reconnectTimer: number | null = null
     let reconnectAttempts = 0
     const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`
-    const subscribedChannels = ['tasks', 'queue', 'agents', 'review', 'quick_actions', 'notifications', 'system']
+    const subscribedChannels = ['tasks', 'queue', 'agents', 'review', 'terminal', 'notifications', 'system']
 
     const scheduleReconnect = (): void => {
       if (stopped || reconnectTimer !== null) return
@@ -2785,14 +2653,6 @@ export default function App() {
       const currentProjectId = String(activeProjectIdRef.current || '').trim()
       if (eventProjectId && (!currentProjectId || currentProjectId !== eventProjectId)) {
         return
-      }
-
-      if (channel === 'quick_actions') {
-        const selectedQuickAction = String(selectedQuickActionIdRef.current || '').trim()
-        const eventEntityId = String(data.entity_id || '').trim()
-        if (selectedQuickAction && (!eventEntityId || eventEntityId === selectedQuickAction)) {
-          void loadQuickActionDetail(selectedQuickAction)
-        }
       }
 
       if (WS_RELOAD_CHANNELS.has(channel)) {
@@ -2908,6 +2768,70 @@ export default function App() {
       .split(',')
       .map((item) => item.trim())
       .filter(Boolean)
+    let resolvedTaskType = newTaskType
+    let classifierPipelineId: string | undefined
+    let classifierConfidence: 'high' | 'low' | undefined
+    let classifierReason: string | undefined
+    let wasUserOverride = false
+    if (resolvedTaskType === 'auto') {
+      if (autoPipelineNeedsManualSelection) {
+        setError('Auto pipeline selection was low confidence. Please choose a specific pipeline and submit again.')
+        return
+      }
+      try {
+        const classification = await requestJson<{
+          pipeline_id: string
+          task_type: string
+          confidence: 'high' | 'low'
+          reason: string
+        }>(buildApiUrl('/api/tasks/classify-pipeline', projectDir), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            title: newTaskTitle.trim(),
+            description: newTaskDescription,
+            metadata: parsedMetadata,
+          }),
+        })
+        classifierPipelineId = String(classification.pipeline_id || '').trim() || 'feature'
+        classifierConfidence = classification.confidence === 'high' ? 'high' : 'low'
+        classifierReason = String(classification.reason || '').trim()
+        if (classifierConfidence !== 'high') {
+          const suggestedTaskType = String(classification.task_type || '').trim() || 'feature'
+          setPendingPipelineClassification({
+            pipeline_id: classifierPipelineId,
+            confidence: classifierConfidence,
+            reason: classifierReason,
+          })
+          setNewTaskType(suggestedTaskType)
+          setAutoPipelineNeedsManualSelection(true)
+          setError(`Auto classification is low confidence: ${classifierReason || 'please choose a pipeline manually.'}`)
+          return
+        }
+        resolvedTaskType = String(classification.task_type || '').trim() || 'feature'
+      } catch (err) {
+        setError(`Auto classification failed: ${toErrorMessage('Please choose a pipeline manually', err)}`)
+        setNewTaskType('feature')
+        setAutoPipelineNeedsManualSelection(true)
+        setPendingPipelineClassification({
+          pipeline_id: 'feature',
+          confidence: 'low',
+          reason: 'Pipeline auto-classification failed.',
+        })
+        return
+      }
+    } else {
+      if (autoPipelineNeedsManualSelection) {
+        wasUserOverride = true
+      }
+      if (autoPipelineNeedsManualSelection && pendingPipelineClassification) {
+        classifierPipelineId = pendingPipelineClassification.pipeline_id
+        classifierConfidence = pendingPipelineClassification.confidence
+        classifierReason = pendingPipelineClassification.reason
+      } else if (pendingPipelineClassification) {
+        setPendingPipelineClassification(null)
+      }
+    }
     try {
       await requestJson<{ task: TaskRecord }>(buildApiUrl('/api/tasks', projectDir), {
         method: 'POST',
@@ -2915,7 +2839,7 @@ export default function App() {
         body: JSON.stringify({
           title: newTaskTitle.trim(),
           description: newTaskDescription,
-          task_type: newTaskType,
+          task_type: resolvedTaskType,
           priority: newTaskPriority,
           labels: newTaskLabels.split(',').map((item) => item.trim()).filter(Boolean),
           blocked_by: newTaskBlockedBy.split(',').map((item) => item.trim()).filter(Boolean),
@@ -2927,6 +2851,10 @@ export default function App() {
           pipeline_template: parsedPipelineTemplate.length > 0 ? parsedPipelineTemplate : undefined,
           metadata: parsedMetadata,
           project_commands: parsedProjectCommands,
+          classifier_pipeline_id: classifierPipelineId,
+          classifier_confidence: classifierConfidence,
+          classifier_reason: classifierReason,
+          was_user_override: wasUserOverride || undefined,
           status: statusOverride || 'queued',
         }),
       })
@@ -2937,7 +2865,9 @@ export default function App() {
     setError('')
     setNewTaskTitle('')
     setNewTaskDescription('')
-    setNewTaskType('feature')
+    setNewTaskType('auto')
+    setAutoPipelineNeedsManualSelection(false)
+    setPendingPipelineClassification(null)
     setNewTaskPriority('P2')
     setNewTaskLabels('')
     setNewTaskBlockedBy('')
@@ -2992,26 +2922,6 @@ export default function App() {
       await reloadAll()
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to commit import')
-    }
-  }
-
-  async function submitQuickAction(event: FormEvent): Promise<void> {
-    event.preventDefault()
-    if (!quickPrompt.trim()) return
-    try {
-      const resp = await requestJson<{ quick_action: QuickActionRecord }>(buildApiUrl('/api/quick-actions', projectDir), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: quickPrompt.trim(), ...(quickTimeout.trim() ? { timeout: parseInt(quickTimeout.trim(), 10) } : {}) }),
-      })
-      if (resp.quick_action) {
-        setSelectedQuickActionId(resp.quick_action.id)
-        setSelectedQuickActionDetail(resp.quick_action)
-      }
-      setQuickPrompt('')
-      await reloadAll()
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to submit quick action')
     }
   }
 
@@ -3529,22 +3439,6 @@ export default function App() {
     }
   }
 
-  async function promoteQuickAction(quickActionId: string): Promise<void> {
-    try {
-      await requestJson<{ task: TaskRecord; already_promoted: boolean }>(buildApiUrl(`/api/quick-actions/${quickActionId}/promote`, projectDir), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ priority: 'P2' }),
-      })
-      await reloadAll()
-      if (selectedQuickActionIdRef.current === quickActionId) {
-        await loadQuickActionDetail(quickActionId)
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to promote quick action')
-    }
-  }
-
   async function controlOrchestrator(action: 'pause' | 'resume' | 'drain' | 'stop'): Promise<void> {
     try {
       await requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/control', projectDir), {
@@ -3721,7 +3615,7 @@ export default function App() {
   const selectedTaskView = selectedTaskDetail && selectedTaskDetail.id === selectedTaskId ? selectedTaskDetail : selectedTask
   const blockerIds = selectedTaskView?.blocked_by || []
   const blockedIds = selectedTaskView?.blocks || []
-  const isPlanTask = selectedTaskView?.task_type === 'plan' || selectedTaskView?.task_type === 'plan_only'
+  const isPlanTask = isPlanningTaskType(selectedTaskView?.task_type)
   const isTaskActionBusy = taskActionPending !== null
   const configLocked = !new Set(['backlog', 'queued', 'blocked', 'cancelled']).has(selectedTaskView?.status || '')
   const taskStatus = selectedTaskView?.status || ''
@@ -3731,7 +3625,7 @@ export default function App() {
   })
   const hasUnresolvedBlockers = unresolvedBlockers.length > 0
   const showViewPlan = isPlanTask && selectedTaskView?.status === 'done'
-  const showPlanTab = selectedTaskView && selectedTaskView.task_type !== 'plan' && (
+  const showPlanTab = selectedTaskView && !isPlanningTaskType(selectedTaskView.task_type) && (
     (selectedTaskPlan?.revisions?.length ?? 0) > 0 ||
     selectedTaskView.pending_gate === 'before_implement'
   )
@@ -3787,7 +3681,7 @@ export default function App() {
           >
             Configuration
           </button>
-          {(selectedTaskView.status === 'in_review' || selectedTaskView.status === 'done' || selectedTaskView.status === 'blocked') && selectedTaskView.task_type !== 'plan' ? (
+          {(selectedTaskView.status === 'in_review' || selectedTaskView.status === 'done' || selectedTaskView.status === 'blocked') && !isPlanningTaskType(selectedTaskView.task_type) ? (
             <button
               className={`detail-tab ${taskDetailTab === 'changes' ? 'is-active' : ''}`}
               aria-pressed={taskDetailTab === 'changes'}
@@ -4004,7 +3898,7 @@ export default function App() {
             ? (planRevisions.find((r) => r.id === selectedTaskPlan.latest_revision_id) || null)
             : null
           const effectiveRevision = selectedPlanRevision || latestPlanRevision
-          const planContent = (effectiveRevision?.content || selectedTaskPlan?.latest?.content || '').trim()
+          const planContent = (effectiveRevision?.content || '').trim()
           const isRefining = !!(selectedTaskPlan?.active_refine_job
             && (selectedTaskPlan.active_refine_job.status === 'queued' || selectedTaskPlan.active_refine_job.status === 'running'))
           return (
@@ -4672,7 +4566,7 @@ export default function App() {
     }
 
     const resolvedProviderForTask = (task: TaskRecord): string => {
-      const step = String(task.current_step || '').trim() || (task.task_type === 'plan' ? 'plan' : 'implement')
+      const step = String(task.current_step || '').trim() || (isPlanningTaskType(task.task_type) ? 'plan' : 'implement')
       return routingByStep.get(step)?.provider || workerDefaultProvider
     }
 
@@ -5265,7 +5159,7 @@ export default function App() {
   }
 
   function renderPlanning(): JSX.Element {
-    const allTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => t.task_type === 'plan' || t.task_type === 'plan_only')
+    const allTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => isPlanningTaskType(t.task_type))
     const planningTask = allTasks.find((t) => t.id === planningTaskId) || null
     const planRevisions = selectedTaskPlan?.revisions || []
     const selectedPlanRevision = selectedPlanRevisionId
@@ -5282,7 +5176,7 @@ export default function App() {
       ? summarizePlanDiff(effectiveWorkerPlanRevision.content || '', selectedPlanParentRevision.content || '')
       : null
     const effectiveGenerateRevisionId = planGenerateRevisionId || selectedPlanRevisionId || selectedTaskPlan?.latest_revision_id || ''
-    const workerPlanContent = (effectiveWorkerPlanRevision?.content || selectedTaskPlan?.latest?.content || '').trim()
+    const workerPlanContent = (effectiveWorkerPlanRevision?.content || '').trim()
     const isRefining = !!(selectedTaskPlan?.active_refine_job
       && (selectedTaskPlan.active_refine_job.status === 'queued' || selectedTaskPlan.active_refine_job.status === 'running'))
     const workerOutputDisplay = planRefineStdout || ' '
@@ -5297,7 +5191,7 @@ export default function App() {
 
     function openCreatePlanTaskModal(): void {
       setCreateTab('task')
-      setNewTaskType('plan')
+      setNewTaskType('initiative_plan')
       setWorkOpen(true)
     }
 
@@ -5738,7 +5632,7 @@ export default function App() {
               <div className="tab-row">
                 <button className={`tab ${createTab === 'task' ? 'is-active' : ''}`} onClick={() => setCreateTab('task')}>Create Task</button>
                 <button className={`tab ${createTab === 'import' ? 'is-active' : ''}`} onClick={() => setCreateTab('import')}>Import PRD</button>
-                <button className={`tab ${createTab === 'quick' ? 'is-active' : ''}`} onClick={() => setCreateTab('quick')}>Quick Action</button>
+                <button className={`tab ${createTab === 'terminal' ? 'is-active' : ''}`} onClick={() => setCreateTab('terminal')}>Terminal</button>
               </div>
             </div>
 
@@ -5750,9 +5644,22 @@ export default function App() {
                   <label className="field-label" htmlFor="task-description">Description</label>
                   <textarea id="task-description" rows={4} value={newTaskDescription} onChange={(event) => setNewTaskDescription(event.target.value)} />
                   <label className="field-label" htmlFor="task-type">Task Type</label>
-                  <select id="task-type" value={newTaskType} onChange={(event) => setNewTaskType(event.target.value)}>
+                  <select
+                    id="task-type"
+                    value={newTaskType}
+                    onChange={(event) => {
+                      const value = event.target.value
+                      if (value === 'auto' && autoPipelineNeedsManualSelection) {
+                        setError('Auto selection is locked after low confidence. Please select a specific pipeline for this task.')
+                        return
+                      }
+                      setNewTaskType(value)
+                    }}
+                  >
                     {TASK_TYPE_OPTIONS.map((taskType) => (
-                      <option key={taskType} value={taskType}>{humanizeLabel(taskType)}</option>
+                      <option key={taskType} value={taskType} disabled={taskType === 'auto' && autoPipelineNeedsManualSelection}>
+                        {humanizeLabel(taskType)}
+                      </option>
                     ))}
                   </select>
                   <label className="field-label">Priority</label>
@@ -5903,31 +5810,9 @@ export default function App() {
                 </div>
               ) : null}
 
-              {createTab === 'quick' ? (
+              {createTab === 'terminal' ? (
                 <div className="form-stack">
-                  <form className="form-stack" onSubmit={(event) => void submitQuickAction(event)}>
-                    <p className="hint">Quick Action is ephemeral. Promote explicitly if you want it on the board.</p>
-                    <label className="field-label" htmlFor="quick-prompt">Prompt</label>
-                    <textarea id="quick-prompt" rows={6} value={quickPrompt} onChange={(event) => setQuickPrompt(event.target.value)} required />
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <button className="button button-primary" type="submit">Run Quick Action</button>
-                      <label htmlFor="quick-timeout" className="field-label" style={{ margin: 0, whiteSpace: 'nowrap' }}>Timeout (s)</label>
-                      <input id="quick-timeout" type="number" min={10} max={600} step={10} placeholder="120" value={quickTimeout} onChange={(event) => setQuickTimeout(event.target.value)} style={{ width: '80px' }} />
-                    </div>
-                  </form>
-                  <QuickActionDetailPanel
-                    quickActions={quickActions}
-                    selectedQuickActionId={selectedQuickActionId}
-                    selectedQuickActionDetail={selectedQuickActionDetail}
-                    selectedQuickActionLoading={selectedQuickActionLoading}
-                    selectedQuickActionError={`${selectedQuickActionError}${selectedQuickActionErrorAt ? ` at ${selectedQuickActionErrorAt}` : ''}`}
-                    onSelectQuickAction={setSelectedQuickActionId}
-                    onPromoteQuickAction={(quickActionId) => void promoteQuickAction(quickActionId)}
-                    onRefreshQuickActionDetail={() => void loadQuickActionDetail(selectedQuickActionId)}
-                    onRetryLoadQuickActionDetail={() => void loadQuickActionDetail(selectedQuickActionId)}
-                    liveStdout={quickActionStdout}
-                    liveStderr={quickActionStderr}
-                  />
+                  <TerminalPanel projectDir={projectDir} />
                 </div>
               ) : null}
             </div>

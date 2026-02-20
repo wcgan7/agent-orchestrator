@@ -95,7 +95,7 @@ Accessible from any task card. Tabs: **Overview** (description, execution summar
 ### Create Work
 - **Create Task** — manual task creation with all fields
 - **Import PRD** — preview/commit + import job detail panel
-- **Quick Action** — one-off prompts with optional promote-to-task
+- **Terminal** — embedded interactive shell session for direct project commands
 
 ### Task Explorer
 Filtered task list with search, blocked-only toggle, and pagination. Accessible via the board sidebar.
@@ -128,7 +128,7 @@ See `vite.config.ts` for proxy configuration.
 |---|---|
 | `src/App.tsx` | Main component: routing, WebSocket, global state, all views |
 | `src/api.ts` | HTTP client with auth token handling and base URL construction |
-| `src/components/AppPanels/` | Panel components (ImportJobPanel, QuickActionDetailPanel, TaskExplorerPanel) |
+| `src/components/AppPanels/` | Panel components (ImportJobPanel, TerminalPanel, TaskExplorerPanel) |
 | `src/components/HITLModeSelector/` | HITL mode selection UI |
 | `src/types/` | Shared TypeScript type definitions |
 | `src/styles/orchestrator.css` | Main stylesheet with CSS variables |

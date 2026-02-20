@@ -9,10 +9,10 @@ from .file_repos import (
     FileEventRepository,
     FilePlanRefineJobRepository,
     FilePlanRevisionRepository,
-    FileQuickActionRepository,
     FileReviewRepository,
     FileRunRepository,
     FileTaskRepository,
+    FileTerminalSessionRepository,
 )
 
 
@@ -25,7 +25,10 @@ class Container:
         self.runs = FileRunRepository(self.state_root / "runs.yaml", self.state_root / "runs.lock")
         self.reviews = FileReviewRepository(self.state_root / "review_cycles.yaml", self.state_root / "review_cycles.lock")
         self.agents = FileAgentRepository(self.state_root / "agents.yaml", self.state_root / "agents.lock")
-        self.quick_actions = FileQuickActionRepository(self.state_root / "quick_actions.yaml", self.state_root / "quick_actions.lock")
+        self.terminal_sessions = FileTerminalSessionRepository(
+            self.state_root / "terminal_sessions.yaml",
+            self.state_root / "terminal_sessions.lock",
+        )
         self.events = FileEventRepository(self.state_root / "events.jsonl", self.state_root / "events.lock")
         self.plan_revisions = FilePlanRevisionRepository(self.state_root / "plan_revisions.yaml", self.state_root / "plan_revisions.lock")
         self.plan_refine_jobs = FilePlanRefineJobRepository(self.state_root / "plan_refine_jobs.yaml", self.state_root / "plan_refine_jobs.lock")
