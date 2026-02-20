@@ -1360,6 +1360,7 @@ export default function App() {
   const [editTaskDependencyPolicy, setEditTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
   const [editTaskProjectCommands, setEditTaskProjectCommands] = useState('')
 
+  const [isSubmittingTask, setIsSubmittingTask] = useState(false)
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskDescription, setNewTaskDescription] = useState('')
   const [newTaskType, setNewTaskType] = useState('auto')
@@ -2739,6 +2740,9 @@ export default function App() {
   async function submitTask(event: FormEvent, statusOverride?: 'queued' | 'backlog'): Promise<void> {
     event.preventDefault()
     if (!newTaskTitle.trim()) return
+    if (isSubmittingTask) return
+    setIsSubmittingTask(true)
+    try {
     let parsedMetadata: Record<string, unknown> | undefined
     if (newTaskMetadata.trim()) {
       try {
@@ -2881,6 +2885,9 @@ export default function App() {
     setNewTaskWorkerModel('')
     setWorkOpen(false)
     await reloadAll()
+    } finally {
+      setIsSubmittingTask(false)
+    }
   }
 
   async function previewImport(event: FormEvent): Promise<void> {
@@ -5818,8 +5825,8 @@ export default function App() {
             </div>
             {createTab === 'task' ? (
               <div className="modal-footer">
-                <button className="button button-primary" type="submit" form="create-task-form">Create & Queue</button>
-                <button className="button" type="button" onClick={(event) => void submitTask(event, 'backlog')}>Add to Backlog</button>
+                <button className="button button-primary" type="submit" form="create-task-form" disabled={isSubmittingTask}>{isSubmittingTask ? 'Creating…' : 'Create & Queue'}</button>
+                <button className="button" type="button" onClick={(event) => void submitTask(event, 'backlog')} disabled={isSubmittingTask}>{isSubmittingTask ? 'Creating…' : 'Add to Backlog'}</button>
               </div>
             ) : null}
           </div>

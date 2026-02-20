@@ -1377,7 +1377,7 @@ def create_router(
             synthetic.metadata = {}
         synthetic.metadata["classification_allowed_pipelines"] = allowed_pipelines
         try:
-            result = orchestrator.worker_adapter.run_step(task=synthetic, step="pipeline_classify", attempt=1)
+            result = orchestrator.worker_adapter.run_step_ephemeral(task=synthetic, step="pipeline_classify", attempt=1)
         except Exception:
             result = None
         if result is None or result.status != "ok":
