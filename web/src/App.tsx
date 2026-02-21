@@ -5965,13 +5965,7 @@ export default function App() {
       ) : null}
 
       <div className={`terminal-float ${terminalOpen ? 'is-open' : ''}`}>
-        <div className="terminal-float-header">
-          <span className="terminal-float-title">Terminal</span>
-          <button className="terminal-float-btn" onClick={() => setTerminalOpen(false)} aria-label="Minimize terminal">&minus;</button>
-        </div>
-        <div className="terminal-float-body">
-          <TerminalPanel projectDir={projectDir} visible={terminalOpen} />
-        </div>
+        <TerminalPanel projectDir={projectDir} visible={terminalOpen} onMinimize={() => setTerminalOpen(false)} />
       </div>
       <button className="terminal-fab" onClick={() => setTerminalOpen(v => !v)} aria-label="Toggle terminal" title="Terminal">&gt;_</button>
     </div>

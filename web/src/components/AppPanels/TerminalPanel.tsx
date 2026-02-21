@@ -19,6 +19,7 @@ type TerminalSessionRecord = {
 type TerminalPanelProps = {
   projectDir: string
   visible?: boolean
+  onMinimize?: () => void
 }
 
 function buildApiUrl(path: string, projectDir?: string): string {
@@ -28,7 +29,7 @@ function buildApiUrl(path: string, projectDir?: string): string {
   return `${path}${joiner}project_dir=${encodeURIComponent(trimmed)}`
 }
 
-export function TerminalPanel({ projectDir, visible }: TerminalPanelProps): JSX.Element {
+export function TerminalPanel({ projectDir, visible, onMinimize }: TerminalPanelProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -278,27 +279,26 @@ export function TerminalPanel({ projectDir, visible }: TerminalPanelProps): JSX.
   }, [projectDir])
 
   return (
-    <div className="terminal-panel-root">
-      <div className="inline-actions">
-        {session && session.status === 'running' ? (
-          <button className="button button-danger" onClick={() => void stopSession()} disabled={loading}>Stop</button>
-        ) : (
-          <button className="button button-primary" onClick={() => void startOrAttach()} disabled={loading}>Start</button>
-        )}
-        <button className="button" onClick={() => terminalRef.current?.clear()}>Clear</button>
+    <>
+      <div className="terminal-float-header">
+        <span className="terminal-float-title">Terminal</span>
+        <div className="terminal-float-actions">
+          {session && session.status === 'running' ? (
+            <button className="terminal-float-btn terminal-float-btn-danger" onClick={() => void stopSession()} disabled={loading} aria-label="Stop" title="Stop">&#x25A0;</button>
+          ) : (
+            <button className="terminal-float-btn terminal-float-btn-primary" onClick={() => void startOrAttach()} disabled={loading} aria-label="Start" title="Start">&#x25B6;</button>
+          )}
+          <button className="terminal-float-btn" onClick={() => terminalRef.current?.clear()} aria-label="Clear" title="Clear">&#x2715;</button>
+          {onMinimize ? <button className="terminal-float-btn" onClick={onMinimize} aria-label="Minimize terminal" title="Minimize">&minus;</button> : null}
+        </div>
       </div>
-      {error ? <p className="error-banner">{error}</p> : null}
-      {session ? (
-        <p className="task-meta">
-          {session.status} · shell: {session.shell || '-'} · cwd: {session.cwd || '-'} · started: {session.started_at || '-'} · exit: {session.exit_code ?? '-'}
-        </p>
-      ) : (
-        <p className="task-meta">No active terminal session.</p>
-      )}
-      <div
-        ref={containerRef}
-        style={{ height: '100%', width: '100%', background: '#111', borderRadius: 8, padding: 4, flex: 1, minHeight: 0 }}
-      />
-    </div>
+      <div className="terminal-float-body">
+        {error ? <p className="error-banner" style={{ margin: '0.3rem 0.5rem' }}>{error}</p> : null}
+        <div
+          ref={containerRef}
+          style={{ height: '100%', width: '100%', background: '#111', borderRadius: '0 0 12px 12px', padding: 4, flex: 1, minHeight: 0 }}
+        />
+      </div>
+    </>
   )
 }
