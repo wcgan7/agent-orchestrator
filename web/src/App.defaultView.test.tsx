@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import App from './App'
 
@@ -59,6 +59,10 @@ describe('App default route', () => {
       }
       return Promise.resolve({ ok: true, json: async () => ({}) })
     }) as unknown as typeof fetch
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('lands on Board by default', async () => {
@@ -424,6 +428,160 @@ describe('App default route', () => {
       expect(screen.getByRole('dialog', { name: /Task detail/i })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /^Queue$/i })).toBeInTheDocument()
     })
+  })
+
+  it('shows live total time taken for running tasks in task detail', async () => {
+    const baseline = new Date('2026-02-21T11:10:00Z')
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(baseline)
+    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
+    mockedFetch.mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            columns: {
+              backlog: [{ id: 'task-1', title: 'Task 1', priority: 'P2', status: 'in_progress', task_type: 'feature' }],
+              queued: [],
+              in_progress: [],
+              in_review: [],
+              blocked: [],
+              done: [],
+            },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks/task-1')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            task: {
+              id: 'task-1',
+              title: 'Task 1',
+              priority: 'P2',
+              status: 'in_progress',
+              task_type: 'feature',
+              blocked_by: [],
+              blocks: [],
+              timing_summary: {
+                total_completed_seconds: 120,
+                active_run_started_at: '2026-02-21T11:09:30Z',
+                is_running: true,
+                first_started_at: '2026-02-21T11:00:00Z',
+                last_finished_at: '2026-02-21T11:02:00Z',
+              },
+            },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 1, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/agents')) {
+        return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      }
+      if (u.includes('/api/projects')) {
+        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+
+    render(<App />)
+    await waitFor(() => {
+      expect(screen.getByText('Task 1')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Task 1'))
+    await waitFor(() => {
+      expect(screen.getByText(/Total time taken: 2m 30s · running/i)).toBeInTheDocument()
+    })
+
+    vi.setSystemTime(new Date(baseline.getTime() + 5_000))
+    await waitFor(() => {
+      expect(screen.getByText(/Total time taken: 2m 35s · running/i)).toBeInTheDocument()
+    }, { timeout: 4_000 })
+  })
+
+  it('shows stable total time taken for completed tasks in task detail', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-02-21T12:00:00Z'))
+    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
+    mockedFetch.mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            columns: {
+              backlog: [{ id: 'task-1', title: 'Task 1', priority: 'P2', status: 'done', task_type: 'feature' }],
+              queued: [],
+              in_progress: [],
+              in_review: [],
+              blocked: [],
+              done: [],
+            },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks/task-1')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            task: {
+              id: 'task-1',
+              title: 'Task 1',
+              priority: 'P2',
+              status: 'done',
+              task_type: 'feature',
+              blocked_by: [],
+              blocks: [],
+              timing_summary: {
+                total_completed_seconds: 75,
+                active_run_started_at: null,
+                is_running: false,
+                first_started_at: '2026-02-21T11:00:00Z',
+                last_finished_at: '2026-02-21T11:01:15Z',
+              },
+            },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/agents')) {
+        return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      }
+      if (u.includes('/api/projects')) {
+        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+
+    render(<App />)
+    await waitFor(() => {
+      expect(screen.getByText('Task 1')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Task 1'))
+    await waitFor(() => {
+      expect(screen.getByText(/Total time taken: 1m 15s/i)).toBeInTheDocument()
+    })
+
+    vi.setSystemTime(new Date('2026-02-21T12:00:10Z'))
+    await new Promise((resolve) => setTimeout(resolve, 1_200))
+    expect(screen.getByText(/Total time taken: 1m 15s/i)).toBeInTheDocument()
   })
 
   it('board summary strip shows queue depth and worker count', async () => {
