@@ -18,6 +18,7 @@ type TerminalSessionRecord = {
 
 type TerminalPanelProps = {
   projectDir: string
+  visible?: boolean
 }
 
 function buildApiUrl(path: string, projectDir?: string): string {
@@ -27,7 +28,7 @@ function buildApiUrl(path: string, projectDir?: string): string {
   return `${path}${joiner}project_dir=${encodeURIComponent(trimmed)}`
 }
 
-export function TerminalPanel({ projectDir }: TerminalPanelProps): JSX.Element {
+export function TerminalPanel({ projectDir, visible }: TerminalPanelProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -84,6 +85,23 @@ export function TerminalPanel({ projectDir }: TerminalPanelProps): JSX.Element {
       fitRef.current = null
     }
   }, [projectDir])
+
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => { fitRef.current?.fit() })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (!visible) return
+    const id = requestAnimationFrame(() => {
+      fitRef.current?.fit()
+      terminalRef.current?.focus()
+    })
+    return () => cancelAnimationFrame(id)
+  }, [visible])
 
   function setSessionState(next: TerminalSessionRecord | null): void {
     sessionRef.current = next
@@ -260,8 +278,7 @@ export function TerminalPanel({ projectDir }: TerminalPanelProps): JSX.Element {
   }, [projectDir])
 
   return (
-    <div className="form-stack">
-      <p className="hint">Interactive shell session. Commands run directly in project directory.</p>
+    <div className="terminal-panel-root">
       <div className="inline-actions">
         <button className="button button-primary" onClick={() => void startOrAttach()} disabled={loading}>
           {session ? 'Attach / Restart' : 'Start Terminal'}
@@ -286,7 +303,7 @@ export function TerminalPanel({ projectDir }: TerminalPanelProps): JSX.Element {
       )}
       <div
         ref={containerRef}
-        style={{ height: 360, width: '100%', background: '#111', borderRadius: 8, padding: 4 }}
+        style={{ height: '100%', width: '100%', background: '#111', borderRadius: 8, padding: 4, flex: 1, minHeight: 0 }}
       />
     </div>
   )

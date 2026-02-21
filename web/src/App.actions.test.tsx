@@ -555,8 +555,7 @@ describe('App action coverage', () => {
       expect(screen.getAllByRole('button', { name: /^Create Work$/i }).length).toBeGreaterThan(0)
     })
 
-    fireEvent.click(screen.getAllByRole('button', { name: /^Create Work$/i })[0])
-    fireEvent.click(screen.getByRole('button', { name: /Terminal/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Toggle terminal/i }))
     fireEvent.click(screen.getByRole('button', { name: /Start Terminal/i }))
 
     await waitFor(() => {
