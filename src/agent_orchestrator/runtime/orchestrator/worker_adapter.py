@@ -11,7 +11,7 @@ from ..domain.models import RunRecord, Task
 
 @dataclass
 class StepResult:
-    """Represents StepResult."""
+    """Normalized worker-step output consumed by the orchestrator."""
     status: str = "ok"
     summary: str | None = None
     findings: list[dict[str, Any]] | None = None
@@ -21,9 +21,9 @@ class StepResult:
 
 
 class WorkerAdapter(Protocol):
-    """Represents WorkerAdapter."""
+    """Adapter contract used by the orchestrator to execute pipeline steps."""
     def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
-        """Return run step."""
+        """Execute one pipeline step for a persisted task."""
         ...
 
     def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:
@@ -43,7 +43,7 @@ class DefaultWorkerAdapter:
     """
 
     def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
-        """Return run step."""
+        """Produce deterministic step results for tests and local-first execution."""
         scripted_steps = task.metadata.get("scripted_steps") if isinstance(task.metadata, dict) else None
         if isinstance(scripted_steps, dict):
             key = f"{step}:{attempt}"
@@ -95,9 +95,9 @@ class DefaultWorkerAdapter:
         return StepResult(status="ok")
 
     def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:
-        """Return run step ephemeral."""
+        """Execute a step for ephemeral tasks that are not written to storage."""
         return self.run_step(task=task, step=step, attempt=attempt)
 
     def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path) -> str:
-        """Return generate run summary."""
+        """Generate a human-readable summary for a completed run."""
         return ""

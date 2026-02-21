@@ -167,7 +167,7 @@ def _resolve_command_paths(
 
 
 def detect_project_languages(project_dir: Path) -> list[str]:
-    """Return all detected project languages based on marker files.
+    """Detect project languages from repository marker files.
 
     Multiple markers for the same language are deduplicated (e.g. pyproject.toml
     and setup.py both map to "python").  If a tsconfig.json is found alongside
@@ -340,7 +340,7 @@ _WORKDOC_SKIP_STEPS = {"plan_refine", "initiative_plan_refine"}  # These steps d
 
 
 def _workdoc_prompt_section(step: str) -> str:
-    """Return the workdoc instruction block for a step, or empty string."""
+    """Build workdoc instructions for a step, or return an empty string."""
     if step in _WORKDOC_SKIP_STEPS:
         return ""
     step_specific = _WORKDOC_STEP_INSTRUCTIONS_BY_STEP.get(step)
@@ -1117,7 +1117,7 @@ class LiveWorkerAdapter:
         return f"Human intervention required ({count} {suffix}): {first}"
 
     def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
-        """Return run step."""
+        """Execute one pipeline step using the configured live worker provider."""
         return self._execute_step(task=task, step=step, attempt=attempt, persist=True)
 
     def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:

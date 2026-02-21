@@ -34,7 +34,7 @@ from ..terminal.service import TerminalService
 
 
 class CreateTaskRequest(BaseModel):
-    """Represents CreateTaskRequest."""
+    """Payload for creating a new task."""
     title: str
     description: str = ""
     task_type: str = "feature"
@@ -58,14 +58,14 @@ class CreateTaskRequest(BaseModel):
 
 
 class PipelineClassificationRequest(BaseModel):
-    """Represents PipelineClassificationRequest."""
+    """Payload used to classify a task into a pipeline."""
     title: str
     description: str = ""
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class PipelineClassificationResponse(BaseModel):
-    """Represents PipelineClassificationResponse."""
+    """Normalized pipeline-classification result."""
     pipeline_id: str
     task_type: str
     confidence: Literal["high", "low"]
@@ -74,7 +74,7 @@ class PipelineClassificationResponse(BaseModel):
 
 
 class UpdateTaskRequest(BaseModel):
-    """Represents UpdateTaskRequest."""
+    """Patch payload for updating mutable task fields."""
     title: Optional[str] = None
     description: Optional[str] = None
     task_type: Optional[str] = None
@@ -91,52 +91,52 @@ class UpdateTaskRequest(BaseModel):
 
 
 class TransitionRequest(BaseModel):
-    """Represents TransitionRequest."""
+    """Payload for transitioning a task status."""
     status: str
 
 
 class AddDependencyRequest(BaseModel):
-    """Represents AddDependencyRequest."""
+    """Payload for adding a task dependency edge."""
     depends_on: str
 
 
 class PrdPreviewRequest(BaseModel):
-    """Represents PrdPreviewRequest."""
+    """Payload for PRD preview ingestion."""
     title: Optional[str] = None
     content: str
     default_priority: str = "P2"
 
 
 class PrdCommitRequest(BaseModel):
-    """Represents PrdCommitRequest."""
+    """Payload for committing a previously previewed PRD import job."""
     job_id: str
 
 
 class StartTerminalSessionRequest(BaseModel):
-    """Represents StartTerminalSessionRequest."""
+    """Payload for starting an interactive terminal session."""
     cols: Optional[int] = Field(default=120, ge=2, le=500)
     rows: Optional[int] = Field(default=36, ge=2, le=300)
     shell: Optional[str] = None
 
 
 class TerminalInputRequest(BaseModel):
-    """Represents TerminalInputRequest."""
+    """Payload containing terminal input bytes as UTF-8 text."""
     data: str
 
 
 class TerminalResizeRequest(BaseModel):
-    """Represents TerminalResizeRequest."""
+    """Payload for resizing a terminal PTY window."""
     cols: int = Field(ge=2, le=500)
     rows: int = Field(ge=2, le=300)
 
 
 class StopTerminalSessionRequest(BaseModel):
-    """Represents StopTerminalSessionRequest."""
+    """Payload for stopping a terminal session."""
     signal: Literal["TERM", "KILL"] = "TERM"
 
 
 class PlanRefineRequest(BaseModel):
-    """Represents PlanRefineRequest."""
+    """Payload for queueing an asynchronous plan-refine job."""
     base_revision_id: Optional[str] = None
     feedback: str
     instructions: Optional[str] = None
@@ -144,19 +144,19 @@ class PlanRefineRequest(BaseModel):
 
 
 class CommitPlanRequest(BaseModel):
-    """Represents CommitPlanRequest."""
+    """Payload for committing a specific plan revision."""
     revision_id: str
 
 
 class CreatePlanRevisionRequest(BaseModel):
-    """Represents CreatePlanRevisionRequest."""
+    """Payload for creating a manual plan revision."""
     content: str
     parent_revision_id: Optional[str] = None
     feedback_note: Optional[str] = None
 
 
 class GenerateTasksRequest(BaseModel):
-    """Represents GenerateTasksRequest."""
+    """Payload for generating child tasks from plan content."""
     source: Optional[Literal["committed", "revision", "override", "latest"]] = None
     revision_id: Optional[str] = None
     plan_override: Optional[str] = None
@@ -164,31 +164,31 @@ class GenerateTasksRequest(BaseModel):
 
 
 class ApproveGateRequest(BaseModel):
-    """Represents ApproveGateRequest."""
+    """Payload for approving a pending human gate."""
     gate: Optional[str] = None
 
 
 class OrchestratorControlRequest(BaseModel):
-    """Represents OrchestratorControlRequest."""
+    """Payload for orchestrator control actions."""
     action: str
 
 
 class OrchestratorSettingsRequest(BaseModel):
-    """Represents OrchestratorSettingsRequest."""
+    """Settings payload for orchestrator concurrency and policies."""
     concurrency: int = Field(2, ge=1, le=128)
     auto_deps: bool = True
     max_review_attempts: int = Field(10, ge=1, le=50)
 
 
 class AgentRoutingSettingsRequest(BaseModel):
-    """Represents AgentRoutingSettingsRequest."""
+    """Settings payload for role-based agent routing."""
     default_role: str = "general"
     task_type_roles: dict[str, str] = Field(default_factory=dict)
     role_provider_overrides: dict[str, str] = Field(default_factory=dict)
 
 
 class WorkerProviderSettingsRequest(BaseModel):
-    """Represents WorkerProviderSettingsRequest."""
+    """Settings payload for one worker provider definition."""
     type: str = "codex"
     command: Optional[str] = None
     reasoning_effort: Optional[str] = None
@@ -199,7 +199,7 @@ class WorkerProviderSettingsRequest(BaseModel):
 
 
 class WorkersSettingsRequest(BaseModel):
-    """Represents WorkersSettingsRequest."""
+    """Settings payload for worker defaults, health checks, and routing."""
     default: str = "codex"
     default_model: Optional[str] = None
     heartbeat_seconds: Optional[int] = Field(None, ge=1, le=3600)
@@ -209,7 +209,7 @@ class WorkersSettingsRequest(BaseModel):
 
 
 class QualityGateSettingsRequest(BaseModel):
-    """Represents QualityGateSettingsRequest."""
+    """Thresholds for severity-based quality gates."""
     critical: int = Field(0, ge=0)
     high: int = Field(0, ge=0)
     medium: int = Field(0, ge=0)
@@ -217,7 +217,7 @@ class QualityGateSettingsRequest(BaseModel):
 
 
 class DefaultsSettingsRequest(BaseModel):
-    """Represents DefaultsSettingsRequest."""
+    """Project-wide default policies applied to new tasks."""
     quality_gate: QualityGateSettingsRequest = QualityGateSettingsRequest(
         critical=0,
         high=0,
@@ -228,7 +228,7 @@ class DefaultsSettingsRequest(BaseModel):
 
 
 class LanguageCommandsRequest(BaseModel):
-    """Represents LanguageCommandsRequest."""
+    """Per-language command overrides used in worker prompts."""
     test: Optional[str] = None
     lint: Optional[str] = None
     typecheck: Optional[str] = None
@@ -236,12 +236,12 @@ class LanguageCommandsRequest(BaseModel):
 
 
 class ProjectSettingsRequest(BaseModel):
-    """Represents ProjectSettingsRequest."""
+    """Settings payload for project-specific command configuration."""
     commands: Optional[dict[str, LanguageCommandsRequest]] = None
 
 
 class UpdateSettingsRequest(BaseModel):
-    """Represents UpdateSettingsRequest."""
+    """Top-level PATCH payload for runtime settings."""
     orchestrator: Optional[OrchestratorSettingsRequest] = None
     agent_routing: Optional[AgentRoutingSettingsRequest] = None
     defaults: Optional[DefaultsSettingsRequest] = None
@@ -250,25 +250,25 @@ class UpdateSettingsRequest(BaseModel):
 
 
 class SpawnAgentRequest(BaseModel):
-    """Represents SpawnAgentRequest."""
+    """Payload for creating a new runtime agent record."""
     role: str = "general"
     capacity: int = 1
     override_provider: Optional[str] = None
 
 
 class ReviewActionRequest(BaseModel):
-    """Represents ReviewActionRequest."""
+    """Payload for human review approval/request-changes actions."""
     guidance: Optional[str] = None
 
 
 class RetryTaskRequest(BaseModel):
-    """Represents RetryTaskRequest."""
+    """Payload for retrying a task from a chosen step."""
     guidance: Optional[str] = None
     start_from_step: Optional[str] = None
 
 
 class AddFeedbackRequest(BaseModel):
-    """Represents AddFeedbackRequest."""
+    """Payload for posting reviewer feedback on a task."""
     task_id: str
     feedback_type: str = "general"
     priority: str = "should"
@@ -278,7 +278,7 @@ class AddFeedbackRequest(BaseModel):
 
 
 class AddCommentRequest(BaseModel):
-    """Represents AddCommentRequest."""
+    """Payload for adding a threaded code comment."""
     task_id: str
     file_path: str
     line_number: int = 0
@@ -1500,7 +1500,7 @@ def create_router(
 
     @router.get("/tasks/{task_id}/diff")
     async def get_task_diff(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
-        """Return the git diff for a task's latest commit."""
+        """Load the git diff and stat output for a task's latest commit."""
         container, _, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -2790,7 +2790,7 @@ def create_router(
 
 
 def os_access(path: Path) -> bool:
-    """Return whether a directory can be listed by the current process."""
+    """Check whether the current process can enumerate a directory path."""
     try:
         list(path.iterdir())
     except Exception:

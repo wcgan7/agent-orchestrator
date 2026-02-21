@@ -10,7 +10,7 @@ WorkerProviderType = Literal["codex", "ollama", "claude"]
 
 @dataclass(frozen=True)
 class WorkerProviderSpec:
-    """Represents WorkerProviderSpec."""
+    """Normalized worker-provider settings resolved from runtime config."""
     name: str
     type: WorkerProviderType
     # codex / claude

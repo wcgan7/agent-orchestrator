@@ -23,7 +23,7 @@ from .config import WorkerProviderSpec
 
 @dataclass(frozen=True)
 class WorkerRunResult:
-    """Represents WorkerRunResult."""
+    """Structured outcome and artifacts from one worker command invocation."""
     provider: str
     prompt_path: str
     stdout_path: str

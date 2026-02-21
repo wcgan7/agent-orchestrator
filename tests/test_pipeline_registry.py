@@ -10,7 +10,7 @@ from agent_orchestrator.pipelines.registry import (
 
 
 class TestPipelineTemplate:
-    """Represents TestPipelineTemplate."""
+    """Behavioral tests for built-in pipeline template definitions."""
     def test_builtin_templates_exist(self):
         """Test that builtin templates exist."""
         expected = {
@@ -83,7 +83,7 @@ class TestPipelineTemplate:
 
 
 class TestPipelineRegistry:
-    """Represents TestPipelineRegistry."""
+    """Behavioral tests for registry lookup and mutation semantics."""
     def test_list_templates(self):
         """Test that list templates."""
         reg = PipelineRegistry()

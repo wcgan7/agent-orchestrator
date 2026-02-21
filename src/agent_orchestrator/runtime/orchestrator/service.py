@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 def _has_cycle(adj: dict[str, list[str]], from_id: str, to_id: str) -> bool:
-    """Return True if adding an edge from_id→to_id would create a cycle.
+    """Check whether adding edge from_id→to_id would introduce a cycle.
 
     Checks whether to_id can already reach from_id via existing edges.
     """
@@ -54,7 +54,7 @@ def _has_cycle(adj: dict[str, list[str]], from_id: str, to_id: str) -> bool:
 
 
 class OrchestratorService:
-    """Represents OrchestratorService."""
+    """Coordinate task scheduling, execution, review, and commit flow."""
     _GATE_MAPPING: dict[str, str] = {
         "plan": "before_plan",
         "implement": "before_implement",
@@ -92,7 +92,7 @@ class OrchestratorService:
         return self._pool
 
     def status(self) -> dict[str, Any]:
-        """Return status."""
+        """Build a status snapshot of queue depth and active worker usage."""
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         tasks = self.container.tasks.list()
@@ -110,7 +110,7 @@ class OrchestratorService:
         }
 
     def control(self, action: str) -> dict[str, Any]:
-        """Return control."""
+        """Apply a control action and return updated orchestrator status."""
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         if action == "pause":
@@ -131,7 +131,7 @@ class OrchestratorService:
         return self.status()
 
     def ensure_worker(self) -> None:
-        """Return ensure worker."""
+        """Start the background scheduling loop when not already running."""
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
@@ -142,7 +142,7 @@ class OrchestratorService:
             self._thread.start()
 
     def shutdown(self, *, timeout: float = 10.0) -> None:
-        """Return shutdown."""
+        """Stop the scheduler and wait for in-flight work up to ``timeout``."""
         with self._lock:
             self._stop.set()
             thread = self._thread
@@ -206,7 +206,7 @@ class OrchestratorService:
                     logger.error("Task %s raised unexpected error: %s", tid, exc, exc_info=exc)
 
     def tick_once(self) -> bool:
-        """Return tick once."""
+        """Run one scheduler iteration and return whether work was dispatched."""
         self._sweep_futures()
 
         cfg = self.container.config.load()
@@ -228,7 +228,7 @@ class OrchestratorService:
         return True
 
     def run_task(self, task_id: str) -> Task:
-        """Return run task."""
+        """Synchronously execute one task by id and return the final record."""
         wait_existing = False
         with self._lock:
             task = self.container.tasks.get(task_id)
@@ -293,7 +293,7 @@ class OrchestratorService:
         return None
 
     def get_plan_document(self, task_id: str) -> dict[str, Any]:
-        """Return get plan document."""
+        """Build plan-revision state plus active refine-job metadata for a task."""
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -432,7 +432,7 @@ class OrchestratorService:
         return job
 
     def process_plan_refine_job(self, job_id: str) -> PlanRefineJob | None:
-        """Return process plan refine job."""
+        """Execute one queued plan-refine job to completion."""
         job = self.container.plan_refine_jobs.get(job_id)
         if not job:
             return None
@@ -551,14 +551,14 @@ class OrchestratorService:
                 self.container.tasks.upsert(cleanup_task)
 
     def list_plan_refine_jobs(self, task_id: str) -> list[PlanRefineJob]:
-        """Return list plan refine jobs."""
+        """List refine jobs for a task."""
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
         return self.container.plan_refine_jobs.for_task(task_id)
 
     def get_plan_refine_job(self, task_id: str, job_id: str) -> PlanRefineJob:
-        """Return get plan refine job."""
+        """Fetch one plan-refine job and verify it belongs to the requested task."""
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -568,7 +568,7 @@ class OrchestratorService:
         return job
 
     def commit_plan_revision(self, task_id: str, revision_id: str) -> str:
-        """Return commit plan revision."""
+        """Mark one plan revision as committed and sync task/workdoc metadata."""
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -676,7 +676,7 @@ class OrchestratorService:
         return revisions[-1].content, revisions[-1].id
 
     def _resolve_task_plan_excerpt(self, task: Task, *, max_chars: int = 800) -> str:
-        """Return a short best-effort plan excerpt for objective context."""
+        """Extract a bounded plan snippet for prompts and conflict resolution context."""
         if not isinstance(task.metadata, dict):
             return ""
 
@@ -1297,7 +1297,7 @@ _Pending: will be populated by the report step._
             return "feature"
 
     def _workdoc_template_for_task(self, task: Task) -> str:
-        """Return the workdoc template body for the task's pipeline."""
+        """Select the default workdoc template for the task's pipeline."""
         pipeline_id = self._pipeline_id_for_task(task)
         template_by_pipeline: dict[str, str] = {
             "feature": self._FEATURE_WORKDOC_TEMPLATE,
@@ -1561,7 +1561,7 @@ _Pending: will be populated by the report step._
         )
 
     def _step_project_dir(self, task: Task) -> Path:
-        """Return the effective project dir for a task (worktree or main)."""
+        """Resolve task worktree directory, falling back to the main project root."""
         worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
         return Path(worktree_path) if worktree_path else self.container.project_dir
 
@@ -1843,7 +1843,7 @@ _Pending: will be populated by the report step._
             return None
 
     def _has_uncommitted_changes(self, cwd: Path) -> bool:
-        """Return True if the working tree has staged or unstaged changes.
+        """Check whether the working tree has staged or unstaged changes.
 
         Returns True on git failure (no repo, etc.) to avoid false blocking.
         """
@@ -1993,7 +1993,7 @@ _Pending: will be populated by the report step._
             task.metadata["verify_output"] = "\n".join(parts)
 
     def _is_non_actionable_verify_failure(self, task: Task, summary: str | None) -> bool:
-        """Return True when a verify failure is due to environment/tooling, not code."""
+        """Classify whether verify failed because of environment or tooling issues."""
         if isinstance(task.metadata, dict):
             reason_code = str(task.metadata.get("verify_reason_code") or "").strip().lower()
             if reason_code in self._NON_ACTIONABLE_VERIFY_REASON_CODES:

@@ -9,164 +9,164 @@ from ..domain.models import AgentRecord, PlanRefineJob, PlanRevision, ReviewCycl
 
 
 class TaskRepository(ABC):
-    """Represents TaskRepository."""
+    """Persistence contract for orchestrator task records."""
     @abstractmethod
     def list(self) -> List[Task]:
-        """Return list."""
+        """List every persisted task record."""
         raise NotImplementedError
 
     @abstractmethod
     def get(self, task_id: str) -> Optional[Task]:
-        """Return get."""
+        """Fetch a task by id, or ``None`` when no record exists."""
         raise NotImplementedError
 
     @abstractmethod
     def upsert(self, task: Task) -> Task:
-        """Return upsert."""
+        """Create or update a task record."""
         raise NotImplementedError
 
     @abstractmethod
     def delete(self, task_id: str) -> bool:
-        """Return delete."""
+        """Delete a task by id and return whether anything was removed."""
         raise NotImplementedError
 
     @abstractmethod
     def claim_next_runnable(self, *, max_in_progress: int) -> Optional[Task]:
-        """Return claim next runnable."""
+        """Atomically claim and mark the next runnable task as in-progress."""
         raise NotImplementedError
 
 
 class RunRepository(ABC):
-    """Represents RunRepository."""
+    """Persistence contract for execution run records."""
     @abstractmethod
     def list(self) -> List[RunRecord]:
-        """Return list."""
+        """List every persisted run record."""
         raise NotImplementedError
 
     @abstractmethod
     def get(self, run_id: str) -> Optional[RunRecord]:
-        """Return get."""
+        """Fetch a run by id, or ``None`` when no record exists."""
         raise NotImplementedError
 
     @abstractmethod
     def upsert(self, run: RunRecord) -> RunRecord:
-        """Return upsert."""
+        """Create or update a run record."""
         raise NotImplementedError
 
 
 class AgentRepository(ABC):
-    """Represents AgentRepository."""
+    """Persistence contract for agent presence and lifecycle records."""
     @abstractmethod
     def list(self) -> List[AgentRecord]:
-        """Return list."""
+        """List every persisted agent record."""
         raise NotImplementedError
 
     @abstractmethod
     def get(self, agent_id: str) -> Optional[AgentRecord]:
-        """Return get."""
+        """Fetch an agent by id, or ``None`` when no record exists."""
         raise NotImplementedError
 
     @abstractmethod
     def upsert(self, agent: AgentRecord) -> AgentRecord:
-        """Return upsert."""
+        """Create or update an agent record."""
         raise NotImplementedError
 
     @abstractmethod
     def delete(self, agent_id: str) -> bool:
-        """Return delete."""
+        """Delete an agent by id and return whether one existed."""
         raise NotImplementedError
 
 
 class TerminalSessionRepository(ABC):
-    """Represents TerminalSessionRepository."""
+    """Persistence contract for terminal session metadata."""
     @abstractmethod
     def list(self) -> List[TerminalSession]:
-        """Return list."""
+        """List every persisted terminal session."""
         raise NotImplementedError
 
     @abstractmethod
     def get(self, session_id: str) -> Optional[TerminalSession]:
-        """Return get."""
+        """Fetch a terminal session by id, or ``None`` when no record exists."""
         raise NotImplementedError
 
     @abstractmethod
     def upsert(self, session: TerminalSession) -> TerminalSession:
-        """Return upsert."""
+        """Create or update a terminal session record."""
         raise NotImplementedError
 
 
 class ReviewRepository(ABC):
-    """Represents ReviewRepository."""
+    """Persistence contract for review cycles and findings."""
     @abstractmethod
     def list(self) -> List[ReviewCycle]:
-        """Return list."""
+        """List every persisted review cycle."""
         raise NotImplementedError
 
     @abstractmethod
     def for_task(self, task_id: str) -> List[ReviewCycle]:
-        """Return for task."""
+        """List review cycles that belong to a specific task."""
         raise NotImplementedError
 
     @abstractmethod
     def append(self, cycle: ReviewCycle) -> ReviewCycle:
-        """Return append."""
+        """Append a new review cycle entry."""
         raise NotImplementedError
 
 
 class EventRepository(ABC):
-    """Represents EventRepository."""
+    """Persistence contract for runtime event streams."""
     @abstractmethod
     def append(self, *, channel: str, event_type: str, entity_id: str, payload: dict[str, Any], project_id: str) -> dict[str, Any]:
-        """Return append."""
+        """Append an event envelope and return the persisted record."""
         raise NotImplementedError
 
     @abstractmethod
     def list_recent(self, limit: int = 100) -> List[dict[str, Any]]:
-        """Return list recent."""
+        """List the most recent events, capped at ``limit`` records."""
         raise NotImplementedError
 
 
 class PlanRevisionRepository(ABC):
-    """Represents PlanRevisionRepository."""
+    """Persistence contract for plan revision history."""
     @abstractmethod
     def list(self) -> List[PlanRevision]:
-        """Return list."""
+        """List every persisted plan revision."""
         raise NotImplementedError
 
     @abstractmethod
     def for_task(self, task_id: str) -> List[PlanRevision]:
-        """Return for task."""
+        """List plan revisions that belong to a specific task."""
         raise NotImplementedError
 
     @abstractmethod
     def get(self, revision_id: str) -> Optional[PlanRevision]:
-        """Return get."""
+        """Fetch a plan revision by id, or ``None`` when no record exists."""
         raise NotImplementedError
 
     @abstractmethod
     def upsert(self, revision: PlanRevision) -> PlanRevision:
-        """Return upsert."""
+        """Create or update a plan revision."""
         raise NotImplementedError
 
 
 class PlanRefineJobRepository(ABC):
-    """Represents PlanRefineJobRepository."""
+    """Persistence contract for asynchronous plan-refine jobs."""
     @abstractmethod
     def list(self) -> List[PlanRefineJob]:
-        """Return list."""
+        """List every persisted plan-refine job."""
         raise NotImplementedError
 
     @abstractmethod
     def for_task(self, task_id: str) -> List[PlanRefineJob]:
-        """Return for task."""
+        """List plan-refine jobs that belong to a specific task."""
         raise NotImplementedError
 
     @abstractmethod
     def get(self, job_id: str) -> Optional[PlanRefineJob]:
-        """Return get."""
+        """Fetch a plan-refine job by id, or ``None`` when no record exists."""
         raise NotImplementedError
 
     @abstractmethod
     def upsert(self, job: PlanRefineJob) -> PlanRefineJob:
-        """Return upsert."""
+        """Create or update a refine job."""
         raise NotImplementedError

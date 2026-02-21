@@ -19,7 +19,7 @@ from .file_repos import (
 
 
 class Container:
-    """Represents Container."""
+    """Wire file-backed repositories and project-scoped runtime settings."""
     def __init__(self, project_dir: Path) -> None:
         self.project_dir = project_dir.resolve()
         self.state_root = ensure_state_root(self.project_dir)
@@ -39,5 +39,5 @@ class Container:
 
     @property
     def project_id(self) -> str:
-        """Return project id."""
+        """Expose the stable project identifier derived from directory name."""
         return self.project_dir.name

@@ -46,7 +46,7 @@ agent-orchestrator [--project-dir PATH] task create "Title" [--description TEXT]
 List tasks:
 
 ```bash
-agent-orchestrator [--project-dir PATH] task list [--status backlog|ready|in_progress|in_review|done|blocked|cancelled]
+agent-orchestrator [--project-dir PATH] task list [--status backlog|queued|in_progress|in_review|done|blocked|cancelled]
 ```
 
 Run task:

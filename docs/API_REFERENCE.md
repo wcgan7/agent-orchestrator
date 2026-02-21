@@ -3,55 +3,62 @@
 Base path: `/api`
 
 Project scoping:
-- Most endpoints accept `project_dir` query parameter.
-- If omitted, server default/current working directory is used.
+- Most endpoints accept a `project_dir` query parameter.
+- If omitted, the server default/current working directory is used.
 
-## Health and Root
+## Root and Health (outside `/api`)
 
-- `GET /` -> runtime metadata (`project`, `project_id`, `schema_version`)
+- `GET /` -> runtime metadata (`name`, `version`, `project`, `project_id`, `schema_version`)
 - `GET /healthz`
 - `GET /readyz`
 
 ## Projects
 
-- `GET /projects`
-- `GET /projects/pinned`
-- `POST /projects/pinned`
-- `DELETE /projects/pinned/{project_id}`
-- `GET /projects/browse`
+- `GET /api/projects`
+  - Query: `include_non_git` (bool)
+- `GET /api/projects/pinned`
+- `POST /api/projects/pinned`
+- `DELETE /api/projects/pinned/{project_id}`
+- `GET /api/projects/browse`
+  - Query: `path`, `include_hidden` (bool), `limit` (1-1000)
 
 ## Tasks
 
-- `POST /tasks`
-- `GET /tasks`
-- `GET /tasks/board`
-- `GET /tasks/execution-order`
-- `GET /tasks/{task_id}`
-- `PATCH /tasks/{task_id}`
-- `POST /tasks/{task_id}/transition`
-- `POST /tasks/{task_id}/run`
-- `POST /tasks/{task_id}/retry`
-- `POST /tasks/{task_id}/cancel`
-- `POST /tasks/{task_id}/approve-gate`
-- `POST /tasks/{task_id}/dependencies`
-- `DELETE /tasks/{task_id}/dependencies/{dep_id}`
-- `POST /tasks/analyze-dependencies`
-- `POST /tasks/{task_id}/reset-dep-analysis`
-- `GET /tasks/{task_id}/plan`
-- `POST /tasks/{task_id}/plan/refine`
-- `GET /tasks/{task_id}/plan/jobs`
-- `GET /tasks/{task_id}/plan/jobs/{job_id}`
-- `POST /tasks/{task_id}/plan/commit`
-- `POST /tasks/{task_id}/plan/revisions`
-- `POST /tasks/{task_id}/generate-tasks`
+- `POST /api/tasks`
+- `POST /api/tasks/classify-pipeline`
+- `GET /api/tasks`
+  - Query: `status`, `task_type`, `priority`
+- `GET /api/tasks/board`
+- `GET /api/tasks/execution-order`
+- `GET /api/tasks/{task_id}`
+- `GET /api/tasks/{task_id}/diff`
+- `GET /api/tasks/{task_id}/logs`
+- `PATCH /api/tasks/{task_id}`
+- `POST /api/tasks/{task_id}/transition`
+- `POST /api/tasks/{task_id}/run`
+- `POST /api/tasks/{task_id}/retry`
+- `POST /api/tasks/{task_id}/cancel`
+- `POST /api/tasks/{task_id}/approve-gate`
+- `POST /api/tasks/{task_id}/dependencies`
+- `DELETE /api/tasks/{task_id}/dependencies/{dep_id}`
+- `POST /api/tasks/analyze-dependencies`
+- `POST /api/tasks/{task_id}/reset-dep-analysis`
+- `GET /api/tasks/{task_id}/workdoc`
+- `GET /api/tasks/{task_id}/plan`
+- `POST /api/tasks/{task_id}/plan/refine`
+- `GET /api/tasks/{task_id}/plan/jobs`
+- `GET /api/tasks/{task_id}/plan/jobs/{job_id}`
+- `POST /api/tasks/{task_id}/plan/commit`
+- `POST /api/tasks/{task_id}/plan/revisions`
+- `POST /api/tasks/{task_id}/generate-tasks`
 
 Task payload fields include optional `worker_model`:
-- On `POST /tasks`, set `worker_model` to pin a model for that task.
-- On `PATCH /tasks/{task_id}`, `worker_model` can be updated.
+- On `POST /api/tasks`, set `worker_model` to pin a model for that task.
+- On `PATCH /api/tasks/{task_id}`, `worker_model` can be updated.
 
 ### Iterative Planning Endpoints
 
-`GET /tasks/{task_id}/plan` returns:
+`GET /api/tasks/{task_id}/plan` returns:
 - `task_id`
 - `latest_revision_id`
 - `committed_revision_id`
@@ -62,7 +69,7 @@ Legacy compatibility fields are still included:
 - `plans`
 - `latest`
 
-`POST /tasks/{task_id}/plan/refine` request:
+`POST /api/tasks/{task_id}/plan/refine` request:
 ```json
 {
   "base_revision_id": "pr-abc123",
@@ -72,7 +79,7 @@ Legacy compatibility fields are still included:
 }
 ```
 
-`POST /tasks/{task_id}/plan/revisions` request:
+`POST /api/tasks/{task_id}/plan/revisions` request:
 ```json
 {
   "content": "Full revised plan text...",
@@ -81,14 +88,14 @@ Legacy compatibility fields are still included:
 }
 ```
 
-`POST /tasks/{task_id}/plan/commit` request:
+`POST /api/tasks/{task_id}/plan/commit` request:
 ```json
 {
   "revision_id": "pr-abc123"
 }
 ```
 
-`POST /tasks/{task_id}/generate-tasks` request:
+`POST /api/tasks/{task_id}/generate-tasks` request:
 ```json
 {
   "source": "committed",
@@ -106,34 +113,36 @@ Legacy compatibility fields are still included:
 
 ## PRD Import
 
-- `POST /import/prd/preview`
-- `POST /import/prd/commit`
-- `GET /import/{job_id}`
+- `POST /api/import/prd/preview`
+- `POST /api/import/prd/commit`
+- `GET /api/import/{job_id}`
 
 ## Terminal
 
-- `POST /terminal/session`
-- `GET /terminal/session`
-- `POST /terminal/session/{session_id}/input`
-- `POST /terminal/session/{session_id}/resize`
-- `POST /terminal/session/{session_id}/stop`
-- `GET /terminal/session/{session_id}/logs`
+- `POST /api/terminal/session`
+- `GET /api/terminal/session`
+- `POST /api/terminal/session/{session_id}/input`
+- `POST /api/terminal/session/{session_id}/resize`
+- `POST /api/terminal/session/{session_id}/stop`
+- `GET /api/terminal/session/{session_id}/logs`
 
 ## Review Queue
 
-- `GET /review-queue`
-- `POST /review/{task_id}/approve`
-- `POST /review/{task_id}/request-changes`
+- `GET /api/review-queue`
+- `POST /api/review/{task_id}/approve`
+- `POST /api/review/{task_id}/request-changes`
 
 ## Orchestrator
 
-- `GET /orchestrator/status`
-- `POST /orchestrator/control` (`pause|resume|drain|stop`)
+- `GET /api/orchestrator/status`
+- `POST /api/orchestrator/control` (`pause|resume|drain|stop`)
 
-## Settings
+## Settings and Workers
 
-- `GET /settings`
-- `PATCH /settings`
+- `GET /api/settings`
+- `PATCH /api/settings`
+- `GET /api/workers/health`
+- `GET /api/workers/routing`
 
 Top-level settings payload sections:
 - `orchestrator`
@@ -145,19 +154,20 @@ Top-level settings payload sections:
 `workers.providers.<name>` fields:
 - codex: `type`, `command` (default `codex exec`), optional `model`, optional `reasoning_effort` (`low|medium|high`)
 - claude: `type`, `command` (default `claude -p`), optional `model`, optional `reasoning_effort` (`low|medium|high`, mapped to Claude CLI `--effort`)
-- ollama: `type`, `endpoint`, `model`, optional `temperature`, optional `num_ctx`
+- ollama: `type`, optional `endpoint`, optional `model`, optional `temperature`, optional `num_ctx`
 
 `workers` also supports:
 - `default`: default worker provider name
 - `default_model`: optional default model for codex workers (used when task has no `worker_model`)
+- `heartbeat_seconds`: provider heartbeat interval
+- `heartbeat_grace_seconds`: timeout before a worker is marked stale
 - `routing`: per-step provider routing map
 
 ### Project Commands
 
-The `project` section lets you declare per-language commands that workers use during
-implementation and verification steps.
+The `project` section lets you declare per-language commands workers use during implementation and verification.
 
-PATCH example — set Python commands:
+PATCH example:
 ```json
 {
   "project": {
@@ -171,39 +181,39 @@ PATCH example — set Python commands:
 }
 ```
 
-Fields per language: `test`, `lint`, `typecheck`, `format`. All optional.
+Fields per language: `test`, `lint`, `typecheck`, `format` (all optional).
 
 Merge semantics:
 - `null` / omitted field -> no change
 - `""` (empty string) -> removes that command
 - non-empty string -> sets the command
 
-Language keys are normalized to lowercase on write. Only languages detected in the
-project (via marker files like `pyproject.toml`, `tsconfig.json`, `go.mod`) are
-injected into worker prompts — extra entries are stored but ignored at runtime.
+Language keys are normalized to lowercase. Only languages detected in the project are injected into worker prompts; extra entries are stored but ignored at runtime.
 
 ## Agents
 
-- `GET /agents`
-- `POST /agents/spawn`
-- `POST /agents/{agent_id}/pause`
-- `POST /agents/{agent_id}/resume`
-- `POST /agents/{agent_id}/terminate`
-- `GET /agents/types`
+- `GET /api/agents`
+- `POST /api/agents/spawn`
+- `POST /api/agents/{agent_id}/pause`
+- `POST /api/agents/{agent_id}/resume`
+- `POST /api/agents/{agent_id}/terminate`
+- `DELETE /api/agents/{agent_id}`
+- `POST /api/agents/{agent_id}/remove` (legacy-compatible alternative to DELETE)
+- `GET /api/agents/types`
 
 ## Collaboration and Visibility
 
-- `GET /metrics`
-- `GET /phases`
-- `GET /collaboration/modes`
-- `GET /collaboration/presence`
-- `GET /collaboration/timeline/{task_id}`
-- `GET /collaboration/feedback/{task_id}`
-- `POST /collaboration/feedback`
-- `POST /collaboration/feedback/{feedback_id}/dismiss`
-- `GET /collaboration/comments/{task_id}`
-- `POST /collaboration/comments`
-- `POST /collaboration/comments/{comment_id}/resolve`
+- `GET /api/metrics`
+- `GET /api/phases`
+- `GET /api/collaboration/modes`
+- `GET /api/collaboration/presence`
+- `GET /api/collaboration/timeline/{task_id}`
+- `GET /api/collaboration/feedback/{task_id}`
+- `POST /api/collaboration/feedback`
+- `POST /api/collaboration/feedback/{feedback_id}/dismiss`
+- `GET /api/collaboration/comments/{task_id}`
+- `POST /api/collaboration/comments`
+- `POST /api/collaboration/comments/{comment_id}/resolve`
 
 ## WebSocket
 

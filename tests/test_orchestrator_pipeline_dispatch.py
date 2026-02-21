@@ -17,7 +17,7 @@ def _service(tmp_path: Path) -> tuple[Container, OrchestratorService, EventBus]:
 
 
 def _step_names(container: Container, task_id: str) -> list[str]:
-    """Return the step names recorded in the run for the given task."""
+    """Collect ordered step names from the run associated with a task."""
     runs = container.runs.list()
     for run in runs:
         if run.task_id == task_id:

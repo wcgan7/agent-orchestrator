@@ -1665,7 +1665,7 @@ class TestStepOutputInjection:
 
 
 class TestWorkdocPromptInstructions:
-    """Represents TestWorkdocPromptInstructions."""
+    """Tests for step-specific workdoc guidance in worker prompts."""
     def test_prompt_includes_workdoc_instructions_for_plan(self) -> None:
         """Test that prompt includes workdoc instructions for plan."""
         task = _make_task()
