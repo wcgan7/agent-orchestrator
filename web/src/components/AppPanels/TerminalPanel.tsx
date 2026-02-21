@@ -287,7 +287,7 @@ export function TerminalPanel({ projectDir, visible, onMinimize }: TerminalPanel
         <span className="terminal-float-title">Terminal</span>
         <div className="terminal-float-actions">
           <button className="terminal-float-btn" onClick={() => terminalRef.current?.clear()} aria-label="Clear" title="Clear">&#x232B;</button>
-          <button className="terminal-float-btn terminal-float-btn-dim" onClick={() => void hardReset()} aria-label="Restart" title="Restart session">&#x21BB;</button>
+          <button className="terminal-float-btn" onClick={() => void hardReset()} aria-label="Restart" title="Restart session">&#x21BB;</button>
           {onMinimize ? <button className="terminal-float-btn" onClick={onMinimize} aria-label="Minimize terminal" title="Minimize">&minus;</button> : null}
         </div>
       </div>

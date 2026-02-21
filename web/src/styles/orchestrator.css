@@ -2447,12 +2447,6 @@ textarea {
 .terminal-float-btn:hover {
   background: var(--color-bg-tertiary);
 }
-.terminal-float-btn-dim {
-  opacity: 0.45;
-}
-.terminal-float-btn-dim:hover {
-  opacity: 1;
-}
 .terminal-float-body {
   flex: 1;
   min-height: 0;
