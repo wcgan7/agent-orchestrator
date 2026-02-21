@@ -89,6 +89,158 @@ describe('App default route', () => {
     })
   })
 
+  it('prefills project commands override from settings when opening Create Work', async () => {
+    const mockedFetch = vi.fn().mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes('/api/settings')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10 },
+            agent_routing: { default_role: 'general', task_type_roles: {}, role_provider_overrides: {} },
+            workers: { default: 'codex', routing: {}, providers: { codex: { type: 'codex', command: 'codex exec' } } },
+            defaults: { quality_gate: { critical: 0, high: 0, medium: 0, low: 0 }, dependency_policy: 'prudent' },
+            project: {
+              commands: {
+                python: {
+                  test: '/Users/gan/Documents/agent-orchestrator-dogfood/.venv/bin/pytest -n auto',
+                },
+              },
+            },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({ ok: true, json: async () => ({ columns: { backlog: [], queued: [], in_progress: [], in_review: [], blocked: [], done: [] } }) })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/agents')) {
+        return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      }
+      if (u.includes('/api/projects')) {
+        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+    global.fetch = mockedFetch as unknown as typeof fetch
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: /^Create Work$/i }).length).toBeGreaterThan(0)
+    })
+
+    fireEvent.click(screen.getAllByRole('button', { name: /^Create Work$/i })[0])
+
+    await waitFor(() => {
+      expect(mockedFetch.mock.calls.some(([url]) => String(url).includes('/api/settings'))).toBe(true)
+    })
+
+    await waitFor(() => {
+      const projectCommands = screen.getByLabelText(/Project commands override \(optional\)/i) as HTMLTextAreaElement
+      expect(projectCommands.value).toContain('python:')
+      expect(projectCommands.value).toContain('pytest -n auto')
+    })
+  })
+
+  it('allows clearing prefilled project commands override and submitting without override', async () => {
+    const mockedFetch = vi.fn().mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      if (u.includes('/api/settings')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10 },
+            agent_routing: { default_role: 'general', task_type_roles: {}, role_provider_overrides: {} },
+            workers: { default: 'codex', routing: {}, providers: { codex: { type: 'codex', command: 'codex exec' } } },
+            defaults: { quality_gate: { critical: 0, high: 0, medium: 0, low: 0 }, dependency_policy: 'prudent' },
+            project: {
+              commands: {
+                python: {
+                  test: '/Users/gan/Documents/agent-orchestrator-dogfood/.venv/bin/pytest -n auto',
+                },
+              },
+            },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/') && method === 'POST') {
+        return Promise.resolve({ ok: true, json: async () => ({ task: { id: 'task-1' } }) })
+      }
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({ ok: true, json: async () => ({ columns: { backlog: [], queued: [], in_progress: [], in_review: [], blocked: [], done: [] } }) })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/agents')) {
+        return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      }
+      if (u.includes('/api/projects')) {
+        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+    global.fetch = mockedFetch as unknown as typeof fetch
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getAllByRole('button', { name: /^Create Work$/i }).length).toBeGreaterThan(0)
+    })
+
+    fireEvent.click(screen.getAllByRole('button', { name: /^Create Work$/i })[0])
+
+    await waitFor(() => {
+      const projectCommands = screen.getByLabelText(/Project commands override \(optional\)/i) as HTMLTextAreaElement
+      expect(projectCommands.value).toContain('pytest -n auto')
+    })
+
+    const projectCommands = screen.getByLabelText(/Project commands override \(optional\)/i) as HTMLTextAreaElement
+    fireEvent.change(projectCommands, { target: { value: '' } })
+    await waitFor(() => {
+      expect(projectCommands.value).toBe('')
+    })
+
+    const titleInput = screen.getByLabelText(/Title/i)
+    fireEvent.change(screen.getByLabelText(/Task Type/i), { target: { value: 'bug' } })
+    fireEvent.change(titleInput, { target: { value: 'Clear override task' } })
+    fireEvent.submit(titleInput.closest('form') as HTMLFormElement)
+
+    await waitFor(() => {
+      const createCall = mockedFetch.mock.calls.find(([url, callInit]) => {
+        return String(url).includes('/api/tasks')
+          && !String(url).includes('/api/tasks/')
+          && String((callInit as RequestInit | undefined)?.method || '').toUpperCase() === 'POST'
+      })
+      expect(createCall).toBeTruthy()
+    })
+
+    const createCall = mockedFetch.mock.calls.find(([url, callInit]) => {
+      return String(url).includes('/api/tasks')
+        && !String(url).includes('/api/tasks/')
+        && String((callInit as RequestInit | undefined)?.method || '').toUpperCase() === 'POST'
+    })
+    expect(createCall).toBeTruthy()
+    const body = JSON.parse(String((createCall?.[1] as RequestInit).body))
+    expect(body.project_commands).toBeUndefined()
+  })
+
   it('requests metrics and worker compatibility endpoints during reload', async () => {
     const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
     render(<App />)

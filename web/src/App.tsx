@@ -1585,6 +1585,8 @@ export default function App() {
   const [settingsGateMedium, setSettingsGateMedium] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.medium))
   const [settingsGateLow, setSettingsGateLow] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.low))
   const [settingsDependencyPolicy, setSettingsDependencyPolicy] = useState(DEFAULT_SETTINGS.defaults.dependency_policy)
+  const settingsLoadedRef = useRef(false)
+  const shouldPrefillTaskProjectCommandsRef = useRef(false)
 
   const selectedTaskIdRef = useRef(selectedTaskId)
   const selectedImportJobIdRef = useRef(selectedImportJobId)
@@ -1692,6 +1694,8 @@ export default function App() {
     } else {
       localStorage.removeItem(STORAGE_PROJECT)
     }
+    settingsLoadedRef.current = false
+    setSettingsProjectCommands('')
     void loadProjectIdentity()
   }, [projectDir])
 
@@ -1846,6 +1850,7 @@ export default function App() {
       setSettingsError(`Failed to load settings (${detail})`)
       applySettings(DEFAULT_SETTINGS)
     } finally {
+      settingsLoadedRef.current = true
       setSettingsLoading(false)
     }
   }
@@ -1854,6 +1859,19 @@ export default function App() {
     if (route !== 'settings' && route !== 'agents') return
     void loadSettings()
   }, [route, projectDir])
+
+  useEffect(() => {
+    if (!workOpen || createTab !== 'task') return
+    if (!shouldPrefillTaskProjectCommandsRef.current) return
+    if (newTaskProjectCommands.trim()) {
+      shouldPrefillTaskProjectCommandsRef.current = false
+      return
+    }
+    if (!settingsLoadedRef.current) return
+    shouldPrefillTaskProjectCommandsRef.current = false
+    if (!settingsProjectCommands.trim()) return
+    setNewTaskProjectCommands(settingsProjectCommands)
+  }, [workOpen, createTab, newTaskProjectCommands, settingsProjectCommands])
 
   useEffect(() => {
     const fetchModes = async () => {
@@ -5316,6 +5334,24 @@ export default function App() {
     )
   }
 
+  function openCreateWorkModal(tab: CreateTab = 'task', taskTypeOverride?: string): void {
+    setCreateTab(tab)
+    if (tab === 'task') {
+      shouldPrefillTaskProjectCommandsRef.current = true
+      if (taskTypeOverride) {
+        setNewTaskType(taskTypeOverride)
+      }
+      if (!newTaskProjectCommands.trim() && settingsProjectCommands.trim()) {
+        setNewTaskProjectCommands(settingsProjectCommands)
+        shouldPrefillTaskProjectCommandsRef.current = false
+      }
+      if (!settingsLoadedRef.current && !settingsLoading) {
+        void loadSettings()
+      }
+    }
+    setWorkOpen(true)
+  }
+
   function renderPlanning(): JSX.Element {
     const allTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => isPlanningTaskType(t.task_type))
     const planningTask = allTasks.find((t) => t.id === planningTaskId) || null
@@ -5348,9 +5384,7 @@ export default function App() {
     }
 
     function openCreatePlanTaskModal(): void {
-      setCreateTab('task')
-      setNewTaskType('initiative_plan')
-      setWorkOpen(true)
+      openCreateWorkModal('task', 'initiative_plan')
     }
 
     return (
@@ -5622,7 +5656,7 @@ export default function App() {
             <option value={ADD_REPO_VALUE}>Add repo...</option>
           </select>
           <button className="button" onClick={() => void reloadAll()} disabled={loading}>Refresh</button>
-          <button className="button button-primary" onClick={() => setWorkOpen(true)}>Create Work</button>
+          <button className="button button-primary" onClick={() => openCreateWorkModal()}>Create Work</button>
         </div>
       </header>
 
@@ -5820,23 +5854,35 @@ export default function App() {
                       </option>
                     ))}
                   </select>
-                  <label className="field-label">Priority</label>
-                  <div className="toggle-group" role="group" aria-label="Task priority">
-                    {['P0', 'P1', 'P2', 'P3'].map((priority) => (
-                      <button
-                        key={priority}
-                        type="button"
-                        className={`toggle-button ${newTaskPriority === priority ? 'is-active' : ''}`}
-                        aria-pressed={newTaskPriority === priority}
-                        onClick={() => setNewTaskPriority(priority)}
-                      >
-                        {priority}
-                      </button>
-                    ))}
-                  </div>
+                  <label className="field-label" htmlFor="task-project-commands">Project commands override (optional)</label>
+                  <textarea
+                    id="task-project-commands"
+                    className="json-editor-textarea"
+                    rows={4}
+                    value={newTaskProjectCommands}
+                    onChange={(event) => {
+                      shouldPrefillTaskProjectCommandsRef.current = false
+                      setNewTaskProjectCommands(event.target.value)
+                    }}
+                    placeholder={PROJECT_COMMANDS_EXAMPLE}
+                  />
                   <details className="advanced-fields">
                     <summary>Advanced</summary>
                     <div className="form-stack advanced-fields-body">
+                      <label className="field-label">Priority</label>
+                      <div className="toggle-group" role="group" aria-label="Task priority">
+                        {['P0', 'P1', 'P2', 'P3'].map((priority) => (
+                          <button
+                            key={priority}
+                            type="button"
+                            className={`toggle-button ${newTaskPriority === priority ? 'is-active' : ''}`}
+                            aria-pressed={newTaskPriority === priority}
+                            onClick={() => setNewTaskPriority(priority)}
+                          >
+                            {priority}
+                          </button>
+                        ))}
+                      </div>
                       <label className="field-label">Approval mode</label>
                       <div className="toggle-group" role="group" aria-label="Task approval mode">
                         <button
@@ -5921,15 +5967,6 @@ export default function App() {
                         value={newTaskWorkerModel}
                         onChange={(event) => setNewTaskWorkerModel(event.target.value)}
                         placeholder="gpt-5-codex"
-                      />
-                      <label className="field-label" htmlFor="task-project-commands">Project commands override (optional)</label>
-                      <textarea
-                        id="task-project-commands"
-                        className="json-editor-textarea"
-                        rows={4}
-                        value={newTaskProjectCommands}
-                        onChange={(event) => setNewTaskProjectCommands(event.target.value)}
-                        placeholder={PROJECT_COMMANDS_EXAMPLE}
                       />
                       <label className="field-label" htmlFor="task-metadata">Metadata JSON object (optional)</label>
                       <textarea
