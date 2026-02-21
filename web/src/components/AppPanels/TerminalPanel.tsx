@@ -37,8 +37,6 @@ export function TerminalPanel({ projectDir, visible, onMinimize }: TerminalPanel
   const wsRef = useRef<WebSocket | null>(null)
   const logsOffsetRef = useRef<number>(0)
   const resizeTimerRef = useRef<number | null>(null)
-  const longPressRef = useRef<number | null>(null)
-  const longPressFiredRef = useRef(false)
   const [session, setSession] = useState<TerminalSessionRecord | null>(null)
   const [error, setError] = useState('')
 
@@ -288,18 +286,8 @@ export function TerminalPanel({ projectDir, visible, onMinimize }: TerminalPanel
       <div className="terminal-float-header">
         <span className="terminal-float-title">Terminal</span>
         <div className="terminal-float-actions">
-          <button
-            className="terminal-float-btn"
-            aria-label="Clear"
-            title="Clear (hold to reset)"
-            onClick={() => { if (!longPressFiredRef.current) terminalRef.current?.clear() }}
-            onPointerDown={() => {
-              longPressFiredRef.current = false
-              longPressRef.current = window.setTimeout(() => { longPressFiredRef.current = true; void hardReset() }, 600)
-            }}
-            onPointerUp={() => { if (longPressRef.current !== null) { window.clearTimeout(longPressRef.current); longPressRef.current = null } }}
-            onPointerLeave={() => { if (longPressRef.current !== null) { window.clearTimeout(longPressRef.current); longPressRef.current = null } }}
-          >&#x232B;</button>
+          <button className="terminal-float-btn" onClick={() => terminalRef.current?.clear()} aria-label="Clear" title="Clear">&#x232B;</button>
+          <button className="terminal-float-btn terminal-float-btn-dim" onClick={() => void hardReset()} aria-label="Restart" title="Restart session">&#x21BB;</button>
           {onMinimize ? <button className="terminal-float-btn" onClick={onMinimize} aria-label="Minimize terminal" title="Minimize">&minus;</button> : null}
         </div>
       </div>
