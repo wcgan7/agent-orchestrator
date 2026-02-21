@@ -2,224 +2,523 @@
 
 Base path: `/api`
 
-Project scoping:
-- Most endpoints accept a `project_dir` query parameter.
-- If omitted, the server default/current working directory is used.
+This document describes the HTTP and WebSocket contract exposed by the local
+Agent Orchestrator server (`agent-orchestrator server`).
 
-## Root and Health (outside `/api`)
+## Conventions
 
-- `GET /` -> runtime metadata (`name`, `version`, `project`, `project_id`, `schema_version`)
-- `GET /healthz`
-- `GET /readyz`
+- Most endpoints accept `project_dir` as an optional query parameter.
+- If `project_dir` is omitted, the server uses its startup project (or current
+  working directory).
+- JSON responses use object envelopes (for example `{ "task": ... }` or
+  `{ "tasks": [...] }`).
+- Error responses are standard FastAPI errors with HTTP status and `detail`.
+
+## Root and Health Endpoints
+
+These routes are outside `/api`.
+
+### `GET /`
+Returns runtime metadata for the active project context.
+
+Response fields:
+- `name`
+- `version`
+- `project`
+- `project_id`
+- `schema_version`
+
+### `GET /healthz`
+Liveness endpoint.
+
+### `GET /readyz`
+Readiness endpoint with project and orchestrator cache details.
 
 ## Projects
 
-- `GET /api/projects`
-  - Query: `include_non_git` (bool)
-- `GET /api/projects/pinned`
-- `POST /api/projects/pinned`
-- `DELETE /api/projects/pinned/{project_id}`
-- `GET /api/projects/browse`
-  - Query: `path`, `include_hidden` (bool), `limit` (1-1000)
+### `GET /api/projects`
+List discovered and pinned projects.
+
+Query:
+- `include_non_git` (boolean, default `false`)
+
+Response:
+- `projects[]` with `id`, `path`, `source` (`discovered|pinned`), `is_git`
+
+### `GET /api/projects/pinned`
+Returns pinned projects from config.
+
+Response:
+- `items[]`
+
+### `POST /api/projects/pinned`
+Pin a project path.
+
+Request body:
+- `path` (required)
+- `project_id` (optional)
+- `allow_non_git` (optional, default `false`)
+
+Notes:
+- Returns `400` if path is invalid or non-git without `allow_non_git=true`.
+
+### `DELETE /api/projects/pinned/{project_id}`
+Remove a pinned project.
+
+Response:
+- `removed` (`true` if an entry was deleted)
+
+### `GET /api/projects/browse`
+Browse directories for project selection.
+
+Query:
+- `path` (optional; defaults to current user's home)
+- `include_hidden` (boolean, default `false`)
+- `limit` (integer, default `200`, range `1..1000`)
+
+Response:
+- `path`, `parent`, `current_is_git`
+- `directories[]` with `name`, `path`, `is_git`
+- `truncated` (`true` if results hit `limit`)
 
 ## Tasks
 
-- `POST /api/tasks`
-- `POST /api/tasks/classify-pipeline`
-- `GET /api/tasks`
-  - Query: `status`, `task_type`, `priority`
-- `GET /api/tasks/board`
-- `GET /api/tasks/execution-order`
-- `GET /api/tasks/{task_id}`
-- `GET /api/tasks/{task_id}/diff`
-- `GET /api/tasks/{task_id}/logs`
-- `PATCH /api/tasks/{task_id}`
-- `POST /api/tasks/{task_id}/transition`
-- `POST /api/tasks/{task_id}/run`
-- `POST /api/tasks/{task_id}/retry`
-- `POST /api/tasks/{task_id}/cancel`
-- `POST /api/tasks/{task_id}/approve-gate`
-- `POST /api/tasks/{task_id}/dependencies`
-- `DELETE /api/tasks/{task_id}/dependencies/{dep_id}`
-- `POST /api/tasks/analyze-dependencies`
-- `POST /api/tasks/{task_id}/reset-dep-analysis`
-- `GET /api/tasks/{task_id}/workdoc`
-- `GET /api/tasks/{task_id}/plan`
-- `POST /api/tasks/{task_id}/plan/refine`
-- `GET /api/tasks/{task_id}/plan/jobs`
-- `GET /api/tasks/{task_id}/plan/jobs/{job_id}`
-- `POST /api/tasks/{task_id}/plan/commit`
-- `POST /api/tasks/{task_id}/plan/revisions`
-- `POST /api/tasks/{task_id}/generate-tasks`
+### `POST /api/tasks`
+Create a task.
 
-Task payload fields include optional `worker_model`:
-- On `POST /api/tasks`, set `worker_model` to pin a model for that task.
-- On `PATCH /api/tasks/{task_id}`, `worker_model` can be updated.
+Request fields include:
+- `title` (required)
+- `description`, `task_type`, `priority`, `status`
+- `labels[]`, `blocked_by[]`, `parent_id`
+- `pipeline_template[]` (optional override)
+- `approval_mode` (`human_review|auto_approve`)
+- `hitl_mode`
+- `dependency_policy` (`permissive|prudent|strict`)
+- `source`, `worker_model`
+- `metadata` (object)
+- `project_commands` (per-task command overrides)
+- optional classifier fields used by `task_type="auto"`
 
-### Iterative Planning Endpoints
+Behavior:
+- `status` is only honored for `backlog` and `queued` at create time.
+- `task_type="auto"` requires a high-confidence classifier result.
+- If dependency policy is invalid/missing, server falls back to settings default,
+  then `prudent`.
 
-`GET /api/tasks/{task_id}/plan` returns:
-- `task_id`
-- `latest_revision_id`
-- `committed_revision_id`
-- `revisions[]` (`id`, `source`, `parent_revision_id`, `step`, `feedback_note`, `provider`, `model`, `content`, `content_hash`, `status`, timestamps)
-- `active_refine_job` when a refine job is in progress
+### `POST /api/tasks/classify-pipeline`
+Classify free-form task text into a pipeline.
 
-Legacy compatibility fields are still included:
-- `plans`
-- `latest`
+Request:
+- `title`
+- `description` (optional)
+- `metadata` (optional)
 
-`POST /api/tasks/{task_id}/plan/refine` request:
-```json
-{
-  "base_revision_id": "pr-abc123",
-  "feedback": "Tighten rollout and risk controls",
-  "instructions": "Keep auth and migration details",
-  "priority": "normal"
-}
-```
+Response:
+- `pipeline_id`
+- `task_type`
+- `confidence` (`high|low`)
+- `reason`
+- `allowed_pipelines[]`
 
-`POST /api/tasks/{task_id}/plan/revisions` request:
-```json
-{
-  "content": "Full revised plan text...",
-  "parent_revision_id": "pr-abc123",
-  "feedback_note": "manual edits before generate"
-}
-```
+### `GET /api/tasks`
+List tasks.
 
-`POST /api/tasks/{task_id}/plan/commit` request:
-```json
-{
-  "revision_id": "pr-abc123"
-}
-```
+Query filters:
+- `status`
+- `task_type`
+- `priority`
 
-`POST /api/tasks/{task_id}/generate-tasks` request:
-```json
-{
-  "source": "committed",
-  "revision_id": "pr-abc123",
-  "plan_override": "Manual plan text",
-  "infer_deps": true
-}
-```
+Response:
+- `tasks[]`
+- `total`
 
-`source` values:
-- `latest`
-- `committed`
-- `revision` (requires `revision_id`)
-- `override` (requires `plan_override`)
+### `GET /api/tasks/board`
+Returns board columns keyed by status.
+
+Columns:
+- `backlog`, `queued`, `in_progress`, `in_review`, `blocked`, `done`, `cancelled`
+
+### `GET /api/tasks/execution-order`
+Returns dependency-aware batches for non-terminal tasks.
+
+Response:
+- `batches` (list of task-id lists)
+- `completed` (recently completed/cancelled task IDs)
+
+### `GET /api/tasks/{task_id}`
+Fetch one task. Returns `404` if not found.
+
+### `PATCH /api/tasks/{task_id}`
+Patch mutable fields.
+
+Important constraints:
+- Status changes are rejected (`400`).
+- Use transition/retry/cancel/review actions for status updates.
+- Empty `project_commands` clears per-task command overrides.
+
+### `POST /api/tasks/{task_id}/transition`
+Manual status transition with guardrails.
+
+Valid transitions:
+- `backlog -> queued|cancelled`
+- `queued -> backlog|cancelled`
+- `in_progress -> cancelled`
+- `in_review -> done|blocked|cancelled`
+- `blocked -> queued|in_review|cancelled`
+- `cancelled -> backlog`
+
+Notes:
+- Transitioning to `queued` requires all blockers resolved (`done|cancelled`).
+
+### `POST /api/tasks/{task_id}/run`
+Queue/execute a task through the orchestrator.
+
+### `POST /api/tasks/{task_id}/retry`
+Reset task for another run.
+
+Request (optional):
+- `guidance`
+- `start_from_step`
+
+Behavior:
+- Clears `error` and `pending_gate`.
+- Increments `retry_count`.
+- Stores retry guidance metadata/history when provided.
+
+### `POST /api/tasks/{task_id}/cancel`
+Set task status to `cancelled`.
+
+### `POST /api/tasks/{task_id}/approve-gate`
+Clear a pending human gate.
+
+Request:
+- `gate` (optional; if provided must match `task.pending_gate`)
+
+### `POST /api/tasks/{task_id}/dependencies`
+Add dependency edge.
+
+Request:
+- `depends_on` (task id)
+
+### `DELETE /api/tasks/{task_id}/dependencies/{dep_id}`
+Remove dependency edge.
+
+### `POST /api/tasks/analyze-dependencies`
+Run dependency inference across tasks and return inferred edges.
+
+### `POST /api/tasks/{task_id}/reset-dep-analysis`
+Remove inferred dependency metadata and inferred blocker links for a task.
+
+### `GET /api/tasks/{task_id}/workdoc`
+Return task work document payload.
+
+### `GET /api/tasks/{task_id}/plan`
+Return iterative plan document, including revisions and active refine job.
+
+### `POST /api/tasks/{task_id}/plan/refine`
+Queue async refinement of a plan revision.
+
+Request:
+- `feedback` (required)
+- `base_revision_id` (optional)
+- `instructions` (optional)
+- `priority` (`normal|high`)
+
+### `GET /api/tasks/{task_id}/plan/jobs`
+List refine jobs for a task.
+
+### `GET /api/tasks/{task_id}/plan/jobs/{job_id}`
+Get one refine job.
+
+### `POST /api/tasks/{task_id}/plan/commit`
+Commit a chosen revision.
+
+Request:
+- `revision_id`
+
+### `POST /api/tasks/{task_id}/plan/revisions`
+Create a manual revision.
+
+Request:
+- `content` (required)
+- `parent_revision_id` (optional)
+- `feedback_note` (optional)
+
+### `POST /api/tasks/{task_id}/generate-tasks`
+Generate child tasks from plan content.
+
+Request:
+- `source`: `latest|committed|revision|override`
+- `revision_id` (required when `source=revision`)
+- `plan_override` (required when `source=override`)
+- `infer_deps` (default `true`)
+
+Validation:
+- `revision_id` is only valid with `source=revision`.
+- `plan_override` is only valid with `source=override`.
+
+### `GET /api/tasks/{task_id}/diff`
+Return latest commit diff/stat for the task.
+
+Response:
+- `commit` (or `null`)
+- `files[]` (`path`, `changes`)
+- `diff` (full unified diff)
+- `stat` (git stat text)
+
+### `GET /api/tasks/{task_id}/logs`
+Read current or historical step logs.
+
+Query:
+- `max_chars` (`200..2000000`, default `12000`)
+- `stdout_offset`, `stderr_offset` (for incremental reads)
+- `backfill` (align chunk to line starts)
+- `stdout_read_to`, `stderr_read_to` (optional byte limits)
+- `step` (optional, fetch logs for a specific step attempt)
+
+Response includes:
+- `mode` (`active|last|history|none`)
+- `stdout`, `stderr`
+- offsets and chunk metadata
+- `available_steps[]`, `step_execution_counts`
+- `progress` JSON payload when present
 
 ## PRD Import
 
-- `POST /api/import/prd/preview`
-- `POST /api/import/prd/commit`
-- `GET /api/import/{job_id}`
+### `POST /api/import/prd/preview`
+Parse PRD text and return a preview graph.
+
+Request:
+- `content` (required)
+- `title` (optional)
+- `default_priority` (default `P2`)
+
+Response:
+- `job_id`
+- `preview.nodes[]`, `preview.edges[]`
+- parsing metadata (`chunk_count`, `strategy`, `ambiguity_warnings`)
+
+### `POST /api/import/prd/commit`
+Commit previewed import and create tasks via initiative pipeline.
+
+Request:
+- `job_id`
+
+Response:
+- `job_id`
+- `created_task_ids[]`
+- `parent_task_id`
+
+### `GET /api/import/{job_id}`
+Fetch stored import job state.
+
+## Review and Collaboration
+
+### `GET /api/review-queue`
+List tasks in `in_review`.
+
+### `POST /api/review/{task_id}/approve`
+Approve review; marks task `done` (and merges preserved branch when applicable).
+
+Body:
+- `guidance` (optional)
+
+### `POST /api/review/{task_id}/request-changes`
+Send task back to `queued` with review guidance.
+
+Body:
+- `guidance` (optional)
+
+### `GET /api/collaboration/modes`
+Returns available HITL mode definitions.
+
+### `GET /api/collaboration/presence`
+Presence feed (currently empty list).
+
+### `GET /api/collaboration/timeline/{task_id}`
+Task timeline combining status, events, feedback, comments, and human blockers.
+
+### `GET /api/collaboration/feedback/{task_id}`
+List feedback records for a task.
+
+### `POST /api/collaboration/feedback`
+Add a feedback item.
+
+Required fields:
+- `task_id`
+- `summary`
+
+Optional fields:
+- `feedback_type`, `priority`, `details`, `target_file`
+
+### `POST /api/collaboration/feedback/{feedback_id}/dismiss`
+Mark feedback as addressed.
+
+### `GET /api/collaboration/comments/{task_id}`
+List comments for a task.
+
+Query:
+- `file_path` (optional exact match filter)
+
+### `POST /api/collaboration/comments`
+Create a threaded file comment.
+
+Required fields:
+- `task_id`, `file_path`, `body`
+
+Optional fields:
+- `line_number`, `line_type`, `parent_id`
+
+### `POST /api/collaboration/comments/{comment_id}/resolve`
+Mark a comment resolved.
 
 ## Terminal
 
-- `POST /api/terminal/session`
-- `GET /api/terminal/session`
-- `POST /api/terminal/session/{session_id}/input`
-- `POST /api/terminal/session/{session_id}/resize`
-- `POST /api/terminal/session/{session_id}/stop`
-- `GET /api/terminal/session/{session_id}/logs`
+### `POST /api/terminal/session`
+Start a PTY session for the active project.
 
-## Review Queue
+Request:
+- `cols` (default `120`, range `2..500`)
+- `rows` (default `36`, range `2..300`)
+- `shell` (optional)
 
-- `GET /api/review-queue`
-- `POST /api/review/{task_id}/approve`
-- `POST /api/review/{task_id}/request-changes`
+### `GET /api/terminal/session`
+Get active session for project, if any.
 
-## Orchestrator
+### `POST /api/terminal/session/{session_id}/input`
+Write UTF-8 input to session.
 
-- `GET /api/orchestrator/status`
-- `POST /api/orchestrator/control` (`pause|resume|drain|stop`)
+Request:
+- `data`
+
+### `POST /api/terminal/session/{session_id}/resize`
+Resize PTY.
+
+Request:
+- `cols` (`2..500`)
+- `rows` (`2..300`)
+
+### `POST /api/terminal/session/{session_id}/stop`
+Stop session with signal.
+
+Request:
+- `signal`: `TERM|KILL` (default `TERM`)
+
+### `GET /api/terminal/session/{session_id}/logs`
+Read terminal output.
+
+Query:
+- `offset` (default `0`)
+- `max_bytes` (default `65536`)
+
+Response:
+- `output`
+- `offset` (next cursor)
+- `status`
+- `finished_at`
+
+## Orchestrator and Runtime Metrics
+
+### `GET /api/orchestrator/status`
+Return orchestrator state (queue, in-progress, control mode, etc.).
+
+### `POST /api/orchestrator/control`
+Control orchestrator state.
+
+Request:
+- `action`: `pause|resume|drain|stop`
+
+### `GET /api/metrics`
+Aggregated runtime metrics (API calls, wall time, queue depth, progress counters).
+
+### `GET /api/phases`
+Task progress snapshot used for execution phase visualization.
 
 ## Settings and Workers
 
-- `GET /api/settings`
-- `PATCH /api/settings`
-- `GET /api/workers/health`
-- `GET /api/workers/routing`
+### `GET /api/settings`
+Read normalized runtime settings payload.
 
-Top-level settings payload sections:
+Top-level sections:
 - `orchestrator`
 - `agent_routing`
 - `defaults`
 - `workers`
 - `project`
 
-`workers.providers.<name>` fields:
-- codex: `type`, `command` (default `codex exec`), optional `model`, optional `reasoning_effort` (`low|medium|high`)
-- claude: `type`, `command` (default `claude -p`), optional `model`, optional `reasoning_effort` (`low|medium|high`, mapped to Claude CLI `--effort`)
-- ollama: `type`, optional `endpoint`, optional `model`, optional `temperature`, optional `num_ctx`
-
-`workers` also supports:
-- `default`: default worker provider name
-- `default_model`: optional default model for codex workers (used when task has no `worker_model`)
-- `heartbeat_seconds`: provider heartbeat interval
-- `heartbeat_grace_seconds`: timeout before a worker is marked stale
-- `routing`: per-step provider routing map
-
-### Project Commands
-
-The `project` section lets you declare per-language commands workers use during implementation and verification.
-
-PATCH example:
-```json
-{
-  "project": {
-    "commands": {
-      "python": {
-        "test": ".venv/bin/pytest -n auto --tb=short",
-        "lint": ".venv/bin/ruff check ."
-      }
-    }
-  }
-}
-```
-
-Fields per language: `test`, `lint`, `typecheck`, `format` (all optional).
+### `PATCH /api/settings`
+Patch one or more settings sections.
 
 Merge semantics:
-- `null` / omitted field -> no change
-- `""` (empty string) -> removes that command
-- non-empty string -> sets the command
+- Omitted section: unchanged.
+- Included section: shallow-merged by section rules.
+- In `project.commands`, empty string removes a command.
 
-Language keys are normalized to lowercase. Only languages detected in the project are injected into worker prompts; extra entries are stored but ignored at runtime.
+Workers settings notes:
+- Provider types: `codex`, `claude`, `ollama`.
+- `workers.default` falls back to `codex` if invalid.
+- `heartbeat_grace_seconds` is clamped to be at least
+  `heartbeat_seconds`.
+
+### `GET /api/workers/health`
+Health check results for configured and common known providers.
+
+### `GET /api/workers/routing`
+Resolved step-to-provider routing table.
 
 ## Agents
 
-- `GET /api/agents`
-- `POST /api/agents/spawn`
-- `POST /api/agents/{agent_id}/pause`
-- `POST /api/agents/{agent_id}/resume`
-- `POST /api/agents/{agent_id}/terminate`
-- `DELETE /api/agents/{agent_id}`
-- `POST /api/agents/{agent_id}/remove` (legacy-compatible alternative to DELETE)
-- `GET /api/agents/types`
+### `GET /api/agents`
+List agent records.
 
-## Collaboration and Visibility
+### `GET /api/agents/types`
+List built-in agent role types and their capabilities.
 
-- `GET /api/metrics`
-- `GET /api/phases`
-- `GET /api/collaboration/modes`
-- `GET /api/collaboration/presence`
-- `GET /api/collaboration/timeline/{task_id}`
-- `GET /api/collaboration/feedback/{task_id}`
-- `POST /api/collaboration/feedback`
-- `POST /api/collaboration/feedback/{feedback_id}/dismiss`
-- `GET /api/collaboration/comments/{task_id}`
-- `POST /api/collaboration/comments`
-- `POST /api/collaboration/comments/{comment_id}/resolve`
+Query parameters:
+- `project_dir` (optional): project path used to resolve `task_type_affinity`
+  from active `agent_routing.task_type_roles` settings.
+
+Response:
+- `types`: array of role descriptors.
+  - `role`: machine role name.
+  - `display_name`: human-friendly role label.
+  - `description`: short role description.
+  - `task_type_affinity`: sorted task types mapped to this role in settings.
+  - `allowed_steps`: workflow steps the role can execute (`plan`,
+    `implement`, `verify`, `review`).
+  - `limits`: current runtime limits object.
+    - `max_tokens`
+    - `max_time_seconds`
+    - `max_cost_usd`
+
+### `POST /api/agents/spawn`
+Create an agent record.
+
+Request:
+- `role` (default `general`)
+- `capacity` (default `1`)
+- `override_provider` (optional)
+
+### `POST /api/agents/{agent_id}/pause`
+Pause an agent.
+
+### `POST /api/agents/{agent_id}/resume`
+Resume an agent.
+
+### `POST /api/agents/{agent_id}/terminate`
+Mark an agent terminated.
+
+### `DELETE /api/agents/{agent_id}`
+Remove agent record.
+
+### `POST /api/agents/{agent_id}/remove`
+Legacy-compatible remove endpoint (same behavior as `DELETE`).
 
 ## WebSocket
 
 Endpoint: `/ws`
 
-Supported channels:
+Channels used by UI:
 - `tasks`
 - `queue`
 - `agents`
@@ -228,7 +527,7 @@ Supported channels:
 - `notifications`
 - `system`
 
-Event envelope:
+Event envelope fields:
 - `id`
 - `ts`
 - `channel`

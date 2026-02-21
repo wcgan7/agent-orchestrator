@@ -1,28 +1,28 @@
 # User Guide
 
-## What This Tool Does
+## Overview
 
-Agent Orchestrator is an orchestration-first AI engineering control center.
-The primary unit is a `Task`. You can create tasks directly, import them from a PRD,
-or use an embedded terminal for direct interactive shell work.
+Agent Orchestrator is a local AI delivery control center with task lifecycle
+management, execution orchestration, review gates, and worker routing.
 
-Primary UI surfaces:
-- Board
-- Execution
-- Review Queue
-- Agents
-- Settings
+Primary surfaces in the web app:
+- `Board`
+- `Planning`
+- `Execution`
+- `Workers`
+- `Settings`
+- `Create Work` drawer (`Create Task`, `Import PRD`, `Terminal`)
 
 ## Quick Start
 
-Install backend dependencies and run server:
+Start backend:
 
 ```bash
 python -m pip install -e ".[server]"
 agent-orchestrator server --project-dir /absolute/path/to/your/repo
 ```
 
-Run the web dashboard:
+Start frontend:
 
 ```bash
 npm --prefix web install
@@ -35,11 +35,13 @@ Open:
 
 ## Core Concepts
 
-- Task: persistent, board-backed work item.
-- Import Job: PRD parse/preview/commit workflow that creates tasks + dependencies.
-- Terminal Session: interactive PTY-backed shell session scoped to the active project.
-- Review Queue: tasks waiting for human approval (`in_review`).
-- Agent: worker process entry in orchestrator pool.
+- Task: unit of work with lifecycle state, priority, type, and pipeline.
+- Pipeline: ordered steps chosen by task type (for example docs, feature, bug).
+- Run: one orchestrator execution attempt for a task.
+- Review Queue: tasks waiting for human decision.
+- HITL mode: collaboration style for worker behavior.
+- Project commands: language-specific test/lint/typecheck/format commands
+  injected into worker prompts.
 
 ## Task Lifecycle
 
@@ -48,74 +50,112 @@ Statuses:
 - `queued`
 - `in_progress`
 - `in_review`
-- `done`
 - `blocked`
+- `done`
 - `cancelled`
 
-Default policy:
-- New tasks start in `backlog`.
-- Approval mode defaults to `human_review`.
-- Quality gate defaults to zero open findings for `critical/high/medium/low`.
+Transition rules:
+- `backlog -> queued|cancelled`
+- `queued -> backlog|cancelled`
+- `in_progress -> cancelled`
+- `in_review -> done|blocked|cancelled`
+- `blocked -> queued|in_review|cancelled`
+- `cancelled -> backlog`
 
-Dependency rules:
-- Tasks with unresolved blockers cannot run.
-- A blocker is considered resolved when its status is `done` or `cancelled`.
+Constraint:
+- A task cannot move to `queued` while any blocker is unresolved.
 
-## Common Workflows
+Blockers are resolved when dependent tasks are `done` or `cancelled`.
 
-### 1. Create and Run a Task
+## Typical Workflows
+
+### 1. Create and run a task
 
 1. Open `Create Work` -> `Create Task`.
-2. Fill title/description/type/priority.
-3. Move task to `queued` (or use run actions from task detail).
-4. Monitor progress in `Execution` and task detail.
-5. Approve in `Review Queue` if task reaches `in_review`.
+2. Enter title, description, priority, type, and optional metadata.
+3. Move to `queued`.
+4. Start from task actions or let orchestrator pick it from queue.
+5. Track step progression in task detail and `Execution`.
+6. Handle review decision in `Review Queue` when status becomes `in_review`.
 
-### 2. Import a PRD
+### 2. Import PRD into executable tasks
 
 1. Open `Create Work` -> `Import PRD`.
-2. Paste PRD text and click preview.
-3. Validate generated nodes/edges.
-4. Commit import job to create board tasks.
-5. Track created tasks from board and import job details.
+2. Paste PRD content and run preview.
+3. Review preview graph (nodes/edges and warnings).
+4. Commit import.
+5. Monitor generated parent task (`initiative_plan`) and created children.
 
-### 3. Use Embedded Terminal
+### 3. Use embedded terminal
 
 1. Open `Create Work` -> `Terminal`.
-2. Start or attach to the active terminal session.
-3. Run commands interactively and monitor live output.
-4. Stop the session when done.
+2. Start or attach to a session.
+3. Send input, resize as needed, stream logs.
+4. Stop session with `TERM` (default) or `KILL`.
 
-## Project Management
+## Planning and Task Generation
 
-In `Settings`:
-- Pin/unpin repositories.
-- Browse filesystem directories.
-- Allow non-git directories explicitly when needed.
+Each task has a plan document with revisions:
+- `latest_revision_id`
+- `committed_revision_id`
+- `revisions[]`
 
-All API/UI operations target the currently selected project.
+Supported actions:
+- Queue refine job from feedback.
+- Add manual revision.
+- Commit a revision.
+- Generate child tasks from `latest`, `committed`, explicit `revision`, or
+  inline `override` text.
 
-## Settings Reference
+Generation validation rules:
+- `source=revision` requires `revision_id`.
+- `source=override` requires `plan_override`.
+- `revision_id` and `plan_override` are rejected for incompatible sources.
 
-Config sections exposed in UI/API:
+## Review Flow
 
-- `orchestrator`
-- `agent_routing`
-- `defaults.quality_gate`
-- `workers`
-- `project.commands`
+Review queue includes all tasks in `in_review`.
 
-Examples:
-- Control concurrency and max review attempts.
-- Route task types to agent roles.
-- Override worker/provider by role or route.
-- Tune quality gate thresholds.
-- Declare project-specific test/lint/typecheck/format commands per language.
+Actions:
+- `Approve`: marks task `done`; if preserved branch metadata exists, merge is
+  attempted first.
+- `Request changes`: returns task to `queued` and sets retry target to
+  `implement`.
 
-### Project Commands
+Both actions can include optional human guidance and are recorded in task
+history/timeline metadata.
 
-Workers receive generic verification instructions by default ("run the project's tests").
-To give them exact commands, add a `project.commands` section keyed by language:
+## HITL and Collaboration
+
+Collaboration APIs and UI support:
+- Mode catalog (`/api/collaboration/modes`)
+- Timeline (system events + human review actions + feedback/comments)
+- Feedback records (add/dismiss)
+- Threaded comments (add/resolve)
+
+Timeline entries also surface normalized human-blocking issues when available.
+
+## Settings and Worker Routing
+
+Settings sections:
+- `orchestrator`: concurrency, auto dependency analysis, max review attempts
+- `agent_routing`: default role and task-type role mapping
+- `defaults`: quality gate thresholds and default dependency policy
+- `workers`: default provider/model, heartbeats, providers, step routing
+- `project.commands`: language-specific command overrides
+
+Worker provider types:
+- `codex` (`command`, optional `model`, optional `reasoning_effort`)
+- `claude` (`command`, optional `model`, optional `reasoning_effort`)
+- `ollama` (optional `endpoint`, `model`, `temperature`, `num_ctx`)
+
+Routing behavior:
+- Step-level routing uses explicit `workers.routing` first.
+- Falls back to `workers.default`.
+
+## Project Commands
+
+Define explicit commands workers should run during implement/verify steps.
 
 ```yaml
 # .agent_orchestrator/config.yaml
@@ -124,7 +164,7 @@ project:
     python:
       test: ".venv/bin/pytest -n auto --tb=short"
       lint: ".venv/bin/ruff check ."
-      typecheck: ".venv/bin/mypy . --strict"
+      typecheck: ".venv/bin/mypy ."
       format: ".venv/bin/ruff format ."
     typescript:
       test: "npm test"
@@ -133,13 +173,12 @@ project:
 ```
 
 Rules:
-- Language keys must be lowercase (`python`, `typescript`, `go`, `rust`, `javascript`).
-- All languages and all fields are optional. Omitted entries mean the worker auto-detects.
-- Commands are injected into **implementation** and **verification** prompts only.
-- Only languages actually detected in the project (via marker files like `pyproject.toml`,
-  `tsconfig.json`, `go.mod`, etc.) are included — extra entries are ignored.
+- Language keys are normalized to lowercase.
+- Each field is optional.
+- Empty string in PATCH removes a specific command.
+- Extra languages may be stored but are ignored unless detected in project.
 
-You can also set commands via the API:
+Example API patch:
 
 ```bash
 curl -X PATCH http://localhost:8080/api/settings \
@@ -156,52 +195,42 @@ curl -X PATCH http://localhost:8080/api/settings \
   }'
 ```
 
-To remove a single command, set it to an empty string:
+## Runtime Storage
 
-```bash
-curl -X PATCH http://localhost:8080/api/settings \
-  -H 'Content-Type: application/json' \
-  -d '{"project": {"commands": {"python": {"lint": ""}}}}'
-```
+State root in each selected project:
+- `.agent_orchestrator/tasks.yaml`
+- `.agent_orchestrator/runs.yaml`
+- `.agent_orchestrator/review_cycles.yaml`
+- `.agent_orchestrator/agents.yaml`
+- `.agent_orchestrator/terminal_sessions.yaml`
+- `.agent_orchestrator/plan_revisions.yaml`
+- `.agent_orchestrator/plan_refine_jobs.yaml`
+- `.agent_orchestrator/events.jsonl`
+- `.agent_orchestrator/config.yaml`
 
-## Realtime Behavior
+Legacy migration behavior:
+- incompatible old state is archived to `.agent_orchestrator_legacy_<timestamp>/`
 
-WebSocket endpoint: `/ws`
+## Diagnostics and Troubleshooting
 
-Used channels:
-- `tasks`
-- `queue`
-- `agents`
-- `review`
-- `terminal`
-- `notifications`
-- `system`
+Health checks:
+- `GET /healthz`
+- `GET /readyz`
 
-The UI subscribes and auto-refreshes mounted surfaces when relevant events arrive.
+Context checks:
+- `GET /` confirms active project and schema version.
+- `GET /api/settings` confirms effective runtime configuration.
+- `GET /api/workers/health` validates provider availability.
 
-## Data Storage and Backups
+Task/run diagnostics:
+- `GET /api/tasks/{task_id}/logs` for stdout/stderr and step history.
+- `GET /api/tasks/{task_id}/diff` for latest commit file changes.
+- `GET /api/collaboration/timeline/{task_id}` for review and blocker context.
 
-State root:
-- `.agent_orchestrator/`
+## Additional References
 
-Key files:
-- `tasks.yaml`
-- `runs.yaml`
-- `review_cycles.yaml`
-- `agents.yaml`
-- `terminal_sessions.yaml`
-- `events.jsonl`
-- `config.yaml`
-
-If legacy state exists, it is archived automatically to:
-- `.agent_orchestrator_legacy_<timestamp>/`
-
-## Troubleshooting
-
-- Check server health:
-  - `GET /healthz`
-  - `GET /readyz`
-- Verify selected project:
-  - `GET /` (returns project + project_id)
-- If UI appears stale, confirm `/ws` connectivity and project selection.
-- If a task won’t run, inspect blockers and status (`queued` required).
+- `README.md`
+- `docs/API_REFERENCE.md`
+- `docs/CLI_REFERENCE.md`
+- `web/README.md`
+- `example/README.md`
