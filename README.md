@@ -195,6 +195,16 @@ npm --prefix web run check
 npm --prefix web run e2e:smoke
 ```
 
+Local pushes are gated by `.githooks/pre-push` and run:
+- `.venv/bin/ruff check .`
+- `.venv/bin/pytest -q`
+- `npm --prefix web run check`
+
+Enable hooks once per clone:
+```bash
+git config core.hooksPath .githooks
+```
+
 ## Documentation
 
 - `docs/README.md`: documentation index

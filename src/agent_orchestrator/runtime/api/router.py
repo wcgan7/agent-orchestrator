@@ -2385,6 +2385,7 @@ def create_router(
         if source is None:
             # Backward compatibility: previous API accepted only optional plan_override.
             source = "override" if str(body.plan_override or "").strip() else "latest"
+        assert source is not None
         if source == "revision" and not body.revision_id:
             raise HTTPException(status_code=400, detail="revision_id is required when source=revision")
         if source == "override" and not str(body.plan_override or "").strip():

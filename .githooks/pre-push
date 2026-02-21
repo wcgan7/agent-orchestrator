@@ -1,6 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "[pre-push] Running web CI checks..."
-cd web
-npm run check
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+if [[ ! -x ".venv/bin/python" ]]; then
+  echo "[pre-push] Missing .venv at repo root."
+  echo "[pre-push] Create it first (example): python3 -m venv .venv && .venv/bin/pip install -e \".[server,test,dev]\""
+  exit 1
+fi
+
+echo "[pre-push] Running backend checks (.venv)..."
+.venv/bin/ruff check .
+.venv/bin/pytest -q
+
+echo "[pre-push] Running web checks..."
+npm --prefix web run check
