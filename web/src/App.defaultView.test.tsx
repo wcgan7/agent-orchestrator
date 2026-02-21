@@ -34,6 +34,7 @@ describe('App default route', () => {
     vi.clearAllMocks()
     localStorage.clear()
     window.location.hash = ''
+    MockWebSocket.instances = []
     ;(globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = MockWebSocket as unknown as typeof WebSocket
 
     global.fetch = vi.fn().mockImplementation((url) => {
@@ -80,7 +81,7 @@ describe('App default route', () => {
     await waitFor(() => {
       expect(screen.getAllByRole('button', { name: /Create Task/i }).length).toBeGreaterThan(0)
       expect(screen.getByRole('button', { name: /Import PRD/i })).toBeInTheDocument()
-      expect(screen.getByRole('button', { name: /Terminal/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Toggle terminal/i })).toBeInTheDocument()
     })
   })
 
@@ -603,9 +604,11 @@ describe('App default route', () => {
     const baselineBoardCalls = boardCallCount()
 
     expect(MockWebSocket.instances.length).toBeGreaterThan(0)
-    MockWebSocket.instances[0].dispatch('message', { data: JSON.stringify({ channel: 'tasks', type: 'task.updated' }) })
-    MockWebSocket.instances[0].dispatch('message', { data: JSON.stringify({ channel: 'tasks', type: 'task.updated' }) })
-    MockWebSocket.instances[0].dispatch('message', { data: JSON.stringify({ channel: 'tasks', type: 'task.updated' }) })
+    for (const ws of MockWebSocket.instances) {
+      ws.dispatch('message', { data: JSON.stringify({ channel: 'tasks', type: 'task.updated' }) })
+      ws.dispatch('message', { data: JSON.stringify({ channel: 'tasks', type: 'task.updated' }) })
+      ws.dispatch('message', { data: JSON.stringify({ channel: 'tasks', type: 'task.updated' }) })
+    }
 
     await waitFor(() => {
       expect(boardCallCount()).toBeGreaterThan(baselineBoardCalls)
@@ -652,7 +655,9 @@ describe('App default route', () => {
     const baselineBoardCalls = boardCallCount()
 
     expect(MockWebSocket.instances.length).toBeGreaterThan(0)
-    MockWebSocket.instances[0].dispatch('message', { data: JSON.stringify({ channel: 'tasks', type: 'task.updated' }) })
+    for (const ws of MockWebSocket.instances) {
+      ws.dispatch('message', { data: JSON.stringify({ channel: 'tasks', type: 'task.updated' }) })
+    }
 
     await waitFor(() => {
       expect(boardCallCount()).toBeGreaterThan(baselineBoardCalls)

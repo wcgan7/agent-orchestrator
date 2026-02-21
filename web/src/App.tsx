@@ -8,7 +8,7 @@ import { humanizeLabel } from './ui/labels'
 import './styles/orchestrator.css'
 
 type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
-type CreateTab = 'task' | 'import' | 'terminal'
+type CreateTab = 'task' | 'import'
 type TaskDetailTab = 'overview' | 'plan' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
 type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition'
 
@@ -464,16 +464,12 @@ const WORKER_PROVIDERS_EXAMPLE = `{
   }
 }`
 
-const PROJECT_COMMANDS_EXAMPLE = `{
-  "python": {
-    "test": ".venv/bin/pytest -n auto",
-    "lint": ".venv/bin/ruff check ."
-  },
-  "typescript": {
-    "test": "npm test",
-    "lint": "npm run lint"
-  }
-}`
+const PROJECT_COMMANDS_EXAMPLE = `python:
+  test: .venv/bin/pytest -n auto
+  lint: .venv/bin/ruff check .
+typescript:
+  test: npm test
+  lint: npm run lint`
 
 function RenderedMarkdown({ content, className }: { content: string; className?: string }): JSX.Element {
   return (
@@ -544,39 +540,97 @@ function parseStringMap(input: string, label: string): Record<string, string> {
   return out
 }
 
-function parseProjectCommands(input: string): Record<string, LanguageCommandSettings> {
-  if (!input.trim()) return {}
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(input)
-  } catch {
-    throw new Error('Project commands must be valid JSON')
-  }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('Project commands must be a JSON object')
-  }
-
+function parseProjectCommandsYaml(input: string): Record<string, LanguageCommandSettings> {
   const out: Record<string, LanguageCommandSettings> = {}
-  for (const [rawLanguage, rawCommands] of Object.entries(parsed as Record<string, unknown>)) {
-    const language = String(rawLanguage || '').trim().toLowerCase()
-    if (!language) continue
-    if (!rawCommands || typeof rawCommands !== 'object' || Array.isArray(rawCommands)) {
-      throw new Error(`Project commands for "${language}" must be a JSON object`)
+  let currentLang = ''
+  for (const rawLine of input.split('\n')) {
+    const line = rawLine.trimEnd()
+    if (!line || line.trim().startsWith('#')) continue
+    if (!/^\s/.test(line) && line.trimEnd().endsWith(':')) {
+      // Top-level language key (no leading whitespace, ends with colon)
+      currentLang = line.slice(0, -1).trim().toLowerCase()
+      if (!currentLang) throw new Error('Empty language key')
+      if (!out[currentLang]) out[currentLang] = {}
+    } else if (/^\s/.test(line) && currentLang) {
+      // Indented command entry: split on first colon
+      const trimmed = line.trim()
+      const colonIdx = trimmed.indexOf(':')
+      if (colonIdx <= 0) throw new Error(`Invalid command line: "${trimmed}"`)
+      const key = trimmed.slice(0, colonIdx).trim()
+      const value = trimmed.slice(colonIdx + 1).trim()
+      if (!key) throw new Error(`Empty command key under "${currentLang}"`)
+      if (!value) throw new Error(`Empty command value for "${currentLang}.${key}"`)
+      out[currentLang][key] = value
+    } else {
+      throw new Error(`Unexpected line: "${line.trim()}"`)
     }
-    const commands: LanguageCommandSettings = {}
-    for (const [rawField, rawValue] of Object.entries(rawCommands as Record<string, unknown>)) {
-      const field = String(rawField || '').trim()
-      if (!field) continue
-      if (typeof rawValue !== 'string') {
-        throw new Error(`Project command "${language}.${field}" must be a string`)
-      }
-      commands[field] = rawValue
-    }
-    if (Object.keys(commands).length > 0) {
-      out[language] = commands
-    }
+  }
+  // Remove empty language groups
+  for (const lang of Object.keys(out)) {
+    if (Object.keys(out[lang]).length === 0) delete out[lang]
   }
   return out
+}
+
+function parseProjectCommands(input: string): Record<string, LanguageCommandSettings> {
+  const trimmed = input.trim()
+  if (!trimmed) return {}
+
+  // If it looks like JSON, parse as JSON (backward compatible)
+  if (trimmed.startsWith('{')) {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch {
+      throw new Error('Project commands must be valid JSON')
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Project commands must be a JSON object')
+    }
+    const out: Record<string, LanguageCommandSettings> = {}
+    for (const [rawLanguage, rawCommands] of Object.entries(parsed as Record<string, unknown>)) {
+      const language = String(rawLanguage || '').trim().toLowerCase()
+      if (!language) continue
+      if (!rawCommands || typeof rawCommands !== 'object' || Array.isArray(rawCommands)) {
+        throw new Error(`Project commands for "${language}" must be a JSON object`)
+      }
+      const commands: LanguageCommandSettings = {}
+      for (const [rawField, rawValue] of Object.entries(rawCommands as Record<string, unknown>)) {
+        const field = String(rawField || '').trim()
+        if (!field) continue
+        if (typeof rawValue !== 'string') {
+          throw new Error(`Project command "${language}.${field}" must be a string`)
+        }
+        commands[field] = rawValue
+      }
+      if (Object.keys(commands).length > 0) {
+        out[language] = commands
+      }
+    }
+    return out
+  }
+
+  // Otherwise parse as YAML-like format
+  return parseProjectCommandsYaml(trimmed)
+}
+
+function serializeProjectCommandsYaml(commands: Record<string, LanguageCommandSettings>): string {
+  const lines: string[] = []
+  for (const [lang, cmds] of Object.entries(commands)) {
+    lines.push(`${lang}:`)
+    for (const [key, value] of Object.entries(cmds)) {
+      lines.push(`  ${key}: ${value}`)
+    }
+  }
+  return lines.join('\n')
+}
+
+function formatProjectCommandsField(input: string): string {
+  const trimmed = input.trim()
+  if (!trimmed) return ''
+  const parsed = parseProjectCommands(trimmed)
+  if (Object.keys(parsed).length === 0) return ''
+  return serializeProjectCommandsYaml(parsed)
 }
 
 function formatJsonObjectInput(input: string, label: string): string {
@@ -1315,6 +1369,7 @@ export default function App() {
 
   const [workOpen, setWorkOpen] = useState(false)
   const [createTab, setCreateTab] = useState<CreateTab>('task')
+  const [terminalOpen, setTerminalOpen] = useState(false)
   const [selectedTaskId, setSelectedTaskId] = useState<string>('')
   const modalDismissedRef = useRef(false)
   const modalExplicitRef = useRef(false)
@@ -1368,6 +1423,8 @@ export default function App() {
   const [editTaskDependencyPolicy, setEditTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
   const [editTaskProjectCommands, setEditTaskProjectCommands] = useState('')
 
+  const [isSubmittingTask, setIsSubmittingTask] = useState(false)
+  const [submittingTaskTarget, setSubmittingTaskTarget] = useState<'queued' | 'backlog' | null>(null)
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskDescription, setNewTaskDescription] = useState('')
   const [newTaskType, setNewTaskType] = useState('auto')
@@ -1730,7 +1787,7 @@ export default function App() {
     }
     const projectCommands = payload.project.commands || {}
     setSettingsProjectCommands(
-      Object.keys(projectCommands).length > 0 ? JSON.stringify(projectCommands, null, 2) : ''
+      Object.keys(projectCommands).length > 0 ? serializeProjectCommandsYaml(projectCommands) : ''
     )
     setSettingsGateCritical(String(payload.defaults.quality_gate.critical))
     setSettingsGateHigh(String(payload.defaults.quality_gate.high))
@@ -1803,7 +1860,7 @@ export default function App() {
       setEditTaskApprovalMode(task.approval_mode || 'human_review')
       setEditTaskHitlMode(task.hitl_mode || 'autopilot')
       setEditTaskDependencyPolicy(task.dependency_policy || 'prudent')
-      setEditTaskProjectCommands(task.project_commands ? JSON.stringify(task.project_commands, null, 2) : '')
+      setEditTaskProjectCommands(task.project_commands && Object.keys(task.project_commands).length > 0 ? serializeProjectCommandsYaml(task.project_commands) : '')
       if (task.status === 'blocked' && task.current_step) {
         setRetryFromStep(task.current_step)
       }
@@ -2085,7 +2142,7 @@ export default function App() {
         // to avoid a blank flash between step transitions.
         setPlanRefineStdout('')
         setPlanGenerateStdout('')
-        void loadTaskLogs(taskId, true)
+        void loadTaskLogs(taskId, true, logViewStepRef.current || undefined)
         return
       }
       if (!accum.logId && payloadLogId) {
@@ -2734,19 +2791,28 @@ export default function App() {
     }
     // For transitions the board reload changes which buttons render, so
     // clearing the pending flag early causes a brief flash of the idle
-    // button label before the new status takes effect.  Keep the pending
-    // state for transitions — React will unmount the old buttons when the
-    // task status updates.  For other mutations (save, retry) clear
-    // immediately so the UI becomes interactive again.
+    // button label before the new status takes effect.  Defer clearing
+    // for transitions so React renders the updated status first, then
+    // the new buttons become interactive.
     if (kind !== 'transition') {
       setTaskActionPending(null)
       setTaskActionDetail('')
+    } else {
+      // Use a microtask so the status-driven button swap renders first
+      queueMicrotask(() => {
+        setTaskActionPending(null)
+        setTaskActionDetail('')
+      })
     }
   }
 
   async function submitTask(event: FormEvent, statusOverride?: 'queued' | 'backlog'): Promise<void> {
     event.preventDefault()
     if (!newTaskTitle.trim()) return
+    if (isSubmittingTask) return
+    setIsSubmittingTask(true)
+    setSubmittingTaskTarget(statusOverride ?? 'queued')
+    try {
     let parsedMetadata: Record<string, unknown> | undefined
     if (newTaskMetadata.trim()) {
       try {
@@ -2889,6 +2955,10 @@ export default function App() {
     setNewTaskWorkerModel('')
     setWorkOpen(false)
     await reloadAll()
+    } finally {
+      setIsSubmittingTask(false)
+      setSubmittingTaskTarget(null)
+    }
   }
 
   async function previewImport(event: FormEvent): Promise<void> {
@@ -4099,7 +4169,7 @@ export default function App() {
                 <label className="field-label">Project commands override</label>
                 {configLocked ? (
                   selectedTaskView.project_commands && Object.keys(selectedTaskView.project_commands).length > 0 ? (
-                    <pre className="task-meta" style={{ whiteSpace: 'pre-wrap', fontSize: '0.85em' }}>{JSON.stringify(selectedTaskView.project_commands, null, 2)}</pre>
+                    <pre className="task-meta" style={{ whiteSpace: 'pre-wrap', fontSize: '0.85em' }}>{serializeProjectCommandsYaml(selectedTaskView.project_commands as Record<string, LanguageCommandSettings>)}</pre>
                   ) : (
                     <p className="task-meta">Not set (using global defaults)</p>
                   )
@@ -4115,7 +4185,14 @@ export default function App() {
                     />
                     <div className="inline-actions">
                       <button type="button" className="button button-xs"
-                        onClick={() => handleFormatJsonField('Project commands', editTaskProjectCommands, setEditTaskProjectCommands)}
+                        onClick={() => {
+                          try {
+                            setEditTaskProjectCommands(formatProjectCommandsField(editTaskProjectCommands))
+                            setSettingsError('')
+                          } catch (err) {
+                            setSettingsError(err instanceof Error ? err.message : 'Invalid project commands')
+                          }
+                        }}
                       >Format</button>
                       <button type="button" className="button button-xs"
                         onClick={() => setEditTaskProjectCommands('')}
@@ -5034,7 +5111,7 @@ export default function App() {
                 ) : null}
               </div>
               <p className="settings-subheading">Project Commands</p>
-              <label className="field-label" htmlFor="settings-project-commands">Project commands by language (JSON object)</label>
+              <label className="field-label" htmlFor="settings-project-commands">Project commands by language (YAML format)</label>
               <p className="field-label">
                 Used by workers during implement/review steps. Keys are language names (`python`, `typescript`, `go`) and each language supports `test`, `lint`, `typecheck`, `format`.
               </p>
@@ -5051,7 +5128,14 @@ export default function App() {
                   <button
                     className="button"
                     type="button"
-                    onClick={() => handleFormatJsonField('Project commands', settingsProjectCommands, setSettingsProjectCommands)}
+                    onClick={() => {
+                      try {
+                        setSettingsProjectCommands(formatProjectCommandsField(settingsProjectCommands))
+                        setSettingsError('')
+                      } catch (err) {
+                        setSettingsError(err instanceof Error ? err.message : 'Invalid project commands')
+                      }
+                    }}
                   >
                     Format
                   </button>
@@ -5529,13 +5613,14 @@ export default function App() {
               {(selectedTaskView.pipeline_template || []).length > 0 ? (() => {
                 const pipelineSteps = selectedTaskView.pipeline_template!
                 const currentStep = selectedTaskView.current_step || null
+                const pipelinePhase = String(selectedTaskView.metadata?.pipeline_phase || '') || currentStep
                 const isDone = selectedTaskView.status === 'done' || selectedTaskView.status === 'in_review'
-                const currentIdx = currentStep ? pipelineSteps.indexOf(currentStep) : -1
+                const phaseIdx = pipelinePhase ? pipelineSteps.indexOf(pipelinePhase) : -1
                 return (
                   <div className="pipeline-flow">
                     {pipelineSteps.map((step, idx) => {
-                      const isCurrent = step === currentStep && !isDone
-                      const isCompleted = isDone || (currentIdx >= 0 && idx < currentIdx)
+                      const isCurrent = step === pipelinePhase && !isDone
+                      const isCompleted = isDone || (phaseIdx >= 0 && idx < phaseIdx)
                       const cls = isCurrent ? 'pipeline-step is-current' : isCompleted ? 'pipeline-step is-completed' : 'pipeline-step'
                       return (
                         <span key={step} className="pipeline-step-wrap">
@@ -5653,7 +5738,6 @@ export default function App() {
               <div className="tab-row">
                 <button className={`tab ${createTab === 'task' ? 'is-active' : ''}`} onClick={() => setCreateTab('task')}>Create Task</button>
                 <button className={`tab ${createTab === 'import' ? 'is-active' : ''}`} onClick={() => setCreateTab('import')}>Import PRD</button>
-                <button className={`tab ${createTab === 'terminal' ? 'is-active' : ''}`} onClick={() => setCreateTab('terminal')}>Terminal</button>
               </div>
             </div>
 
@@ -5831,16 +5915,11 @@ export default function App() {
                 </div>
               ) : null}
 
-              {createTab === 'terminal' ? (
-                <div className="form-stack">
-                  <TerminalPanel projectDir={projectDir} />
-                </div>
-              ) : null}
             </div>
             {createTab === 'task' ? (
               <div className="modal-footer">
-                <button className="button button-primary" type="submit" form="create-task-form">Create & Queue</button>
-                <button className="button" type="button" onClick={(event) => void submitTask(event, 'backlog')}>Add to Backlog</button>
+                <button className="button button-primary" type="submit" form="create-task-form" disabled={isSubmittingTask}>{submittingTaskTarget === 'queued' ? 'Creating…' : 'Create & Queue'}</button>
+                <button className="button" type="button" onClick={(event) => void submitTask(event, 'backlog')} disabled={isSubmittingTask}>{submittingTaskTarget === 'backlog' ? 'Creating…' : 'Add to Backlog'}</button>
               </div>
             ) : null}
           </div>
@@ -5905,6 +5984,11 @@ export default function App() {
           </div>
         </div>
       ) : null}
+
+      <div className={`terminal-float ${terminalOpen ? 'is-open' : ''}`}>
+        <TerminalPanel projectDir={projectDir} visible={terminalOpen} onMinimize={() => setTerminalOpen(false)} />
+      </div>
+      <button className="terminal-fab" onClick={() => setTerminalOpen(v => !v)} aria-label="Toggle terminal" title="Terminal">&gt;_</button>
     </div>
   )
 }

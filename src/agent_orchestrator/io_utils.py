@@ -14,7 +14,7 @@ try:
 except ImportError:  # pragma: no cover - optional dependency
     yaml = None
 
-from .utils import _now_iso, _parse_iso
+from .utils import _parse_iso
 
 WINDOWS_LOCK_BYTES = 4096
 
@@ -35,6 +35,11 @@ class FileLock:
     """
 
     def __init__(self, lock_path: Path):
+        """Initialize the FileLock.
+
+        Args:
+            lock_path (Path): Filesystem path for this call.
+        """
         self.lock_path = lock_path
         self.handle: Optional[Any] = None
         self.lock_bytes = WINDOWS_LOCK_BYTES

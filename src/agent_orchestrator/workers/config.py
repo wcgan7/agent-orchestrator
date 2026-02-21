@@ -3,13 +3,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 
 WorkerProviderType = Literal["codex", "ollama", "claude"]
 
 
 @dataclass(frozen=True)
 class WorkerProviderSpec:
+    """Normalized settings for one named worker provider.
+
+    Attributes:
+        name: Provider name used in routing keys (for example, ``"codex"``).
+        type: Provider backend type that determines required fields and validation.
+        command: Shell command used to invoke CLI-backed providers (Codex/Claude).
+        model: Model identifier configured for this provider.
+        reasoning_effort: Optional reasoning level for providers that support it.
+        endpoint: Base URL for Ollama-compatible HTTP providers.
+        temperature: Sampling temperature for Ollama requests.
+        num_ctx: Context window size override for Ollama requests.
+    """
     name: str
     type: WorkerProviderType
     # codex / claude
@@ -24,7 +36,15 @@ class WorkerProviderSpec:
 
 @dataclass(frozen=True)
 class WorkersRuntimeConfig:
-    """Resolved worker configuration for a run."""
+    """Fully resolved worker-routing configuration for one orchestrator run.
+
+    Attributes:
+        default_worker: Provider name used when no step-specific routing exists.
+        routing: Mapping of step keys to provider names.
+        providers: Catalog of validated provider specs addressable by name.
+        default_model: Optional run-level model fallback.
+        cli_worker_override: Optional CLI override that forces all steps to one provider.
+    """
 
     default_worker: str
     routing: dict[str, str]
@@ -34,10 +54,26 @@ class WorkersRuntimeConfig:
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
+    """Return ``value`` only when it is a dictionary.
+
+    Args:
+        value (Any): Candidate configuration node.
+
+    Returns:
+        dict[str, Any]: The original dictionary value, or an empty dict for non-mappings.
+    """
     return value if isinstance(value, dict) else {}
 
 
 def _step_key(step: str) -> str:
+    """Normalize a routing step key.
+
+    Args:
+        step (str): Raw step identifier from routing or callers.
+
+    Returns:
+        str: Trimmed step key used for route lookup.
+    """
     return str(step or "").strip()
 
 
@@ -47,6 +83,20 @@ def get_workers_runtime_config(
     codex_command_fallback: str,
     cli_worker: Optional[str] = None,
 ) -> WorkersRuntimeConfig:
+    """Resolve worker providers, routing, and defaults from runtime config.
+
+    Args:
+        config (dict[str, Any]): Parsed runtime configuration dictionary that may
+            include ``workers.default``, ``workers.routing``, and ``workers.providers``.
+        codex_command_fallback (str): Command used for the built-in Codex provider
+            when no explicit ``workers.providers.codex.command`` is configured.
+        cli_worker (Optional[str]): Optional provider name passed from CLI flags to
+            override normal routing for all steps.
+
+    Returns:
+        WorkersRuntimeConfig: Normalized provider catalog plus routing/default
+        selections ready for orchestrator use.
+    """
     workers_cfg = _as_dict(config.get("workers"))
     routing = _as_dict(workers_cfg.get("routing"))
     providers_cfg = _as_dict(workers_cfg.get("providers"))
@@ -81,6 +131,7 @@ def get_workers_runtime_config(
         if typ not in {"codex", "ollama", "claude"}:
             continue
         if typ in {"codex", "claude"}:
+            provider_type = cast(WorkerProviderType, typ)
             command_fallback = codex_command_fallback if typ == "codex" else "claude -p"
             cmd = str(item.get("command") or command_fallback).strip()
             model = str(item.get("model") or "").strip() or None
@@ -89,7 +140,7 @@ def get_workers_runtime_config(
                 reasoning_effort = None
             providers[name] = WorkerProviderSpec(
                 name=name,
-                type=typ,
+                type=provider_type,
                 command=cmd,
                 model=model,
                 reasoning_effort=reasoning_effort,
@@ -132,6 +183,19 @@ def resolve_worker_for_step(runtime: WorkersRuntimeConfig, step: str) -> WorkerP
 
     Note: plan tasks are routed via the special key `"plan"` (since planning is
     represented by task.type="plan" rather than a dedicated TaskStep).
+
+    Args:
+        runtime (WorkersRuntimeConfig): Resolved provider/routing configuration.
+        step (str): Pipeline step name to route.
+
+    Returns:
+        WorkerProviderSpec: Validated provider spec selected for the requested step.
+
+    Raises:
+        ValueError: If routing selects an unknown provider name.
+        ValueError: If the selected provider is missing required fields
+            (``command`` for Codex/Claude, or ``endpoint``/``model`` for Ollama).
+        ValueError: If a provider type outside the supported set is encountered.
     """
     if runtime.cli_worker_override:
         name = runtime.cli_worker_override

@@ -1,3 +1,5 @@
+"""Core orchestration service for task lifecycle execution."""
+
 from __future__ import annotations
 
 import logging
@@ -8,12 +10,22 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 
 from ...collaboration.modes import should_gate
 from ...pipelines.registry import PipelineRegistry
 from ...workers.config import get_workers_runtime_config, resolve_worker_for_step
-from ..domain.models import PlanRefineJob, PlanRevision, ReviewCycle, ReviewFinding, RunRecord, Task, now_iso
+from ..domain.models import (
+    PlanRefineJob,
+    PlanRevision,
+    PlanRevisionStatus,
+    Priority,
+    ReviewCycle,
+    ReviewFinding,
+    RunRecord,
+    Task,
+    now_iso,
+)
 from ..events.bus import EventBus
 from ..storage.container import Container
 from ...worker import WorkerCancelledError
@@ -24,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 def _has_cycle(adj: dict[str, list[str]], from_id: str, to_id: str) -> bool:
-    """Return True if adding an edge from_id→to_id would create a cycle.
+    """Check whether adding edge from_id→to_id would introduce a cycle.
 
     Checks whether to_id can already reach from_id via existing edges.
     """
@@ -42,6 +54,7 @@ def _has_cycle(adj: dict[str, list[str]], from_id: str, to_id: str) -> bool:
 
 
 class OrchestratorService:
+    """Coordinate task scheduling, execution, review, and commit flow."""
     _GATE_MAPPING: dict[str, str] = {
         "plan": "before_plan",
         "implement": "before_implement",
@@ -57,6 +70,13 @@ class OrchestratorService:
         *,
         worker_adapter: WorkerAdapter | None = None,
     ) -> None:
+        """Initialize the OrchestratorService.
+
+        Args:
+            container (Container): Container for this call.
+            bus (EventBus): Bus for this call.
+            worker_adapter (WorkerAdapter | None): Worker adapter for this call.
+        """
         self.container = container
         self.bus = bus
         self.worker_adapter = worker_adapter or DefaultWorkerAdapter()
@@ -66,7 +86,7 @@ class OrchestratorService:
         self._drain = False
         self._run_branch: Optional[str] = None
         self._pool: ThreadPoolExecutor | None = None
-        self._futures: dict[str, Future] = {}
+        self._futures: dict[str, Future[Any]] = {}
         self._futures_lock = threading.Lock()
         self._merge_lock = threading.Lock()
         self._branch_lock = threading.Lock()
@@ -79,6 +99,11 @@ class OrchestratorService:
         return self._pool
 
     def status(self) -> dict[str, Any]:
+        """Build a status snapshot of queue depth and active worker usage.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         tasks = self.container.tasks.list()
@@ -96,6 +121,14 @@ class OrchestratorService:
         }
 
     def control(self, action: str) -> dict[str, Any]:
+        """Apply a control action and return updated orchestrator status.
+
+        Args:
+            action (str): Action for this call.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         if action == "pause":
@@ -116,6 +149,7 @@ class OrchestratorService:
         return self.status()
 
     def ensure_worker(self) -> None:
+        """Start the background scheduling loop when not already running."""
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
@@ -126,6 +160,11 @@ class OrchestratorService:
             self._thread.start()
 
     def shutdown(self, *, timeout: float = 10.0) -> None:
+        """Stop the scheduler and wait for in-flight work up to ``timeout``.
+
+        Args:
+            timeout (float): Timeout for this call.
+        """
         with self._lock:
             self._stop.set()
             thread = self._thread
@@ -168,6 +207,8 @@ class OrchestratorService:
             task.current_agent_id = None
             task.pending_gate = None
             task.error = "Recovered from interrupted run"
+            if isinstance(task.metadata, dict):
+                task.metadata.pop("pipeline_phase", None)
             self.container.tasks.upsert(task)
             self.bus.emit(
                 channel="tasks",
@@ -187,6 +228,11 @@ class OrchestratorService:
                     logger.error("Task %s raised unexpected error: %s", tid, exc, exc_info=exc)
 
     def tick_once(self) -> bool:
+        """Run one scheduler iteration and return whether work was dispatched.
+
+        Returns:
+            bool: `True` when the operation succeeds, otherwise `False`.
+        """
         self._sweep_futures()
 
         cfg = self.container.config.load()
@@ -208,6 +254,14 @@ class OrchestratorService:
         return True
 
     def run_task(self, task_id: str) -> Task:
+        """Synchronously execute one task by id and return the final record.
+
+        Args:
+            task_id (str): Identifier for the target task.
+
+        Returns:
+            Task: Result produced by this call.
+        """
         wait_existing = False
         with self._lock:
             task = self.container.tasks.get(task_id)
@@ -272,6 +326,14 @@ class OrchestratorService:
         return None
 
     def get_plan_document(self, task_id: str) -> dict[str, Any]:
+        """Build plan-revision state plus active refine-job metadata for a task.
+
+        Args:
+            task_id (str): Identifier for the target task.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -313,6 +375,23 @@ class OrchestratorService:
         status: Literal["draft", "committed"] = "draft",
         created_at: str | None = None,
     ) -> PlanRevision:
+        """Create and persist a plan revision for a task.
+
+        Args:
+            task_id (str): Identifier for the target task.
+            content (str): Content for this call.
+            source (Literal['worker_plan', 'worker_refine', 'human_edit', 'import']): Source for this call.
+            parent_revision_id (str | None): Identifier for the related parent revision.
+            step (str | None): Step for this call.
+            feedback_note (str | None): Feedback note for this call.
+            provider (str | None): Provider for this call.
+            model (str | None): Model for this call.
+            status (Literal['draft', 'committed']): Status for this call.
+            created_at (str | None): Created at for this call.
+
+        Returns:
+            PlanRevision: Result produced by this call.
+        """
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -363,6 +442,18 @@ class OrchestratorService:
         base_revision_id: str | None = None,
         priority: str = "normal",
     ) -> PlanRefineJob:
+        """Queue a plan refinement job and schedule background processing.
+
+        Args:
+            task_id (str): Identifier for the target task.
+            feedback (str): Feedback for this call.
+            instructions (str | None): Instructions for this call.
+            base_revision_id (str | None): Identifier for the related base revision.
+            priority (str): Priority for this call.
+
+        Returns:
+            PlanRefineJob: Result produced by this call.
+        """
         with self._lock:
             task = self.container.tasks.get(task_id)
             if not task:
@@ -408,6 +499,14 @@ class OrchestratorService:
         return job
 
     def process_plan_refine_job(self, job_id: str) -> PlanRefineJob | None:
+        """Execute one queued plan-refine job to completion.
+
+        Args:
+            job_id (str): Identifier for the target job.
+
+        Returns:
+            PlanRefineJob | None: Result produced by this call.
+        """
         job = self.container.plan_refine_jobs.get(job_id)
         if not job:
             return None
@@ -526,12 +625,36 @@ class OrchestratorService:
                 self.container.tasks.upsert(cleanup_task)
 
     def list_plan_refine_jobs(self, task_id: str) -> list[PlanRefineJob]:
+        """List refine jobs for a task.
+
+        Args:
+            task_id (str): Task identifier whose refine-job history should be returned.
+
+        Returns:
+            list[PlanRefineJob]: Refine jobs for the task, ordered by repository behavior.
+
+        Raises:
+            ValueError: If the task does not exist.
+        """
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
         return self.container.plan_refine_jobs.for_task(task_id)
 
     def get_plan_refine_job(self, task_id: str, job_id: str) -> PlanRefineJob:
+        """Fetch one refine job and verify it belongs to the given task.
+
+        Args:
+            task_id (str): Parent task identifier expected for the refine job.
+            job_id (str): Refine-job identifier to load.
+
+        Returns:
+            PlanRefineJob: The matching refine job owned by ``task_id``.
+
+        Raises:
+            ValueError: If the task does not exist.
+            ValueError: If the job does not exist or belongs to a different task.
+        """
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -541,6 +664,19 @@ class OrchestratorService:
         return job
 
     def commit_plan_revision(self, task_id: str, revision_id: str) -> str:
+        """Mark one plan revision as committed and sync task/workdoc metadata.
+
+        Args:
+            task_id (str): Task identifier that owns the plan revision.
+            revision_id (str): Revision identifier to mark as committed.
+
+        Returns:
+            str: The committed revision identifier.
+
+        Raises:
+            ValueError: If the task does not exist.
+            ValueError: If the revision does not exist for the task.
+        """
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -550,7 +686,7 @@ class OrchestratorService:
         for revision in self.container.plan_revisions.for_task(task_id):
             next_status = "committed" if revision.id == revision_id else "draft"
             if revision.status != next_status:
-                revision.status = next_status
+                revision.status = cast(PlanRevisionStatus, next_status)
                 self.container.plan_revisions.upsert(revision)
         task.metadata["latest_plan_revision_id"] = revision_id
         task.metadata["committed_plan_revision_id"] = revision_id
@@ -608,6 +744,26 @@ class OrchestratorService:
         revision_id: str | None = None,
         plan_override: str | None = None,
     ) -> tuple[str, str | None]:
+        """Resolve plan text and optional revision id for task generation.
+
+        Args:
+            task_id (str): Task identifier whose plan should be resolved.
+            source (Literal['committed', 'revision', 'override', 'latest']): Source
+                strategy to use when selecting plan text.
+            revision_id (str | None): Required when ``source='revision'``; ignored
+                otherwise.
+            plan_override (str | None): Required non-empty text when
+                ``source='override'``.
+
+        Returns:
+            tuple[str, str | None]: A tuple of ``(plan_text, revision_id)``.
+            ``revision_id`` is ``None`` only when ``source='override'``.
+
+        Raises:
+            ValueError: If the task does not exist.
+            ValueError: If source-specific required inputs are missing.
+            ValueError: If the requested revision/committed plan cannot be found.
+        """
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -647,7 +803,7 @@ class OrchestratorService:
         return revisions[-1].content, revisions[-1].id
 
     def _resolve_task_plan_excerpt(self, task: Task, *, max_chars: int = 800) -> str:
-        """Return a short best-effort plan excerpt for objective context."""
+        """Extract a bounded plan snippet for prompts and conflict resolution context."""
         if not isinstance(task.metadata, dict):
             return ""
 
@@ -714,7 +870,7 @@ class OrchestratorService:
 
     # Maps step names to (heading, placeholder_step) pairs.
     # placeholder_step is the step name used in the template placeholder text.
-    _WORKDOC_SECTION_MAP: dict[str, tuple[str, str]] = {
+    _WORKDOC_SECTION_MAP: dict[str, tuple[str, str | None]] = {
         "plan": ("## Plan", "plan"),
         "initiative_plan": ("## Plan", "plan"),
         "analyze": ("## Analysis", "analyze"),
@@ -1268,7 +1424,7 @@ _Pending: will be populated by the report step._
             return "feature"
 
     def _workdoc_template_for_task(self, task: Task) -> str:
-        """Return the workdoc template body for the task's pipeline."""
+        """Select the default workdoc template for the task's pipeline."""
         pipeline_id = self._pipeline_id_for_task(task)
         template_by_pipeline: dict[str, str] = {
             "feature": self._FEATURE_WORKDOC_TEMPLATE,
@@ -1289,14 +1445,14 @@ _Pending: will be populated by the report step._
         }
         return template_by_pipeline.get(pipeline_id, self._GENERIC_WORKDOC_TEMPLATE)
 
-    def _workdoc_section_for_step(self, task: Task, step: str) -> tuple[str, str] | None:
+    def _workdoc_section_for_step(self, task: Task, step: str) -> tuple[str, str | None] | None:
         """Resolve section heading/placeholder mapping for a step and task pipeline."""
         section = self._WORKDOC_SECTION_MAP.get(step)
         if not section:
             return None
         heading, placeholder_step = section
         pipeline_id = self._pipeline_id_for_task(task)
-        section_overrides: dict[str, dict[str, tuple[str, str]]] = {
+        section_overrides: dict[str, dict[str, tuple[str, str | None]]] = {
             "security_audit": {
                 "report": ("## Security Report", "report"),
                 "generate_tasks": ("## Generated Remediation Tasks", "generate_tasks"),
@@ -1532,12 +1688,19 @@ _Pending: will be populated by the report step._
         )
 
     def _step_project_dir(self, task: Task) -> Path:
-        """Return the effective project dir for a task (worktree or main)."""
+        """Resolve task worktree directory, falling back to the main project root."""
         worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
         return Path(worktree_path) if worktree_path else self.container.project_dir
 
     def get_workdoc(self, task_id: str) -> dict[str, Any]:
-        """Read canonical workdoc for a task. Returns {task_id, content, exists}."""
+        """Read canonical workdoc for a task. Returns {task_id, content, exists}.
+
+        Args:
+            task_id (str): Identifier for the target task.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         canonical = self._workdoc_canonical_path(task_id)
         if canonical.exists():
             return {"task_id": task_id, "content": canonical.read_text(encoding="utf-8"), "exists": True}
@@ -1581,6 +1744,75 @@ _Pending: will be populated by the report step._
                 capture_output=True,
                 text=True,
             )
+
+    def approve_and_merge(self, task: Task) -> dict[str, Any]:
+        """Merge a preserved branch to the run branch on user approval.
+
+        Called when a blocked task is approved and its work was preserved on a
+        branch (for example, after review-attempt limits were hit).
+
+        Args:
+            task (Task): Task carrying preserved branch metadata.
+
+        Returns:
+            dict[str, Any]: Merge outcome payload with ``status``. Includes
+            ``commit_sha`` on successful merge and ``status='merge_conflict'``
+            when automatic conflict resolution fails.
+        """
+        branch = task.metadata.get("preserved_branch")
+        if not branch:
+            return {"status": "ok"}
+
+        # Verify the branch exists
+        result = subprocess.run(
+            ["git", "branch", "--list", branch],
+            cwd=self.container.project_dir,
+            capture_output=True, text=True,
+        )
+        if not result.stdout.strip():
+            task.metadata.pop("preserved_branch", None)
+            self.container.tasks.upsert(task)
+            return {"status": "ok"}
+
+        self._ensure_branch()
+
+        with self._merge_lock:
+            try:
+                subprocess.run(
+                    ["git", "merge", branch, "--no-edit"],
+                    cwd=self.container.project_dir,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError:
+                resolved = self._resolve_merge_conflict(task, branch)
+                if not resolved:
+                    subprocess.run(
+                        ["git", "merge", "--abort"],
+                        cwd=self.container.project_dir,
+                        capture_output=True, text=True,
+                    )
+                    task.metadata["merge_conflict"] = True
+                    self.container.tasks.upsert(task)
+                    return {"status": "merge_conflict"}
+
+            # Capture SHA while still holding merge lock
+            sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self.container.project_dir,
+                capture_output=True, text=True,
+            ).stdout.strip()
+
+        subprocess.run(
+            ["git", "branch", "-D", branch],
+            cwd=self.container.project_dir,
+            capture_output=True, text=True,
+        )
+        task.metadata.pop("preserved_branch", None)
+        task.metadata.pop("merge_conflict", None)
+        self.container.tasks.upsert(task)
+        return {"status": "ok", "commit_sha": sha}
 
     def _resolve_merge_conflict(self, task: Task, branch: str) -> bool:
         saved_worktree_dir = task.metadata.get("worktree_dir")
@@ -1662,6 +1894,12 @@ _Pending: will be populated by the report step._
             return
         if not (self.container.project_dir / ".git").exists():
             return
+        # Collect branches referenced as preserved by any task
+        preserved_branches: set[str] = set()
+        for t in self.container.tasks.list():
+            pb = t.metadata.get("preserved_branch") if isinstance(t.metadata, dict) else None
+            if pb:
+                preserved_branches.add(str(pb))
         for child in worktrees_dir.iterdir():
             if child.is_dir():
                 branch_name = f"task-{child.name}"
@@ -1671,12 +1909,14 @@ _Pending: will be populated by the report step._
                     capture_output=True,
                     text=True,
                 )
-                subprocess.run(
-                    ["git", "branch", "-D", branch_name],
-                    cwd=self.container.project_dir,
-                    capture_output=True,
-                    text=True,
-                )
+                # Only delete branch if it's not preserved by a task
+                if branch_name not in preserved_branches:
+                    subprocess.run(
+                        ["git", "branch", "-D", branch_name],
+                        cwd=self.container.project_dir,
+                        capture_output=True,
+                        text=True,
+                    )
 
     def _role_for_task(self, task: Task) -> str:
         cfg = self.container.config.load()
@@ -1745,7 +1985,7 @@ _Pending: will be populated by the report step._
             return None
 
     def _has_uncommitted_changes(self, cwd: Path) -> bool:
-        """Return True if the working tree has staged or unstaged changes.
+        """Check whether the working tree has staged or unstaged changes.
 
         Returns True on git failure (no repo, etc.) to avoid false blocking.
         """
@@ -1757,6 +1997,43 @@ _Pending: will be populated by the report step._
             return bool(result.stdout.strip())
         except subprocess.CalledProcessError:
             return True
+
+    def _preserve_worktree_work(self, task: Task, worktree_dir: Path) -> bool:
+        """Commit agent edits in the worktree, remove the worktree but keep the branch.
+
+        Returns True if a branch was preserved with work on it.
+        """
+        branch = f"task-{task.id}"
+        try:
+            self._cleanup_workdoc_for_commit(worktree_dir)
+            self._commit_for_task(task, worktree_dir)
+
+            # Check if the branch has any commits beyond the run branch base
+            base_ref = self._run_branch or "HEAD"
+            try:
+                result = subprocess.run(
+                    ["git", "log", f"{base_ref}..{branch}", "--oneline"],
+                    cwd=self.container.project_dir,
+                    capture_output=True, text=True, check=True,
+                )
+                if not result.stdout.strip():
+                    return False
+            except subprocess.CalledProcessError:
+                # If we can't compare, assume there's work to preserve
+                pass
+
+            # Remove worktree directory but keep the branch
+            subprocess.run(
+                ["git", "worktree", "remove", str(worktree_dir), "--force"],
+                cwd=self.container.project_dir,
+                capture_output=True, text=True,
+            )
+            task.metadata["preserved_branch"] = branch
+            self.container.tasks.upsert(task)
+            return True
+        except Exception:
+            logger.exception("Failed to preserve worktree work for task %s", task.id)
+            return False
 
     def _exceeds_quality_gate(self, task: Task, findings: list[ReviewFinding]) -> bool:
         gate = dict(task.quality_gate or {})
@@ -1858,7 +2135,7 @@ _Pending: will be populated by the report step._
             task.metadata["verify_output"] = "\n".join(parts)
 
     def _is_non_actionable_verify_failure(self, task: Task, summary: str | None) -> bool:
-        """Return True when a verify failure is due to environment/tooling, not code."""
+        """Classify whether verify failed because of environment or tooling issues."""
         if isinstance(task.metadata, dict):
             reason_code = str(task.metadata.get("verify_reason_code") or "").strip().lower()
             if reason_code in self._NON_ACTIONABLE_VERIFY_REASON_CODES:
@@ -2020,11 +2297,14 @@ _Pending: will be populated by the report step._
         for item in task_defs:
             if not isinstance(item, dict):
                 continue
+            priority = str(item.get("priority") or parent.priority)
+            if priority not in {"P0", "P1", "P2", "P3"}:
+                priority = parent.priority
             child = Task(
                 title=str(item.get("title") or "Generated task"),
                 description=str(item.get("description") or ""),
                 task_type=str(item.get("task_type") or "feature"),
-                priority=str(item.get("priority") or parent.priority),
+                priority=cast(Priority, priority),
                 parent_id=parent.id,
                 source="generated",
                 labels=list(item.get("labels") or []),
@@ -2087,6 +2367,19 @@ _Pending: will be populated by the report step._
 
         This supports a two-phase workflow: run a plan step, review the output,
         then explicitly trigger task generation from the plan.
+
+        Args:
+            task_id (str): Parent task identifier that will receive generated children.
+            plan_text (str): Plan content to pass into the ``generate_tasks`` worker step.
+            infer_deps (bool): Whether to apply ``depends_on`` links returned by
+                the worker to the created child tasks.
+
+        Returns:
+            list[str]: Identifiers of newly created child tasks.
+
+        Raises:
+            ValueError: If the parent task does not exist.
+            ValueError: If worker execution fails or yields no valid tasks.
         """
         task = self.container.tasks.get(task_id)
         if not task:
@@ -2317,7 +2610,7 @@ _Pending: will be populated by the report step._
         )
 
         try:
-            result = self.worker_adapter.run_step(task=synthetic, step="analyze_deps", attempt=1)
+            result = self.worker_adapter.run_step_ephemeral(task=synthetic, step="analyze_deps", attempt=1)
             if result.status == "ok" and result.dependency_edges:
                 self._apply_dependency_edges(candidates, result.dependency_edges, all_tasks)
         except Exception:
@@ -2435,6 +2728,19 @@ _Pending: will be populated by the report step._
     def _execute_task_inner(self, task: Task) -> None:
         worktree_dir: Optional[Path] = None
         try:
+            # Clean up any preserved branch from a previous run (e.g. retry
+            # after review-cap block or cancellation) so _create_worktree can
+            # create a fresh branch with the same name.
+            old_preserved = task.metadata.pop("preserved_branch", None)
+            if old_preserved:
+                subprocess.run(
+                    ["git", "branch", "-D", str(old_preserved)],
+                    cwd=self.container.project_dir,
+                    capture_output=True, text=True,
+                )
+                task.metadata.pop("merge_conflict", None)
+                self.container.tasks.upsert(task)
+
             worktree_dir = self._create_worktree(task)
             if worktree_dir:
                 task.metadata["worktree_dir"] = str(worktree_dir)
@@ -2468,6 +2774,7 @@ _Pending: will be populated by the report step._
 
             task.run_ids.append(run.id)
             task.current_step = steps[0] if steps else None
+            task.metadata["pipeline_phase"] = steps[0] if steps else None
             task.status = "in_progress"
             task.current_agent_id = self._choose_agent_for_task(task)
             self.container.tasks.upsert(task)
@@ -2499,6 +2806,7 @@ _Pending: will be populated by the report step._
                         continue
                 self._check_cancelled(task)
                 task.current_step = step
+                task.metadata["pipeline_phase"] = step
                 self.container.tasks.upsert(task)
                 gate_name = self._GATE_MAPPING.get(step)
                 if gate_name and should_gate(mode, gate_name):
@@ -2526,12 +2834,14 @@ _Pending: will be populated by the report step._
                             self.container.runs.upsert(run)
 
                             task.current_step = "implement_fix"
+                            task.metadata["pipeline_phase"] = step
                             self.container.tasks.upsert(task)
                             if not self._run_non_review_step(task, run, "implement_fix", attempt=fix_attempt + 1):
                                 return
                             task.metadata.pop("verify_failure", None)
                             task.metadata.pop("verify_output", None)
                             task.current_step = step
+                            task.metadata["pipeline_phase"] = step
                             self.container.tasks.upsert(task)
                             if self._run_non_review_step(task, run, step, attempt=fix_attempt + 1):
                                 fixed = True
@@ -2553,6 +2863,7 @@ _Pending: will be populated by the report step._
                     task.status = "blocked"
                     task.error = "No file changes detected after implementation"
                     task.current_step = last_phase1_step or "implement"
+                    task.metadata["pipeline_phase"] = last_phase1_step or "implement"
                     self.container.tasks.upsert(task)
                     self._finalize_run(task, run, status="blocked", summary="Blocked: no changes produced by implementation steps")
                     self.bus.emit(
@@ -2578,14 +2889,29 @@ _Pending: will be populated by the report step._
                     self._check_cancelled(task)
                     review_attempt += 1
                     task.current_step = "review"
+                    task.metadata["pipeline_phase"] = "review"
                     if review_attempt > 1:
                         task.metadata["review_history"] = self._build_review_history_summary(task.id)
                     else:
                         task.metadata.pop("review_history", None)
                     self.container.tasks.upsert(task)
+                    review_project_dir = worktree_dir or self.container.project_dir
+                    self._refresh_workdoc(task, review_project_dir)
                     review_started = now_iso()
                     findings, review_result = self._findings_from_result(task, review_attempt)
+                    # Build step log immediately so log paths are always stored
+                    # in run.steps (same pattern as _run_non_review_step).
+                    review_step_log: dict[str, Any] = {"step": "review", "status": "ok", "ts": now_iso(), "started_at": review_started}
+                    review_last_logs = task.metadata.get("last_logs") if isinstance(task.metadata, dict) else None
+                    if isinstance(review_last_logs, dict):
+                        for key in ("stdout_path", "stderr_path", "progress_path"):
+                            if review_last_logs.get(key):
+                                review_step_log[key] = review_last_logs[key]
                     if review_result.human_blocking_issues:
+                        review_step_log["status"] = "blocked"
+                        review_step_log["human_blocking_issues"] = review_result.human_blocking_issues
+                        run.steps.append(review_step_log)
+                        self.container.runs.upsert(run)
                         self._block_for_human_issues(
                             task,
                             run,
@@ -2595,10 +2921,14 @@ _Pending: will be populated by the report step._
                         )
                         return
                     if review_result.status != "ok":
+                        review_step_log["status"] = review_result.status or "error"
+                        run.steps.append(review_step_log)
+                        self.container.runs.upsert(run)
                         task.status = "blocked"
                         task.error = review_result.summary or "Review step failed"
                         task.pending_gate = None
                         task.current_step = "review"
+                        task.metadata["pipeline_phase"] = "review"
                         self.container.tasks.upsert(task)
                         self._finalize_run(task, run, status="blocked", summary="Blocked during review")
                         self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
@@ -2616,12 +2946,8 @@ _Pending: will be populated by the report step._
                     )
                     self.container.reviews.append(cycle)
                     self._sync_workdoc_review(task, cycle, worktree_dir or self.container.project_dir)
-                    review_step_log: dict[str, Any] = {"step": "review", "status": cycle.decision, "ts": now_iso(), "started_at": review_started, "open_counts": open_counts}
-                    review_last_logs = task.metadata.get("last_logs") if isinstance(task.metadata, dict) else None
-                    if isinstance(review_last_logs, dict):
-                        for key in ("stdout_path", "stderr_path", "progress_path"):
-                            if review_last_logs.get(key):
-                                review_step_log[key] = review_last_logs[key]
+                    review_step_log["status"] = cycle.decision
+                    review_step_log["open_counts"] = open_counts
                     run.steps.append(review_step_log)
                     self.container.runs.upsert(run)
                     self.bus.emit(
@@ -2646,6 +2972,7 @@ _Pending: will be populated by the report step._
                     # Run implement_fix
                     task.retry_count += 1
                     task.current_step = "implement_fix"
+                    task.metadata["pipeline_phase"] = "review"
                     self.container.tasks.upsert(task)
                     if not self._run_non_review_step(task, run, "implement_fix", attempt=review_attempt):
                         return
@@ -2653,10 +2980,12 @@ _Pending: will be populated by the report step._
                     if post_fix_validation_step:
                         # Run post-fix validation with retry loop (same as Phase 1)
                         task.current_step = post_fix_validation_step
+                        task.metadata["pipeline_phase"] = "review"
                         self.container.tasks.upsert(task)
                         if not self._run_non_review_step(task, run, post_fix_validation_step, attempt=review_attempt):
                             if self._consume_verify_non_actionable_flag(task):
                                 task.current_step = "review"
+                                task.metadata["pipeline_phase"] = "review"
                                 self.container.tasks.upsert(task)
                                 continue
                             validation_fixed = False
@@ -2673,12 +3002,14 @@ _Pending: will be populated by the report step._
                                 self.container.runs.upsert(run)
 
                                 task.current_step = "implement_fix"
+                                task.metadata["pipeline_phase"] = "review"
                                 self.container.tasks.upsert(task)
                                 if not self._run_non_review_step(task, run, "implement_fix", attempt=vfix + 1):
                                     return
                                 task.metadata.pop("verify_failure", None)
                                 task.metadata.pop("verify_output", None)
                                 task.current_step = post_fix_validation_step
+                                task.metadata["pipeline_phase"] = "review"
                                 self.container.tasks.upsert(task)
                                 if self._run_non_review_step(task, run, post_fix_validation_step, attempt=vfix + 1):
                                     validation_fixed = True
@@ -2693,9 +3024,13 @@ _Pending: will be populated by the report step._
                 if not review_passed:
                     task.metadata.pop("review_history", None)
                     task.metadata.pop("verify_environment_note", None)
+                    if worktree_dir and worktree_dir.exists():
+                        if self._preserve_worktree_work(task, worktree_dir):
+                            worktree_dir = None  # prevent double-cleanup in finally
                     task.status = "blocked"
                     task.error = "Review attempt cap exceeded"
                     task.current_step = "review"
+                    task.metadata["pipeline_phase"] = "review"
                     self.container.tasks.upsert(task)
                     self._finalize_run(task, run, status="blocked", summary="Blocked due to unresolved review findings")
                     self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
@@ -2705,6 +3040,7 @@ _Pending: will be populated by the report step._
             self._check_cancelled(task)
             if has_commit:
                 task.current_step = "commit"
+                task.metadata["pipeline_phase"] = "commit"
                 self.container.tasks.upsert(task)
                 if should_gate(mode, "before_commit"):
                     if not self._wait_for_gate(task, "before_commit"):
@@ -2740,7 +3076,7 @@ _Pending: will be populated by the report step._
                 if task.metadata.get("merge_conflict"):
                     task.status = "blocked"
                     task.error = "Merge conflict could not be resolved automatically"
-                    task.metadata["unmerged_branch"] = f"task-{task.id}"
+                    task.metadata["preserved_branch"] = f"task-{task.id}"
                     self.container.tasks.upsert(task)
                     self._finalize_run(task, run, status="blocked", summary="Blocked due to unresolved merge conflict")
                     self.bus.emit(
@@ -2755,12 +3091,14 @@ _Pending: will be populated by the report step._
                 if task.approval_mode == "auto_approve":
                     task.status = "done"
                     task.current_step = None
+                    task.metadata.pop("pipeline_phase", None)
                     run.status = "done"
                     run.summary = "Completed with auto-approve"
                     self.bus.emit(channel="tasks", event_type="task.done", entity_id=task.id, payload={"commit": commit_sha})
                 else:
                     task.status = "in_review"
                     task.current_step = None
+                    task.metadata.pop("pipeline_phase", None)
                     run.status = "in_review"
                     run.summary = "Awaiting human review"
                     self.bus.emit(channel="review", event_type="task.awaiting_human", entity_id=task.id, payload={"commit": commit_sha})
@@ -2785,6 +3123,7 @@ _Pending: will be populated by the report step._
                 self._run_summarize_step(task, run)
                 task.status = "done"
                 task.current_step = None
+                task.metadata.pop("pipeline_phase", None)
                 run.status = "done"
                 run.summary = "Pipeline completed"
                 self.bus.emit(channel="tasks", event_type="task.done", entity_id=task.id, payload={})
@@ -2796,20 +3135,35 @@ _Pending: will be populated by the report step._
             run.finished_at = now_iso()
             self.container.runs.upsert(run)
         finally:
-            # Clean up worktree on any failure path
             if worktree_dir and worktree_dir.exists():
-                subprocess.run(
-                    ["git", "worktree", "remove", str(worktree_dir), "--force"],
-                    cwd=self.container.project_dir,
-                    capture_output=True,
-                    text=True,
-                )
-                subprocess.run(
-                    ["git", "branch", "-D", f"task-{task.id}"],
-                    cwd=self.container.project_dir,
-                    capture_output=True,
-                    text=True,
-                )
+                preserved = task.metadata.get("preserved_branch")
+                if not preserved:
+                    # Safety net: try to commit and preserve work that would be lost
+                    try:
+                        if self._has_uncommitted_changes(worktree_dir):
+                            self._preserve_worktree_work(task, worktree_dir)
+                            preserved = task.metadata.get("preserved_branch")
+                    except Exception:
+                        pass  # best-effort; fall through to full cleanup
+                if preserved:
+                    # Branch preserved — remove worktree dir only, keep branch
+                    subprocess.run(
+                        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+                        cwd=self.container.project_dir,
+                        capture_output=True, text=True,
+                    )
+                else:
+                    # Nothing to preserve — full cleanup (worktree + branch)
+                    subprocess.run(
+                        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+                        cwd=self.container.project_dir,
+                        capture_output=True, text=True,
+                    )
+                    subprocess.run(
+                        ["git", "branch", "-D", f"task-{task.id}"],
+                        cwd=self.container.project_dir,
+                        capture_output=True, text=True,
+                    )
             if task.metadata.pop("worktree_dir", None):
                 self.container.tasks.upsert(task)
 
@@ -2820,6 +3174,16 @@ def create_orchestrator(
     *,
     worker_adapter: WorkerAdapter | None = None,
 ) -> OrchestratorService:
+    """Build, start, and return an orchestrator instance for a container.
+
+    Args:
+        container (Container): Container for this call.
+        bus (EventBus): Bus for this call.
+        worker_adapter (WorkerAdapter | None): Worker adapter for this call.
+
+    Returns:
+        OrchestratorService: Result produced by this call.
+    """
     if worker_adapter is None:
         from .live_worker_adapter import LiveWorkerAdapter
 

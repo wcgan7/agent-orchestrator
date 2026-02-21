@@ -17,7 +17,6 @@ from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
     build_step_prompt,
     detect_project_languages,
 )
-from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 from agent_orchestrator.runtime.storage.container import Container
 from agent_orchestrator.workers.config import WorkerProviderSpec
 from agent_orchestrator.workers.run import WorkerRunResult
@@ -1476,12 +1475,14 @@ class TestStepOutputInjection:
     """Tests for prior step output injection into build_step_prompt."""
 
     def test_plan_output_not_injected_for_implementation(self) -> None:
+        """Test that plan output not injected for implementation."""
         task = _make_task(metadata={"step_outputs": {"plan": "Use adapter pattern."}})
         prompt = build_step_prompt(task=task, step="implement", attempt=1)
         assert "## Output from prior 'plan' step" not in prompt
         assert "Use adapter pattern." not in prompt
 
     def test_analyze_and_plan_not_injected_for_implementation(self) -> None:
+        """Test that analyze and plan not injected for implementation."""
         task = _make_task(metadata={
             "step_outputs": {"analyze": "Found 3 modules.", "plan": "Refactor X."}
         })
@@ -1492,12 +1493,14 @@ class TestStepOutputInjection:
         assert "Refactor X." not in prompt
 
     def test_verify_output_injected_for_review(self) -> None:
+        """Test that verify output injected for review."""
         task = _make_task(metadata={"step_outputs": {"verify": "All tests pass."}})
         prompt = build_step_prompt(task=task, step="review", attempt=1)
         assert "## Output from prior 'verify' step" in prompt
         assert "All tests pass." in prompt
 
     def test_all_outputs_injected_for_reporting(self) -> None:
+        """Test that all outputs injected for reporting."""
         task = _make_task(metadata={
             "step_outputs": {"gather": "Data collected.", "analyze": "Results look good."}
         })
@@ -1506,6 +1509,7 @@ class TestStepOutputInjection:
         assert "## Output from prior 'analyze' step" in prompt
 
     def test_security_report_injects_only_scan_outputs(self) -> None:
+        """Test that security report injects only scan outputs."""
         task = _make_task(
             task_type="security",
             metadata={
@@ -1522,12 +1526,14 @@ class TestStepOutputInjection:
         assert "## Output from prior 'analyze' step" not in prompt
 
     def test_plan_injected_for_task_generation(self) -> None:
+        """Test that plan injected for task generation."""
         task = _make_task(metadata={"step_outputs": {"plan": "Split into 3 subtasks."}})
         prompt = build_step_prompt(task=task, step="generate_tasks", attempt=1)
         assert "## Output from prior 'plan' step" in prompt
         assert "Split into 3 subtasks." in prompt
 
     def test_initiative_plan_injected_for_task_generation(self) -> None:
+        """Test that initiative plan injected for task generation."""
         task = _make_task(
             task_type="initiative_plan",
             metadata={"step_outputs": {"initiative_plan": "Sequence workstreams by platform risk."}},
@@ -1539,6 +1545,7 @@ class TestStepOutputInjection:
         assert "## Output from prior 'analyze' step" not in prompt
 
     def test_security_generate_tasks_uses_report_and_scan_outputs(self) -> None:
+        """Test that security generate tasks uses report and scan outputs."""
         task = _make_task(
             task_type="security",
             metadata={
@@ -1558,6 +1565,7 @@ class TestStepOutputInjection:
         assert "## Remediation task generation focus" in prompt
 
     def test_only_reproduce_injected_for_diagnose(self) -> None:
+        """Test that only reproduce injected for diagnose."""
         task = _make_task(
             task_type="bug",
             metadata={"step_outputs": {"reproduce": "Fails on null payload", "plan": "Old plan text"}},
@@ -1568,22 +1576,26 @@ class TestStepOutputInjection:
         assert "## Output from prior 'plan' step" not in prompt
 
     def test_no_injection_for_verification(self) -> None:
+        """Test that no injection for verification."""
         task = _make_task(metadata={"step_outputs": {"plan": "Some plan."}})
         prompt = build_step_prompt(task=task, step="verify", attempt=1)
         assert "## Output from prior" not in prompt
 
     def test_no_injection_for_planning(self) -> None:
+        """Test that no injection for planning."""
         task = _make_task(metadata={"step_outputs": {"gather": "Info gathered."}})
         prompt = build_step_prompt(task=task, step="plan", attempt=1)
         assert "## Output from prior" not in prompt
 
     def test_no_analyze_injection_for_plan(self) -> None:
+        """Test that no analyze injection for plan."""
         task = _make_task(metadata={"step_outputs": {"analyze": "Analysis summary."}})
         prompt = build_step_prompt(task=task, step="plan", attempt=1)
         assert "## Output from prior" not in prompt
         assert "Analysis summary." not in prompt
 
     def test_no_injection_for_initiative_plan(self) -> None:
+        """Test that no injection for initiative plan."""
         task = _make_task(
             task_type="initiative_plan",
             metadata={"step_outputs": {"analyze": "Analysis text."}},
@@ -1593,16 +1605,19 @@ class TestStepOutputInjection:
         assert "Analysis text." not in prompt
 
     def test_empty_values_skipped(self) -> None:
+        """Test that empty values skipped."""
         task = _make_task(metadata={"step_outputs": {"plan": "", "analyze": "   "}})
         prompt = build_step_prompt(task=task, step="implement", attempt=1)
         assert "## Output from prior" not in prompt
 
     def test_missing_step_outputs_no_crash(self) -> None:
+        """Test that missing step outputs no crash."""
         task = _make_task(metadata={})
         prompt = build_step_prompt(task=task, step="implement", attempt=1)
         assert "## Output from prior" not in prompt
 
     def test_coexists_with_review_findings(self) -> None:
+        """Test that coexists with review findings."""
         task = _make_task(metadata={
             "step_outputs": {"plan": "Fix the bug."},
             "review_findings": [{"severity": "high", "summary": "Missing null check"}],
@@ -1613,6 +1628,7 @@ class TestStepOutputInjection:
         assert "Missing null check" in prompt
 
     def test_fix_includes_verify_failure_and_output(self) -> None:
+        """Test that fix includes verify failure and output."""
         task = _make_task(metadata={
             "verify_failure": "pytest failed",
             "verify_reason_code": "assertion_failure",
@@ -1628,6 +1644,7 @@ class TestStepOutputInjection:
         assert "AssertionError" in prompt
 
     def test_fix_includes_retry_and_requested_guidance(self) -> None:
+        """Test that fix includes retry and requested guidance."""
         task = _make_task(metadata={
             "retry_guidance": {"previous_error": "timed out", "guidance": "narrow scope"},
             "requested_changes": {"guidance": "add edge-case test"},
@@ -1648,7 +1665,9 @@ class TestStepOutputInjection:
 
 
 class TestWorkdocPromptInstructions:
+    """Tests for step-specific workdoc guidance in worker prompts."""
     def test_prompt_includes_workdoc_instructions_for_plan(self) -> None:
+        """Test that prompt includes workdoc instructions for plan."""
         task = _make_task()
         prompt = build_step_prompt(task=task, step="plan", attempt=1)
         assert "## Working Document" in prompt
@@ -1656,6 +1675,7 @@ class TestWorkdocPromptInstructions:
         assert ".workdoc.md" in prompt
 
     def test_prompt_includes_workdoc_instructions_for_analyze(self) -> None:
+        """Test that prompt includes workdoc instructions for analyze."""
         task = _make_task()
         prompt = build_step_prompt(task=task, step="analyze", attempt=1)
         assert "## Working Document" in prompt
@@ -1665,6 +1685,7 @@ class TestWorkdocPromptInstructions:
         assert "## Implementation Phases" not in prompt
 
     def test_prompt_includes_workdoc_instructions_for_diagnose(self) -> None:
+        """Test that prompt includes workdoc instructions for diagnose."""
         task = _make_task(task_type="bug")
         prompt = build_step_prompt(task=task, step="diagnose", attempt=1)
         assert "## Working Document" in prompt
@@ -1673,6 +1694,7 @@ class TestWorkdocPromptInstructions:
         assert "## Root Cause Analysis" in prompt
 
     def test_prompt_includes_workdoc_instructions_for_implement(self) -> None:
+        """Test that prompt includes workdoc instructions for implement."""
         task = _make_task()
         prompt = build_step_prompt(task=task, step="implement", attempt=1)
         assert "## Working Document" in prompt
@@ -1680,6 +1702,7 @@ class TestWorkdocPromptInstructions:
         assert ".workdoc.md" in prompt
 
     def test_prompt_includes_workdoc_instructions_for_prototype(self) -> None:
+        """Test that prompt includes workdoc instructions for prototype."""
         task = _make_task(task_type="spike")
         prompt = build_step_prompt(task=task, step="prototype", attempt=1)
         assert "## Working Document" in prompt
@@ -1689,6 +1712,7 @@ class TestWorkdocPromptInstructions:
         assert "Build a timeboxed prototype" in prompt
 
     def test_prompt_includes_workdoc_instructions_for_profile(self) -> None:
+        """Test that prompt includes workdoc instructions for profile."""
         task = _make_task(task_type="performance")
         prompt = build_step_prompt(task=task, step="profile", attempt=1)
         assert "## Working Document" in prompt
@@ -1696,12 +1720,14 @@ class TestWorkdocPromptInstructions:
         assert "## Profiling Baseline" in prompt
 
     def test_prompt_includes_workdoc_instructions_for_verify(self) -> None:
+        """Test that prompt includes workdoc instructions for verify."""
         task = _make_task()
         prompt = build_step_prompt(task=task, step="verify", attempt=1)
         assert "## Working Document" in prompt
         assert "Do NOT modify `.workdoc.md`" in prompt
 
     def test_prompt_includes_workdoc_instructions_for_implement_fix(self) -> None:
+        """Test that prompt includes workdoc instructions for implement fix."""
         task = _make_task()
         prompt = build_step_prompt(task=task, step="implement_fix", attempt=1)
         assert "## Working Document" in prompt
@@ -1709,12 +1735,14 @@ class TestWorkdocPromptInstructions:
         assert "Do NOT modify `.workdoc.md`" in prompt
 
     def test_prompt_includes_workdoc_instructions_for_review(self) -> None:
+        """Test that prompt includes workdoc instructions for review."""
         task = _make_task()
         prompt = build_step_prompt(task=task, step="review", attempt=1)
         assert "## Working Document" in prompt
         assert "Do NOT modify" in prompt
 
     def test_prompt_includes_workdoc_instructions_for_report(self) -> None:
+        """Test that prompt includes workdoc instructions for report."""
         task = _make_task()
         prompt = build_step_prompt(task=task, step="report", attempt=1)
         assert "## Working Document" in prompt
@@ -1722,11 +1750,13 @@ class TestWorkdocPromptInstructions:
         assert "## Final Report" in prompt
 
     def test_prompt_no_workdoc_for_scan_deps(self) -> None:
+        """Test that prompt no workdoc for scan deps."""
         task = _make_task()
         prompt = build_step_prompt(task=task, step="scan_deps", attempt=1)
         assert "## Working Document" not in prompt
 
     def test_scan_prompts_are_step_specific(self) -> None:
+        """Test that scan prompts are step specific."""
         task = _make_task(task_type="security")
         deps_prompt = build_step_prompt(task=task, step="scan_deps", attempt=1)
         code_prompt = build_step_prompt(task=task, step="scan_code", attempt=1)
@@ -1734,6 +1764,7 @@ class TestWorkdocPromptInstructions:
         assert "code-level security scan" in code_prompt
 
     def test_pipeline_classify_prompt_includes_allowed_pipelines(self) -> None:
+        """Test that pipeline classify prompt includes allowed pipelines."""
         task = _make_task(
             metadata={"classification_allowed_pipelines": ["feature", "docs"]},
         )

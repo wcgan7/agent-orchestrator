@@ -650,9 +650,9 @@ def test_resolve_merge_worker_exception_handled(tmp_path: Path) -> None:
         cwd=tmp_path, capture_output=True, text=True,
     ).stdout.strip()
     # Filter out the .prd-runner state files
-    git_lines = [l for l in status.split("\n") if l and not ".prd-runner" in l]
+    git_lines = [line for line in status.split("\n") if line and ".prd-runner" not in line]
     # No unmerged files should remain
-    unmerged = [l for l in git_lines if l.startswith("U") or l.startswith("AA")]
+    unmerged = [line for line in git_lines if line.startswith("U") or line.startswith("AA")]
     assert unmerged == [], f"Git repo has unresolved merge state: {unmerged}"
 
 
@@ -719,3 +719,358 @@ def test_no_changes_blocks_task(tmp_path: Path) -> None:
     result = service.run_task(task.id)
     assert result.status == "blocked"
     assert "No file changes" in (result.error or "")
+
+
+# ---------------------------------------------------------------------------
+# 16. Review cap preserves branch instead of deleting work
+# ---------------------------------------------------------------------------
+
+
+def test_review_cap_preserves_branch(tmp_path: Path) -> None:
+    """When a task exceeds the review attempt cap, its branch is preserved
+    (not deleted) so the agent's file edits are recoverable."""
+
+    class FailingReviewAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / "docstrings.py").write_text("# 216 docstrings added\n")
+            if step == "review":
+                return StepResult(
+                    status="ok",
+                    findings=[{"severity": "high", "summary": "Issue found", "status": "open"}],
+                )
+            if step == "implement_fix":
+                # Simulate fix attempt that doesn't resolve the issue
+                pass
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=FailingReviewAdapter())
+    cfg = container.config.load()
+    cfg["orchestrator"]["max_review_attempts"] = 2
+    container.config.save(cfg)
+
+    task = Task(
+        title="Add docstrings",
+        task_type="feature",
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert "Review attempt cap exceeded" in (result.error or "")
+
+    # Branch should be preserved
+    assert result.metadata.get("preserved_branch") == f"task-{task.id}"
+    branch_name = f"task-{task.id}"
+    branches = subprocess.run(
+        ["git", "branch", "--list", branch_name],
+        cwd=tmp_path, capture_output=True, text=True,
+    ).stdout.strip()
+    assert branch_name in branches, "Task branch should be preserved"
+
+    # Worktree dir should be removed
+    worktree_dir = container.state_root / "worktrees" / task.id
+    assert not worktree_dir.exists(), "Worktree directory should be removed"
+
+    # The file changes should exist on the preserved branch
+    file_content = subprocess.run(
+        ["git", "show", f"{branch_name}:docstrings.py"],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert file_content.returncode == 0
+    assert "216 docstrings" in file_content.stdout
+
+
+# ---------------------------------------------------------------------------
+# 17. approve_and_merge merges preserved branch to run branch
+# ---------------------------------------------------------------------------
+
+
+def test_approve_merges_preserved_branch(tmp_path: Path) -> None:
+    """After review cap preserves a branch, approve_and_merge merges it
+    to the run branch and cleans up."""
+
+    class FailingReviewAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / "feature.py").write_text("# new feature\n")
+            if step == "review":
+                return StepResult(
+                    status="ok",
+                    findings=[{"severity": "high", "summary": "Issue", "status": "open"}],
+                )
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=FailingReviewAdapter())
+    cfg = container.config.load()
+    cfg["orchestrator"]["max_review_attempts"] = 1
+    container.config.save(cfg)
+
+    task = Task(
+        title="Feature work",
+        task_type="feature",
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert result.metadata.get("preserved_branch")
+
+    # Now approve and merge
+    merge_result = service.approve_and_merge(result)
+    assert merge_result["status"] == "ok"
+    assert "commit_sha" in merge_result
+
+    # Changes should now be on the run branch
+    assert (tmp_path / "feature.py").exists()
+    assert "new feature" in (tmp_path / "feature.py").read_text()
+
+    # Branch should be deleted
+    branch_name = f"task-{task.id}"
+    branches = subprocess.run(
+        ["git", "branch", "--list", branch_name],
+        cwd=tmp_path, capture_output=True, text=True,
+    ).stdout.strip()
+    assert branches == "", "Branch should be deleted after merge"
+
+    # preserved_branch should be cleared
+    updated = container.tasks.get(task.id)
+    assert updated is not None
+    assert "preserved_branch" not in updated.metadata
+
+
+# ---------------------------------------------------------------------------
+# 18. approve_and_merge is a no-op without preserved_branch
+# ---------------------------------------------------------------------------
+
+
+def test_approve_without_preserved_branch(tmp_path: Path) -> None:
+    """approve_and_merge on a task without preserved_branch returns ok, no-op."""
+    container, service, _ = _service(tmp_path)
+    task = Task(
+        title="Normal task",
+        task_type="chore",
+        status="done",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    result = service.approve_and_merge(task)
+    assert result == {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# 19. finally block preserves work on unexpected failure
+# ---------------------------------------------------------------------------
+
+
+def test_finally_preserves_on_unexpected_failure(tmp_path: Path) -> None:
+    """If the adapter raises an exception after writing files, the finally
+    block safety net preserves the branch."""
+
+    class CrashAfterWriteAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / "work.txt").write_text("important work\n")
+                return StepResult(status="ok")
+            if step == "verify":
+                raise RuntimeError("unexpected crash during verify")
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=CrashAfterWriteAdapter())
+    task = Task(
+        title="Crash task",
+        task_type="feature",
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    service.tick_once()
+    _wait_futures(service)
+
+    updated = container.tasks.get(task.id)
+    assert updated is not None
+    assert updated.status == "blocked"
+
+    # Branch should be preserved by the finally safety net
+    assert updated.metadata.get("preserved_branch") == f"task-{task.id}"
+    branch_name = f"task-{task.id}"
+    branches = subprocess.run(
+        ["git", "branch", "--list", branch_name],
+        cwd=tmp_path, capture_output=True, text=True,
+    ).stdout.strip()
+    assert branch_name in branches, "Branch should be preserved by finally safety net"
+
+    # Worktree dir should be removed
+    worktree_dir = container.state_root / "worktrees" / task.id
+    assert not worktree_dir.exists()
+
+    # The work should exist on the preserved branch
+    file_content = subprocess.run(
+        ["git", "show", f"{branch_name}:work.txt"],
+        cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert file_content.returncode == 0
+    assert "important work" in file_content.stdout
+
+
+# ---------------------------------------------------------------------------
+# 20. Review cap with no file changes still cleans up worktree
+# ---------------------------------------------------------------------------
+
+
+def test_review_cap_no_changes_cleans_worktree(tmp_path: Path) -> None:
+    """When review cap is hit but the agent wrote no files (nothing to preserve),
+    the worktree directory should still be cleaned up — not leaked."""
+
+    class NoWriteReviewAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                # Write only the workdoc (which gets cleaned before commit)
+                # This simulates "no real changes" since workdoc is removed
+                pass
+            if step == "review":
+                return StepResult(
+                    status="ok",
+                    findings=[{"severity": "high", "summary": "Issue", "status": "open"}],
+                )
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=NoWriteReviewAdapter())
+    cfg = container.config.load()
+    cfg["orchestrator"]["max_review_attempts"] = 1
+    container.config.save(cfg)
+
+    task = Task(
+        title="No write task",
+        task_type="feature",
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+
+    # Task blocks due to no changes guard (before review even runs)
+    # or due to review cap — either way, worktree must be cleaned up
+    assert result.status == "blocked"
+    worktree_dir = container.state_root / "worktrees" / task.id
+    assert not worktree_dir.exists(), "Worktree directory should be cleaned up"
+    assert "worktree_dir" not in result.metadata, "worktree_dir should not be in metadata"
+
+
+# ---------------------------------------------------------------------------
+# 21. Orphan cleanup skips preserved branches
+# ---------------------------------------------------------------------------
+
+
+def test_orphan_cleanup_skips_preserved_branches(tmp_path: Path) -> None:
+    """_cleanup_orphaned_worktrees removes the worktree dir but keeps the
+    branch if a task references it as preserved_branch."""
+    _git_init(tmp_path)
+    container = Container(tmp_path)
+
+    # Create a task with preserved_branch metadata
+    task = Task(
+        title="Preserved task",
+        task_type="feature",
+        status="blocked",
+        metadata={"preserved_branch": "task-preserved-id"},
+    )
+    container.tasks.upsert(task)
+
+    # Create worktree + branch via git
+    orphan_dir = container.state_root / "worktrees" / "preserved-id"
+    subprocess.run(
+        ["git", "worktree", "add", str(orphan_dir), "-b", "task-preserved-id"],
+        cwd=tmp_path, check=True, capture_output=True, text=True,
+    )
+    assert orphan_dir.exists()
+
+    cfg = container.config.load()
+    cfg["orchestrator"] = {"concurrency": 2, "auto_deps": False}
+    container.config.save(cfg)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus)
+
+    service._cleanup_orphaned_worktrees()
+
+    # Worktree dir should be removed
+    assert not orphan_dir.exists()
+
+    # Branch should still exist (not deleted)
+    branches = subprocess.run(
+        ["git", "branch", "--list", "task-preserved-id"],
+        cwd=tmp_path, capture_output=True, text=True,
+    ).stdout.strip()
+    assert "task-preserved-id" in branches, "Preserved branch should not be deleted"
+
+
+# ---------------------------------------------------------------------------
+# 22. Retry after preserved branch cleans up old branch and runs successfully
+# ---------------------------------------------------------------------------
+
+
+def test_retry_after_preserved_branch(tmp_path: Path) -> None:
+    """When a task with a preserved_branch is retried, the old branch is
+    deleted so _create_worktree can create a fresh branch."""
+    call_count = {"review": 0}
+
+    class PassOnSecondRunAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / "output.py").write_text("# code\n")
+            if step == "review":
+                call_count["review"] += 1
+                if call_count["review"] <= 1:
+                    return StepResult(
+                        status="ok",
+                        findings=[{"severity": "high", "summary": "Bad", "status": "open"}],
+                    )
+                return StepResult(status="ok", findings=[])
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=PassOnSecondRunAdapter())
+    cfg = container.config.load()
+    cfg["orchestrator"]["max_review_attempts"] = 1
+    container.config.save(cfg)
+
+    task = Task(
+        title="Retry task",
+        task_type="feature",
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    # First run — hits review cap, branch preserved
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert result.metadata.get("preserved_branch") == f"task-{task.id}"
+
+    # Retry — should clean up old branch and run fresh
+    task = container.tasks.get(task.id)
+    assert task is not None
+    task.status = "queued"
+    task.error = None
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "done", f"Expected done but got {result.status}: {result.error}"
+    assert "preserved_branch" not in result.metadata

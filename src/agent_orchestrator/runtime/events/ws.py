@@ -1,3 +1,5 @@
+"""Websocket pub/sub hub for streaming runtime events to clients."""
+
 from __future__ import annotations
 
 import asyncio
@@ -31,17 +33,29 @@ class _WsClient:
 
 
 class WebSocketHub:
+    """Track websocket subscribers and route channel-scoped runtime events."""
     def __init__(self) -> None:
+        """Initialize the WebSocketHub."""
         self._clients: dict[int, _WsClient] = {}
         self._counter = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._lock = threading.Lock()
 
     def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Register the event loop used for cross-thread publish scheduling.
+
+        Args:
+            loop (asyncio.AbstractEventLoop): Loop for this call.
+        """
         with self._lock:
             self._loop = loop
 
     async def handle_connection(self, websocket: WebSocket) -> None:
+        """Serve one client connection and process subscribe/unsubscribe traffic.
+
+        Args:
+            websocket (WebSocket): Websocket for this call.
+        """
         # Remember the active event loop so background threads can publish safely.
         self.attach_loop(asyncio.get_running_loop())
         await websocket.accept()
@@ -101,6 +115,11 @@ class WebSocketHub:
             self._clients.pop(cid, None)
 
     async def publish(self, event: dict[str, Any]) -> None:
+        """Send one event to all subscribers matching channel and project filters.
+
+        Args:
+            event (dict[str, Any]): Event for this call.
+        """
         self._counter += 1
         payload = json.dumps({**event, "seq": self._counter})
         stale: list[int] = []
@@ -119,6 +138,11 @@ class WebSocketHub:
             self._clients.pop(cid, None)
 
     def publish_sync(self, event: dict[str, Any]) -> None:
+        """Schedule async publish from sync code paths without blocking callers.
+
+        Args:
+            event (dict[str, Any]): Event for this call.
+        """
         with self._lock:
             loop = self._loop
         if loop and loop.is_running():

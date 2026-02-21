@@ -141,12 +141,44 @@ _DEFAULT_PROJECT_COMMANDS: dict[str, dict[str, str]] = {
 }
 
 
-def detect_project_languages(project_dir: Path) -> list[str]:
-    """Return all detected project languages based on marker files.
+def _resolve_command_paths(
+    commands: dict[str, dict[str, str]],
+    project_dir: Path,
+) -> dict[str, dict[str, str]]:
+    """Resolve relative executable paths in project commands to absolute paths.
 
-    Multiple markers for the same language are deduplicated (e.g. pyproject.toml
-    and setup.py both map to "python").  If a tsconfig.json is found alongside
-    package.json, only "typescript" is returned (it subsumes "javascript").
+    If the first token of a command starts with '.' and contains '/'
+    (e.g. ``.venv/bin/ruff``), resolve it against *project_dir* so that
+    workers running in git worktrees (which lack gitignored dirs like
+    ``.venv``) can still find the binary.
+    """
+    resolved: dict[str, dict[str, str]] = {}
+    for lang, cmds in commands.items():
+        resolved_cmds: dict[str, str] = {}
+        for key, cmd in cmds.items():
+            parts = cmd.split(None, 1)  # split on first whitespace
+            if parts and parts[0].startswith(".") and "/" in parts[0]:
+                abs_exe = str((project_dir / parts[0]).resolve())
+                resolved_cmds[key] = abs_exe if len(parts) == 1 else f"{abs_exe} {parts[1]}"
+            else:
+                resolved_cmds[key] = cmd
+        resolved[lang] = resolved_cmds
+    return resolved
+
+
+def detect_project_languages(project_dir: Path) -> list[str]:
+    """Detect project languages from repository marker files.
+
+    Args:
+        project_dir (Path): Repository root to scan for known language marker
+            files such as ``pyproject.toml`` and ``Cargo.toml``.
+
+    Returns:
+        list[str]: Ordered language identifiers inferred from marker presence.
+            Duplicates are removed when multiple markers map to the same
+            language. When both TypeScript and JavaScript markers are
+            present, ``javascript`` is omitted because ``typescript`` is
+            the stronger signal.
     """
     seen: dict[str, None] = {}  # ordered set
     for marker, lang in _LANGUAGE_MARKERS:
@@ -315,7 +347,7 @@ _WORKDOC_SKIP_STEPS = {"plan_refine", "initiative_plan_refine"}  # These steps d
 
 
 def _workdoc_prompt_section(step: str) -> str:
-    """Return the workdoc instruction block for a step, or empty string."""
+    """Build workdoc instructions for a step, or return an empty string."""
     if step in _WORKDOC_SKIP_STEPS:
         return ""
     step_specific = _WORKDOC_STEP_INSTRUCTIONS_BY_STEP.get(step)
@@ -493,7 +525,22 @@ def build_step_prompt(
     project_languages: list[str] | None = None,
     project_commands: dict[str, dict[str, str]] | None = None,
 ) -> str:
-    """Build a prompt from Task fields with step-specific instructions."""
+    """Build a prompt from Task fields with step-specific instructions.
+
+    Args:
+        task (Task): Task whose title, description, and metadata are used to
+            build the worker instruction payload.
+        step (str): Pipeline step name that selects the step-specific
+            instruction template.
+        attempt (int): One-based attempt number for the current step run.
+        project_languages (list[str] | None): Detected project languages used
+            to populate language-specific guidance in the prompt.
+        project_commands (dict[str, dict[str, str]] | None): Optional
+            language-to-command mapping surfaced to workers as execution hints.
+
+    Returns:
+        str: Fully rendered prompt text sent to the worker process.
+    """
     category = _step_category(step)
     pipeline_id = PipelineRegistry().resolve_for_task_type(task.task_type).id
     if step == "plan_refine":
@@ -543,7 +590,7 @@ def build_step_prompt(
                 parts.append(f"  Type: {ct.get('task_type', 'feature')}")
                 labels = ct.get("labels")
                 if isinstance(labels, list) and labels:
-                    parts.append(f"  Labels: {', '.join(str(l) for l in labels)}")
+                    parts.append(f"  Labels: {', '.join(str(label) for label in labels)}")
                 parts.append("")
 
         existing_tasks = task.metadata.get("existing_tasks")
@@ -655,18 +702,10 @@ def build_step_prompt(
         and task.metadata.get("verify_reason_code", "").strip()
     )
     retry_guidance = task.metadata.get("retry_guidance") if isinstance(task.metadata, dict) else None
-    requested_changes = task.metadata.get("requested_changes") if isinstance(task.metadata, dict) else None
     has_previous_error = False
-    has_feedback = False
-    has_requested = False
     if isinstance(retry_guidance, dict):
         prev_error = str(retry_guidance.get("previous_error") or "").strip()
-        guidance_text = str(retry_guidance.get("guidance") or "").strip()
         has_previous_error = bool(prev_error)
-        has_feedback = bool(guidance_text)
-    if isinstance(requested_changes, dict):
-        requested_text = str(requested_changes.get("guidance") or "").strip()
-        has_requested = bool(requested_text)
 
     if is_fix_step and (
         has_review_findings or has_verify_failure or has_verify_output or has_verify_reason_code or has_previous_error
@@ -915,9 +954,10 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     if start == -1 or end == -1 or end <= start:
         return None
     try:
-        return json.loads(text[start : end + 1])
+        payload = json.loads(text[start : end + 1])
     except json.JSONDecodeError:
         return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _extract_json_value(text: str) -> Any | None:
@@ -996,8 +1036,8 @@ def _normalize_review_findings(raw_findings: Any) -> list[dict[str, Any]]:
         line_raw = item.get("line")
         line_num: int | None
         try:
-            line_num = int(line_raw)
-            if line_num <= 0:
+            line_num = int(line_raw) if line_raw is not None else None
+            if line_num is not None and line_num <= 0:
                 line_num = None
         except (TypeError, ValueError):
             line_num = None
@@ -1044,6 +1084,12 @@ class LiveWorkerAdapter:
     """Worker adapter that dispatches to real Codex/Ollama providers."""
 
     def __init__(self, container: Container) -> None:
+        """Initialize the LiveWorkerAdapter.
+
+        Args:
+            container (Container): Storage/service container used to resolve
+                configuration, repositories, and project paths.
+        """
         self._container = container
 
     @staticmethod
@@ -1099,6 +1145,36 @@ class LiveWorkerAdapter:
         return f"Human intervention required ({count} {suffix}): {first}"
 
     def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        """Execute one pipeline step using the configured live worker provider.
+
+        Args:
+            task (Task): Persisted task record being advanced.
+            step (str): Pipeline step to execute.
+            attempt (int): One-based retry count for this step.
+
+        Returns:
+            StepResult: Worker result including status, summary, and optional
+                structured payload fields.
+        """
+        return self._execute_step(task=task, step=step, attempt=attempt, persist=True)
+
+    def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        """Execute a step without persisting task or run state updates.
+
+        This is used for synthetic tasks where the adapter only needs a prompt
+        carrier and should not mutate repositories.
+
+        Args:
+            task (Task): In-memory task payload used to build the worker prompt.
+            step (str): Pipeline step to execute.
+            attempt (int): One-based retry count for this step.
+
+        Returns:
+            StepResult: Worker response for the ephemeral execution path.
+        """
+        return self._execute_step(task=task, step=step, attempt=attempt, persist=False)
+
+    def _execute_step(self, *, task: Task, step: str, attempt: int, persist: bool) -> StepResult:
         # 1. Resolve worker
         try:
             cfg = self._container.config.load()
@@ -1146,6 +1222,12 @@ class LiveWorkerAdapter:
                         project_commands[lang] = dict(defaults)
             if not project_commands:
                 project_commands = None
+        # Resolve relative executable paths against the *original* project dir
+        # so workers in git worktrees can find binaries in gitignored dirs.
+        if project_commands:
+            project_commands = _resolve_command_paths(
+                project_commands, self._container.project_dir,
+            )
         prompt = build_step_prompt(
             task=task, step=step, attempt=attempt,
             project_languages=langs or None,
@@ -1170,9 +1252,12 @@ class LiveWorkerAdapter:
             "started_at": now_iso(),
         }
         task.metadata["active_logs"] = log_meta
-        self._container.tasks.upsert(task)
+        if persist:
+            self._container.tasks.upsert(task)
 
         def _check_task_cancelled() -> bool:
+            if not persist:
+                return False
             fresh = self._container.tasks.get(task.id)
             return fresh is not None and fresh.status == "cancelled"
 
@@ -1197,7 +1282,8 @@ class LiveWorkerAdapter:
                 task.metadata = {}
             task.metadata.pop("active_logs", None)
             task.metadata["last_logs"] = {**log_meta, "finished_at": now_iso()}
-            self._container.tasks.upsert(task)
+            if persist:
+                self._container.tasks.upsert(task)
 
         # 4. Map result
         step_result = self._map_result(result, spec, step, task)
@@ -1347,8 +1433,16 @@ class LiveWorkerAdapter:
             return StepResult(status="error", summary="Review output formatter returned invalid JSON")
 
         findings = parsed.get("findings")
+        human_issues = parsed.get("human_blocking_issues")
+        human_blocking: list[dict[str, str]] | None = None
+        if isinstance(human_issues, list) and human_issues:
+            human_blocking = [
+                {"summary": str(h.get("summary") or h if isinstance(h, dict) else h).strip()}
+                for h in human_issues if h
+            ]
+            human_blocking = [h for h in human_blocking if h["summary"]] or None
         if isinstance(findings, list):
-            return StepResult(status="ok", findings=_normalize_review_findings(findings))
+            return StepResult(status="ok", findings=_normalize_review_findings(findings), human_blocking_issues=human_blocking)
 
         return StepResult(status="error", summary="Review output formatter returned no findings field")
 
@@ -1453,24 +1547,32 @@ class LiveWorkerAdapter:
                 if status_val not in _VERIFY_ALLOWED_STATUSES:
                     return StepResult(status="error", summary="Verification output JSON has invalid status")
                 reason_code = _normalize_verify_reason_code(parsed.get("reason_code"))
-                summary = _format_verify_summary(parsed.get("summary"), reason_code)
+                verify_summary = _format_verify_summary(parsed.get("summary"), reason_code)
                 if isinstance(task.metadata, dict):
                     task.metadata["verify_reason_code"] = reason_code
                 if status_val == "fail":
-                    return StepResult(status="error", summary=str(summary) if summary else "Verification failed")
+                    return StepResult(status="error", summary=str(verify_summary) if verify_summary else "Verification failed")
                 if status_val == "environment":
-                    note = str(summary) if summary else "Verification blocked by environment constraints"
+                    note = str(verify_summary) if verify_summary else "Verification blocked by environment constraints"
                     if isinstance(task.metadata, dict):
                         task.metadata["verify_environment_note"] = note
                     return StepResult(status="ok", summary=note)
-                return StepResult(status="ok", summary=str(summary) if summary else "")
+                return StepResult(status="ok", summary=str(verify_summary) if verify_summary else "")
 
         if category == "review" and result.response_text:
             parsed = _extract_json(result.response_text)
             if isinstance(parsed, dict):
                 findings = parsed.get("findings")
+                human_issues = parsed.get("human_blocking_issues")
+                human_blocking: list[dict[str, str]] | None = None
+                if isinstance(human_issues, list) and human_issues:
+                    human_blocking = [
+                        {"summary": str(h.get("summary") or h if isinstance(h, dict) else h).strip()}
+                        for h in human_issues if h
+                    ]
+                    human_blocking = [h for h in human_blocking if h["summary"]] or None
                 if isinstance(findings, list):
-                    return StepResult(status="ok", findings=_normalize_review_findings(findings))
+                    return StepResult(status="ok", findings=_normalize_review_findings(findings), human_blocking_issues=human_blocking)
                 return StepResult(status="error", summary="Review output JSON missing findings array")
 
         if category == "pipeline_classification" and result.response_text:
@@ -1482,19 +1584,24 @@ class LiveWorkerAdapter:
         if category == "planning" and result.response_text:
             parsed = _extract_json(result.response_text)
             if isinstance(parsed, dict):
-                summary = parsed.get("analysis") if step == "analyze" else None
-                summary = summary or (parsed.get("initiative_plan") if step in {"initiative_plan", "initiative_plan_refine"} else None)
-                summary = summary or parsed.get("plan") or parsed.get("summary")
-                if summary:
-                    return StepResult(status="ok", summary=_normalize_planning_text(str(summary))[:20000])
+                planning_summary: Any | None = parsed.get("analysis") if step == "analyze" else None
+                planning_summary = planning_summary or (
+                    parsed.get("initiative_plan") if step in {"initiative_plan", "initiative_plan_refine"} else None
+                )
+                planning_summary = planning_summary or parsed.get("plan") or parsed.get("summary")
+                if planning_summary:
+                    return StepResult(status="ok", summary=_normalize_planning_text(str(planning_summary))[:20000])
             return StepResult(status="ok", summary=_normalize_planning_text(result.response_text)[:20000])
 
         if category == "diagnosis" and result.response_text:
             parsed = _extract_json(result.response_text)
             if isinstance(parsed, dict):
-                summary = parsed.get("diagnosis") or parsed.get("summary")
-                if summary:
-                    return StepResult(status="ok", summary=str(summary).strip()[:20000])
+                diagnosis_summary = parsed.get("diagnosis") or parsed.get("summary")
+                if diagnosis_summary:
+                    return StepResult(status="ok", summary=str(diagnosis_summary).strip()[:20000])
+            return StepResult(status="ok", summary=result.response_text.strip()[:20000])
+
+        if category == "fix" and result.response_text:
             return StepResult(status="ok", summary=result.response_text.strip()[:20000])
 
         if category == "task_generation" and result.response_text:
@@ -1644,7 +1751,17 @@ class LiveWorkerAdapter:
         return raw[:2000] if raw else "Summary generation failed"
 
     def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path) -> str:
-        """Produce a worker-generated summary for a completed run."""
+        """Produce a worker-generated summary for a completed run.
+
+        Args:
+            task (Task): Task that owns the completed run.
+            run (RunRecord): Completed run record to summarize.
+            project_dir (Path): Project root used to resolve workdoc context.
+
+        Returns:
+            str: Worker-produced summary text, or an empty string when summary
+                generation is unavailable.
+        """
         try:
             cfg = self._container.config.load()
             runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")

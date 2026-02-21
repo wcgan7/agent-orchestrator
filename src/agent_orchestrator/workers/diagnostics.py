@@ -12,6 +12,14 @@ from .config import WorkerProviderSpec
 
 
 def test_worker(spec: WorkerProviderSpec) -> tuple[bool, str]:
+    """Run a lightweight health check for a worker provider.
+
+    Args:
+        spec (WorkerProviderSpec): Spec for this call.
+
+    Returns:
+        tuple[bool, str]: Result produced by this call.
+    """
     if spec.type in {"codex", "claude"}:
         from shutil import which
 
@@ -54,6 +62,6 @@ def test_worker(spec: WorkerProviderSpec) -> tuple[bool, str]:
             return True, f"Ollama reachable; model available: {spec.model}"
         if names:
             return False, f"Ollama reachable, but model not found: {spec.model} (available: {', '.join(names[:10])})"
-        return False, f"Ollama reachable, but no models found (missing pull?)"
+        return False, "Ollama reachable, but no models found (missing pull?)"
 
     return False, f"Unsupported worker type: {spec.type}"

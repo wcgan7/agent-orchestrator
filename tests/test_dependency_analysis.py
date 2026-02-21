@@ -10,6 +10,12 @@ from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorker
 from agent_orchestrator.runtime.storage.container import Container
 
 
+class _EphemeralMixin:
+    """Adds run_step_ephemeral that delegates to run_step for test adapters."""
+    def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        return self.run_step(task=task, step=step, attempt=attempt)
+
+
 def _service(tmp_path: Path, *, auto_deps: bool = True, adapter=None) -> tuple[Container, OrchestratorService, EventBus]:
     container = Container(tmp_path)
     cfg = container.config.load()
@@ -55,7 +61,7 @@ def test_scripted_edges_applied(tmp_path: Path) -> None:
     container.tasks.upsert(t2)
 
     # Use a custom adapter that returns edges
-    class EdgeAdapter:
+    class EdgeAdapter(_EphemeralMixin):
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
             return StepResult(status="ok", dependency_edges=[
                 {"from": t1.id, "to": t2.id, "reason": "Profile needs auth"}
@@ -81,7 +87,7 @@ def test_scripted_edges_applied(tmp_path: Path) -> None:
 def test_single_task_skips_analysis(tmp_path: Path) -> None:
     call_count = 0
 
-    class CountingAdapter:
+    class CountingAdapter(_EphemeralMixin):
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
             nonlocal call_count
             call_count += 1
@@ -106,7 +112,7 @@ def test_single_task_skips_analysis(tmp_path: Path) -> None:
 def test_already_analyzed_not_reanalyzed(tmp_path: Path) -> None:
     call_count = 0
 
-    class CountingAdapter:
+    class CountingAdapter(_EphemeralMixin):
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
             nonlocal call_count
             call_count += 1
@@ -139,7 +145,7 @@ def test_cycle_detection(tmp_path: Path) -> None:
     container.tasks.upsert(t2)
 
     # Adapter returns bidirectional edges (would create cycle)
-    class CycleAdapter:
+    class CycleAdapter(_EphemeralMixin):
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
             return StepResult(status="ok", dependency_edges=[
                 {"from": t1.id, "to": t2.id, "reason": "A before B"},
@@ -164,7 +170,7 @@ def test_cycle_detection(tmp_path: Path) -> None:
 def test_prd_import_tasks_skipped(tmp_path: Path) -> None:
     call_count = 0
 
-    class CountingAdapter:
+    class CountingAdapter(_EphemeralMixin):
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
             nonlocal call_count
             call_count += 1
@@ -197,7 +203,7 @@ def test_tick_once_integrates_dep_analysis(tmp_path: Path) -> None:
     # Set up adapter that infers dependency then does normal work
     analysis_done = False
 
-    class DepThenWorkAdapter:
+    class DepThenWorkAdapter(_EphemeralMixin):
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
             nonlocal analysis_done
             if step == "analyze_deps":
@@ -230,7 +236,7 @@ def test_analysis_failure_graceful(tmp_path: Path) -> None:
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
 
-    class FailingAdapter:
+    class FailingAdapter(_EphemeralMixin):
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
             raise RuntimeError("LLM unavailable")
 
@@ -255,7 +261,7 @@ def test_analysis_failure_graceful(tmp_path: Path) -> None:
 def test_auto_deps_disabled_via_config(tmp_path: Path) -> None:
     call_count = 0
 
-    class CountingAdapter:
+    class CountingAdapter(_EphemeralMixin):
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
             nonlocal call_count
             call_count += 1
@@ -279,7 +285,7 @@ def test_auto_deps_disabled_via_config(tmp_path: Path) -> None:
 def test_new_tasks_trigger_reanalysis(tmp_path: Path) -> None:
     call_count = 0
 
-    class CountingAdapter:
+    class CountingAdapter(_EphemeralMixin):
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
             nonlocal call_count
             call_count += 1
