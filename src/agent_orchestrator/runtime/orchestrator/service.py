@@ -2740,6 +2740,8 @@ _Pending: will be populated by the report step._
                     else:
                         task.metadata.pop("review_history", None)
                     self.container.tasks.upsert(task)
+                    review_project_dir = worktree_dir or self.container.project_dir
+                    self._refresh_workdoc(task, review_project_dir)
                     review_started = now_iso()
                     findings, review_result = self._findings_from_result(task, review_attempt)
                     # Build step log immediately so log paths are always stored
