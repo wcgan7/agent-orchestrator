@@ -1105,9 +1105,12 @@ function renderStructuredStdoutChunk(raw: string, prevHasTextDelta = false): Str
     try {
       obj = JSON.parse(trimmed)
     } catch {
+      // Preserve plain text lines when logs mix prose with JSON events.
+      pushLine(line)
       continue
     }
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+      pushLine(line)
       continue
     }
     parsedLines += 1
@@ -1221,7 +1224,9 @@ function renderStructuredStdoutChunk(raw: string, prevHasTextDelta = false): Str
       }
       continue
     }
-    // Other top-level events are intentionally ignored.
+    // Preserve opaque JSON records (for example final verification/review JSON)
+    // so users can still see payloads even when they are not stream events.
+    pushLine(trimmed)
   }
 
   if (parsedLines === 0) {
@@ -1235,6 +1240,9 @@ function renderStructuredStdoutChunk(raw: string, prevHasTextDelta = false): Str
   }
 
   const text = parts.join('')
+  if (!text) {
+    return { text: input, hasContent: true, structured: false, parsedLines: 0, streamEvents: 0, hasTextDelta }
+  }
   return {
     text,
     hasContent: text.length > 0,
@@ -4358,9 +4366,22 @@ export default function App() {
                 }
                 if (current) fileChunks.push(current)
               }
+              const totalAdditions = fileChunks.reduce((sum, chunk) => sum + chunk.additions, 0)
+              const totalDeletions = fileChunks.reduce((sum, chunk) => sum + chunk.deletions, 0)
               return (
                 <>
-                  <p className="task-meta">Commit: <code>{taskDiff.commit.slice(0, 12)}</code> · {taskDiff.files.length} file{taskDiff.files.length !== 1 ? 's' : ''} changed</p>
+                  <p className="task-meta">
+                    Commit: <code>{taskDiff.commit.slice(0, 12)}</code> · {taskDiff.files.length} file{taskDiff.files.length !== 1 ? 's' : ''} changed
+                    {fileChunks.length > 0 ? (
+                      <>
+                        {' · '}
+                        <span className="diff-file-stats">
+                          <span className="diff-stat-add">+{totalAdditions}</span>
+                          <span className="diff-stat-del">-{totalDeletions}</span>
+                        </span>
+                      </>
+                    ) : null}
+                  </p>
                   {fileChunks.length > 0 ? (
                     <div className="diff-file-sections">
                       {fileChunks.map((chunk) => (

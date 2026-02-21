@@ -435,4 +435,55 @@ describe('Task logs loading', () => {
       expect(count).toBe(1)
     })
   }, 20_000)
+
+  it('keeps mixed plain-text and JSON logs visible for verify/review payloads', async () => {
+    installFetchMock((url) => {
+      const parsed = new URL(url, 'http://localhost')
+      const hasOffset = parsed.searchParams.has('stdout_offset') || parsed.searchParams.has('stderr_offset')
+      if (!hasOffset) {
+        return {
+          mode: 'history',
+          step: 'verify',
+          stdout: '{"status":"pass","reason_code":"unknown","summary":"all good"}\n',
+          stderr: 'Reading prompt from stdin...\n{"findings":[]}\n',
+          stdout_offset: 65,
+          stderr_offset: 43,
+          stdout_tail_start: 0,
+          stderr_tail_start: 0,
+          started_at: '2026-02-21T13:13:13Z',
+          finished_at: '2026-02-21T13:13:54Z',
+          log_id: 'run-verify-json',
+          stdout_chunk_start: 0,
+          stderr_chunk_start: 0,
+        }
+      }
+      return {
+        mode: 'history',
+        step: 'verify',
+        stdout: '',
+        stderr: '',
+        stdout_offset: 65,
+        stderr_offset: 43,
+        stdout_tail_start: 0,
+        stderr_tail_start: 0,
+        started_at: '2026-02-21T13:13:13Z',
+        finished_at: '2026-02-21T13:13:54Z',
+        log_id: 'run-verify-json',
+        stdout_chunk_start: 65,
+        stderr_chunk_start: 43,
+      }
+    })
+
+    render(<App />)
+    await openTaskLogsTab()
+
+    await waitFor(() => {
+      const panes = document.querySelectorAll('pre.task-log-output')
+      const stdout = panes[0]?.textContent || ''
+      const stderr = panes[1]?.textContent || ''
+      expect(stdout).toContain('"status":"pass"')
+      expect(stderr).toContain('Reading prompt from stdin...')
+      expect(stderr).toContain('{"findings":[]}')
+    })
+  }, 20_000)
 })
