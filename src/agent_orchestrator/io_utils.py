@@ -35,6 +35,11 @@ class FileLock:
     """
 
     def __init__(self, lock_path: Path):
+        """Initialize the FileLock.
+
+        Args:
+            lock_path (Path): Filesystem path for this call.
+        """
         self.lock_path = lock_path
         self.handle: Optional[Any] = None
         self.lock_bytes = WINDOWS_LOCK_BYTES

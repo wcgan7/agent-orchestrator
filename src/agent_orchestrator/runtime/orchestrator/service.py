@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 
 
 def _has_cycle(adj: dict[str, list[str]], from_id: str, to_id: str) -> bool:
-    """Return True if adding an edge from_id→to_id would create a cycle.
+    """Check whether adding edge from_id→to_id would introduce a cycle.
 
     Checks whether to_id can already reach from_id via existing edges.
     """
@@ -54,7 +54,7 @@ def _has_cycle(adj: dict[str, list[str]], from_id: str, to_id: str) -> bool:
 
 
 class OrchestratorService:
-    """Represents OrchestratorService."""
+    """Coordinate task scheduling, execution, review, and commit flow."""
     _GATE_MAPPING: dict[str, str] = {
         "plan": "before_plan",
         "implement": "before_implement",
@@ -70,6 +70,13 @@ class OrchestratorService:
         *,
         worker_adapter: WorkerAdapter | None = None,
     ) -> None:
+        """Initialize the OrchestratorService.
+
+        Args:
+            container (Container): Container for this call.
+            bus (EventBus): Bus for this call.
+            worker_adapter (WorkerAdapter | None): Worker adapter for this call.
+        """
         self.container = container
         self.bus = bus
         self.worker_adapter = worker_adapter or DefaultWorkerAdapter()
@@ -92,7 +99,11 @@ class OrchestratorService:
         return self._pool
 
     def status(self) -> dict[str, Any]:
-        """Return status."""
+        """Build a status snapshot of queue depth and active worker usage.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         tasks = self.container.tasks.list()
@@ -110,7 +121,14 @@ class OrchestratorService:
         }
 
     def control(self, action: str) -> dict[str, Any]:
-        """Return control."""
+        """Apply a control action and return updated orchestrator status.
+
+        Args:
+            action (str): Action for this call.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         if action == "pause":
@@ -131,7 +149,7 @@ class OrchestratorService:
         return self.status()
 
     def ensure_worker(self) -> None:
-        """Return ensure worker."""
+        """Start the background scheduling loop when not already running."""
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
@@ -142,7 +160,11 @@ class OrchestratorService:
             self._thread.start()
 
     def shutdown(self, *, timeout: float = 10.0) -> None:
-        """Return shutdown."""
+        """Stop the scheduler and wait for in-flight work up to ``timeout``.
+
+        Args:
+            timeout (float): Timeout for this call.
+        """
         with self._lock:
             self._stop.set()
             thread = self._thread
@@ -206,7 +228,11 @@ class OrchestratorService:
                     logger.error("Task %s raised unexpected error: %s", tid, exc, exc_info=exc)
 
     def tick_once(self) -> bool:
-        """Return tick once."""
+        """Run one scheduler iteration and return whether work was dispatched.
+
+        Returns:
+            bool: `True` when the operation succeeds, otherwise `False`.
+        """
         self._sweep_futures()
 
         cfg = self.container.config.load()
@@ -228,7 +254,14 @@ class OrchestratorService:
         return True
 
     def run_task(self, task_id: str) -> Task:
-        """Return run task."""
+        """Synchronously execute one task by id and return the final record.
+
+        Args:
+            task_id (str): Identifier for the target task.
+
+        Returns:
+            Task: Result produced by this call.
+        """
         wait_existing = False
         with self._lock:
             task = self.container.tasks.get(task_id)
@@ -293,7 +326,14 @@ class OrchestratorService:
         return None
 
     def get_plan_document(self, task_id: str) -> dict[str, Any]:
-        """Return get plan document."""
+        """Build plan-revision state plus active refine-job metadata for a task.
+
+        Args:
+            task_id (str): Identifier for the target task.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -335,7 +375,23 @@ class OrchestratorService:
         status: Literal["draft", "committed"] = "draft",
         created_at: str | None = None,
     ) -> PlanRevision:
-        """Create and persist a plan revision for a task."""
+        """Create and persist a plan revision for a task.
+
+        Args:
+            task_id (str): Identifier for the target task.
+            content (str): Content for this call.
+            source (Literal['worker_plan', 'worker_refine', 'human_edit', 'import']): Source for this call.
+            parent_revision_id (str | None): Identifier for the related parent revision.
+            step (str | None): Step for this call.
+            feedback_note (str | None): Feedback note for this call.
+            provider (str | None): Provider for this call.
+            model (str | None): Model for this call.
+            status (Literal['draft', 'committed']): Status for this call.
+            created_at (str | None): Created at for this call.
+
+        Returns:
+            PlanRevision: Result produced by this call.
+        """
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -386,7 +442,18 @@ class OrchestratorService:
         base_revision_id: str | None = None,
         priority: str = "normal",
     ) -> PlanRefineJob:
-        """Queue a plan refinement job and schedule background processing."""
+        """Queue a plan refinement job and schedule background processing.
+
+        Args:
+            task_id (str): Identifier for the target task.
+            feedback (str): Feedback for this call.
+            instructions (str | None): Instructions for this call.
+            base_revision_id (str | None): Identifier for the related base revision.
+            priority (str): Priority for this call.
+
+        Returns:
+            PlanRefineJob: Result produced by this call.
+        """
         with self._lock:
             task = self.container.tasks.get(task_id)
             if not task:
@@ -432,7 +499,14 @@ class OrchestratorService:
         return job
 
     def process_plan_refine_job(self, job_id: str) -> PlanRefineJob | None:
-        """Return process plan refine job."""
+        """Execute one queued plan-refine job to completion.
+
+        Args:
+            job_id (str): Identifier for the target job.
+
+        Returns:
+            PlanRefineJob | None: Result produced by this call.
+        """
         job = self.container.plan_refine_jobs.get(job_id)
         if not job:
             return None
@@ -551,14 +625,36 @@ class OrchestratorService:
                 self.container.tasks.upsert(cleanup_task)
 
     def list_plan_refine_jobs(self, task_id: str) -> list[PlanRefineJob]:
-        """Return list plan refine jobs."""
+        """List refine jobs for a task.
+
+        Args:
+            task_id (str): Task identifier whose refine-job history should be returned.
+
+        Returns:
+            list[PlanRefineJob]: Refine jobs for the task, ordered by repository behavior.
+
+        Raises:
+            ValueError: If the task does not exist.
+        """
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
         return self.container.plan_refine_jobs.for_task(task_id)
 
     def get_plan_refine_job(self, task_id: str, job_id: str) -> PlanRefineJob:
-        """Return get plan refine job."""
+        """Fetch one refine job and verify it belongs to the given task.
+
+        Args:
+            task_id (str): Parent task identifier expected for the refine job.
+            job_id (str): Refine-job identifier to load.
+
+        Returns:
+            PlanRefineJob: The matching refine job owned by ``task_id``.
+
+        Raises:
+            ValueError: If the task does not exist.
+            ValueError: If the job does not exist or belongs to a different task.
+        """
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -568,7 +664,19 @@ class OrchestratorService:
         return job
 
     def commit_plan_revision(self, task_id: str, revision_id: str) -> str:
-        """Return commit plan revision."""
+        """Mark one plan revision as committed and sync task/workdoc metadata.
+
+        Args:
+            task_id (str): Task identifier that owns the plan revision.
+            revision_id (str): Revision identifier to mark as committed.
+
+        Returns:
+            str: The committed revision identifier.
+
+        Raises:
+            ValueError: If the task does not exist.
+            ValueError: If the revision does not exist for the task.
+        """
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -636,7 +744,26 @@ class OrchestratorService:
         revision_id: str | None = None,
         plan_override: str | None = None,
     ) -> tuple[str, str | None]:
-        """Resolve plan text and optional revision id for task generation."""
+        """Resolve plan text and optional revision id for task generation.
+
+        Args:
+            task_id (str): Task identifier whose plan should be resolved.
+            source (Literal['committed', 'revision', 'override', 'latest']): Source
+                strategy to use when selecting plan text.
+            revision_id (str | None): Required when ``source='revision'``; ignored
+                otherwise.
+            plan_override (str | None): Required non-empty text when
+                ``source='override'``.
+
+        Returns:
+            tuple[str, str | None]: A tuple of ``(plan_text, revision_id)``.
+            ``revision_id`` is ``None`` only when ``source='override'``.
+
+        Raises:
+            ValueError: If the task does not exist.
+            ValueError: If source-specific required inputs are missing.
+            ValueError: If the requested revision/committed plan cannot be found.
+        """
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -676,7 +803,7 @@ class OrchestratorService:
         return revisions[-1].content, revisions[-1].id
 
     def _resolve_task_plan_excerpt(self, task: Task, *, max_chars: int = 800) -> str:
-        """Return a short best-effort plan excerpt for objective context."""
+        """Extract a bounded plan snippet for prompts and conflict resolution context."""
         if not isinstance(task.metadata, dict):
             return ""
 
@@ -1297,7 +1424,7 @@ _Pending: will be populated by the report step._
             return "feature"
 
     def _workdoc_template_for_task(self, task: Task) -> str:
-        """Return the workdoc template body for the task's pipeline."""
+        """Select the default workdoc template for the task's pipeline."""
         pipeline_id = self._pipeline_id_for_task(task)
         template_by_pipeline: dict[str, str] = {
             "feature": self._FEATURE_WORKDOC_TEMPLATE,
@@ -1561,12 +1688,19 @@ _Pending: will be populated by the report step._
         )
 
     def _step_project_dir(self, task: Task) -> Path:
-        """Return the effective project dir for a task (worktree or main)."""
+        """Resolve task worktree directory, falling back to the main project root."""
         worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
         return Path(worktree_path) if worktree_path else self.container.project_dir
 
     def get_workdoc(self, task_id: str) -> dict[str, Any]:
-        """Read canonical workdoc for a task. Returns {task_id, content, exists}."""
+        """Read canonical workdoc for a task. Returns {task_id, content, exists}.
+
+        Args:
+            task_id (str): Identifier for the target task.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         canonical = self._workdoc_canonical_path(task_id)
         if canonical.exists():
             return {"task_id": task_id, "content": canonical.read_text(encoding="utf-8"), "exists": True}
@@ -1614,8 +1748,16 @@ _Pending: will be populated by the report step._
     def approve_and_merge(self, task: Task) -> dict[str, Any]:
         """Merge a preserved branch to the run branch on user approval.
 
-        Called when a user approves a blocked task whose work was preserved
-        on a git branch (e.g. after review-cap exceeded).
+        Called when a blocked task is approved and its work was preserved on a
+        branch (for example, after review-attempt limits were hit).
+
+        Args:
+            task (Task): Task carrying preserved branch metadata.
+
+        Returns:
+            dict[str, Any]: Merge outcome payload with ``status``. Includes
+            ``commit_sha`` on successful merge and ``status='merge_conflict'``
+            when automatic conflict resolution fails.
         """
         branch = task.metadata.get("preserved_branch")
         if not branch:
@@ -1843,7 +1985,7 @@ _Pending: will be populated by the report step._
             return None
 
     def _has_uncommitted_changes(self, cwd: Path) -> bool:
-        """Return True if the working tree has staged or unstaged changes.
+        """Check whether the working tree has staged or unstaged changes.
 
         Returns True on git failure (no repo, etc.) to avoid false blocking.
         """
@@ -1993,7 +2135,7 @@ _Pending: will be populated by the report step._
             task.metadata["verify_output"] = "\n".join(parts)
 
     def _is_non_actionable_verify_failure(self, task: Task, summary: str | None) -> bool:
-        """Return True when a verify failure is due to environment/tooling, not code."""
+        """Classify whether verify failed because of environment or tooling issues."""
         if isinstance(task.metadata, dict):
             reason_code = str(task.metadata.get("verify_reason_code") or "").strip().lower()
             if reason_code in self._NON_ACTIONABLE_VERIFY_REASON_CODES:
@@ -2225,6 +2367,19 @@ _Pending: will be populated by the report step._
 
         This supports a two-phase workflow: run a plan step, review the output,
         then explicitly trigger task generation from the plan.
+
+        Args:
+            task_id (str): Parent task identifier that will receive generated children.
+            plan_text (str): Plan content to pass into the ``generate_tasks`` worker step.
+            infer_deps (bool): Whether to apply ``depends_on`` links returned by
+                the worker to the created child tasks.
+
+        Returns:
+            list[str]: Identifiers of newly created child tasks.
+
+        Raises:
+            ValueError: If the parent task does not exist.
+            ValueError: If worker execution fails or yields no valid tasks.
         """
         task = self.container.tasks.get(task_id)
         if not task:
@@ -2740,6 +2895,8 @@ _Pending: will be populated by the report step._
                     else:
                         task.metadata.pop("review_history", None)
                     self.container.tasks.upsert(task)
+                    review_project_dir = worktree_dir or self.container.project_dir
+                    self._refresh_workdoc(task, review_project_dir)
                     review_started = now_iso()
                     findings, review_result = self._findings_from_result(task, review_attempt)
                     # Build step log immediately so log paths are always stored
@@ -3017,7 +3174,16 @@ def create_orchestrator(
     *,
     worker_adapter: WorkerAdapter | None = None,
 ) -> OrchestratorService:
-    """Build, start, and return an orchestrator instance for a container."""
+    """Build, start, and return an orchestrator instance for a container.
+
+    Args:
+        container (Container): Container for this call.
+        bus (EventBus): Bus for this call.
+        worker_adapter (WorkerAdapter | None): Worker adapter for this call.
+
+    Returns:
+        OrchestratorService: Result produced by this call.
+    """
     if worker_adapter is None:
         from .live_worker_adapter import LiveWorkerAdapter
 

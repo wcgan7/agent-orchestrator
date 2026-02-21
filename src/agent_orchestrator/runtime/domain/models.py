@@ -35,7 +35,11 @@ _VALID_PLAN_REFINE_JOB_STATUSES = {"queued", "running", "completed", "failed", "
 
 
 def now_iso() -> str:
-    """Return the current UTC timestamp in ISO-8601 format."""
+    """Get the current UTC timestamp formatted as ISO-8601 text.
+
+    Returns:
+        str: str result produced by this operation.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -44,13 +48,20 @@ def _id(prefix: str) -> str:
 
 
 def content_sha256(value: str) -> str:
-    """Hash text content to a deterministic SHA-256 hex digest."""
+    """Hash text content to a deterministic SHA-256 hex digest.
+
+    Args:
+        value (str): Value for this call.
+
+    Returns:
+        str: str result produced by this operation.
+    """
     return sha256(str(value or "").encode("utf-8")).hexdigest()
 
 
 @dataclass
 class ReviewFinding:
-    """Represents ReviewFinding."""
+    """A single review issue captured for a task."""
     id: str = field(default_factory=lambda: _id("finding"))
     task_id: str = ""
     severity: str = "medium"
@@ -62,12 +73,23 @@ class ReviewFinding:
     status: str = "open"
 
     def to_dict(self) -> dict[str, Any]:
-        """Return to dict."""
+        """Serialize the finding to a plain dictionary.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReviewFinding":
-        """Return from dict."""
+        """Deserialize a finding, normalizing optional numeric fields.
+
+        Args:
+            data (dict[str, Any]): Serialized payload consumed by this operation.
+
+        Returns:
+            'ReviewFinding': Result produced by this call.
+        """
         raw_line = data.get("line")
         line: int | None
         try:
@@ -89,7 +111,7 @@ class ReviewFinding:
 
 @dataclass
 class ReviewCycle:
-    """Represents ReviewCycle."""
+    """Review attempt snapshot for a task, including findings."""
     id: str = field(default_factory=lambda: _id("rc"))
     task_id: str = ""
     attempt: int = 1
@@ -99,14 +121,25 @@ class ReviewCycle:
     created_at: str = field(default_factory=now_iso)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return to dict."""
+        """Serialize the review cycle, including nested findings.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         data = asdict(self)
         data["findings"] = [f.to_dict() for f in self.findings]
         return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReviewCycle":
-        """Return from dict."""
+        """Deserialize a review cycle from persisted storage.
+
+        Args:
+            data (dict[str, Any]): Serialized payload consumed by this operation.
+
+        Returns:
+            'ReviewCycle': Result produced by this call.
+        """
         findings = [ReviewFinding.from_dict(f) for f in list(data.get("findings", []) or []) if isinstance(f, dict)]
         return cls(
             id=str(data.get("id") or _id("rc")),
@@ -121,7 +154,7 @@ class ReviewCycle:
 
 @dataclass
 class Task:
-    """Represents Task."""
+    """Primary unit of orchestrated work tracked by the runtime."""
     id: str = field(default_factory=lambda: _id("task"))
     title: str = ""
     description: str = ""
@@ -157,12 +190,23 @@ class Task:
     project_commands: Optional[dict[str, dict[str, str]]] = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return to dict."""
+        """Serialize a task to a dictionary payload.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Task":
-        """Return from dict."""
+        """Deserialize and normalize a task from persisted data.
+
+        Args:
+            data (dict[str, Any]): Serialized payload consumed by this operation.
+
+        Returns:
+            'Task': Result produced by this call.
+        """
         priority = str(data.get("priority") or "P2")
         if priority not in _VALID_PRIORITIES:
             priority = "P2"
@@ -223,7 +267,7 @@ class Task:
 
 @dataclass
 class RunRecord:
-    """Represents RunRecord."""
+    """Execution run metadata and per-step outputs for a task."""
     id: str = field(default_factory=lambda: _id("run"))
     task_id: str = ""
     branch: Optional[str] = None
@@ -234,12 +278,23 @@ class RunRecord:
     steps: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return to dict."""
+        """Serialize a run record.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RunRecord":
-        """Return from dict."""
+        """Deserialize a run record from persisted data.
+
+        Args:
+            data (dict[str, Any]): Serialized payload consumed by this operation.
+
+        Returns:
+            'RunRecord': Result produced by this call.
+        """
         return cls(
             id=str(data.get("id") or _id("run")),
             task_id=str(data.get("task_id") or ""),
@@ -254,7 +309,7 @@ class RunRecord:
 
 @dataclass
 class TerminalSession:
-    """Represents TerminalSession."""
+    """Persisted terminal session metadata and log locations."""
     id: str = field(default_factory=lambda: _id("term"))
     project_id: str = ""
     status: str = "starting"
@@ -271,12 +326,23 @@ class TerminalSession:
     last_error: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return to dict."""
+        """Serialize a terminal session record.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TerminalSession":
-        """Return from dict."""
+        """Deserialize a terminal session and coerce numeric fields.
+
+        Args:
+            data (dict[str, Any]): Serialized payload consumed by this operation.
+
+        Returns:
+            'TerminalSession': Result produced by this call.
+        """
         raw_exit = data.get("exit_code")
         exit_code = int(raw_exit) if raw_exit is not None else None
         raw_pid = data.get("pid")
@@ -309,7 +375,7 @@ class TerminalSession:
 
 @dataclass
 class AgentRecord:
-    """Represents AgentRecord."""
+    """Persisted runtime state for a worker agent process."""
     id: str = field(default_factory=lambda: _id("agent"))
     role: str = "general"
     status: str = "running"
@@ -318,12 +384,23 @@ class AgentRecord:
     last_seen_at: str = field(default_factory=now_iso)
 
     def to_dict(self) -> dict[str, Any]:
-        """Return to dict."""
+        """Serialize an agent record.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AgentRecord":
-        """Return from dict."""
+        """Deserialize an agent record from persisted data.
+
+        Args:
+            data (dict[str, Any]): Serialized payload consumed by this operation.
+
+        Returns:
+            'AgentRecord': Result produced by this call.
+        """
         return cls(
             id=str(data.get("id") or _id("agent")),
             role=str(data.get("role") or "general"),
@@ -336,7 +413,7 @@ class AgentRecord:
 
 @dataclass
 class PlanRevision:
-    """Represents PlanRevision."""
+    """Versioned plan document snapshot associated with a task."""
     id: str = field(default_factory=lambda: _id("pr"))
     task_id: str = ""
     created_at: str = field(default_factory=now_iso)
@@ -351,14 +428,25 @@ class PlanRevision:
     status: PlanRevisionStatus = "draft"
 
     def to_dict(self) -> dict[str, Any]:
-        """Return to dict."""
+        """Serialize a plan revision and ensure ``content_hash`` is set.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         data = asdict(self)
         data["content_hash"] = self.content_hash or content_sha256(self.content)
         return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PlanRevision":
-        """Return from dict."""
+        """Deserialize and validate a plan revision payload.
+
+        Args:
+            data (dict[str, Any]): Serialized payload consumed by this operation.
+
+        Returns:
+            'PlanRevision': Result produced by this call.
+        """
         source = str(data.get("source") or "human_edit")
         if source not in _VALID_PLAN_REVISION_SOURCES:
             source = "human_edit"
@@ -384,7 +472,7 @@ class PlanRevision:
 
 @dataclass
 class PlanRefineJob:
-    """Represents PlanRefineJob."""
+    """Asynchronous worker job used to refine an existing plan revision."""
     id: str = field(default_factory=lambda: _id("prj"))
     task_id: str = ""
     base_revision_id: str = ""
@@ -399,12 +487,23 @@ class PlanRefineJob:
     error: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return to dict."""
+        """Serialize a refine job record.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PlanRefineJob":
-        """Return from dict."""
+        """Deserialize and normalize a refine job payload.
+
+        Args:
+            data (dict[str, Any]): Serialized payload consumed by this operation.
+
+        Returns:
+            'PlanRefineJob': Result produced by this call.
+        """
         status = str(data.get("status") or "queued")
         if status not in _VALID_PLAN_REFINE_JOB_STATUSES:
             status = "queued"

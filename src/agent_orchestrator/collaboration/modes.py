@@ -12,7 +12,7 @@ from typing import Any
 
 
 class HITLMode(str, Enum):
-    """Represents HITLMode."""
+    """Supported human-in-the-loop execution modes."""
     AUTOPILOT = "autopilot"         # agents run freely, humans review after
     SUPERVISED = "supervised"       # agents propose, humans approve each step
     COLLABORATIVE = "collaborative" # humans and agents take turns
@@ -39,7 +39,11 @@ class ModeConfig:
     require_reasoning: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        """Return to dict."""
+        """Serialize the mode configuration for API and storage payloads.
+
+        Returns:
+            dict[str, Any]: Result produced by this call.
+        """
         return {
             "mode": self.mode.value,
             "display_name": self.display_name,
@@ -101,20 +105,36 @@ MODE_CONFIGS: dict[str, ModeConfig] = {
 
 
 def get_mode_config(mode: str) -> ModeConfig:
-    """Get the configuration for a HITL mode."""
+    """Get the configuration for a HITL mode.
+
+    Args:
+        mode (str): Requested mode identifier. Supported values are
+            ``autopilot``, ``supervised``, ``collaborative``, and
+            ``review_only``.
+
+    Returns:
+        ModeConfig: Configuration that controls approval gates and
+            unattended execution rules for the mode. Unknown values fall
+            back to the ``autopilot`` configuration.
+    """
     if mode not in MODE_CONFIGS:
         return MODE_CONFIGS[HITLMode.AUTOPILOT.value]
     return MODE_CONFIGS[mode]
 
 
 def should_gate(mode: str, gate_name: str) -> bool:
-    """Check if a given approval gate should be active for a mode.
+    """Check whether a mode enables a specific approval gate.
 
-    gate_name should be one of:
-    - 'before_plan'
-    - 'before_implement'
-    - 'before_commit'
-    - 'after_implement'
+    Args:
+        mode (str): Requested mode identifier. Unknown values use the
+            ``autopilot`` defaults via :func:`get_mode_config`.
+        gate_name (str): Gate name to evaluate. Supported values are
+            ``before_plan``, ``before_implement``, ``before_commit``, and
+            ``after_implement``.
+
+    Returns:
+        bool: ``True`` when the mode requires the named gate, otherwise
+            ``False``. Unsupported gate names return ``False``.
     """
     config = get_mode_config(mode)
     mapping = {

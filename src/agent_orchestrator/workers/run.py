@@ -23,7 +23,7 @@ from .config import WorkerProviderSpec
 
 @dataclass(frozen=True)
 class WorkerRunResult:
-    """Represents WorkerRunResult."""
+    """Structured outcome and artifacts from one worker command invocation."""
     provider: str
     prompt_path: str
     stdout_path: str
@@ -393,7 +393,24 @@ def run_worker(
     on_spawn: Optional[Callable[[int], None]] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
 ) -> WorkerRunResult:
-    """Run the selected provider and return a normalized run result."""
+    """Run the selected provider and return a normalized run result.
+
+    Args:
+        spec (WorkerProviderSpec): Spec for this call.
+        prompt (str): Prompt for this call.
+        project_dir (Path): Project dir for this call.
+        run_dir (Path): Run dir for this call.
+        timeout_seconds (int): Timeout seconds for this call.
+        heartbeat_seconds (int): Heartbeat seconds for this call.
+        heartbeat_grace_seconds (int): Heartbeat grace seconds for this call.
+        progress_path (Path): Progress path for this call.
+        expected_run_id (Optional[str]): Identifier for the related expected run.
+        on_spawn (Optional[Callable[[int], None]]): On spawn for this call.
+        is_cancelled (Optional[Callable[[], bool]]): Is cancelled for this call.
+
+    Returns:
+        WorkerRunResult: Result produced by this call.
+    """
     if spec.type in {"codex", "claude"}:
         provider_label = "Codex" if spec.type == "codex" else "Claude"
         logger.info("Starting {} worker provider='{}' (timeout={}s)", provider_label, spec.name, timeout_seconds)

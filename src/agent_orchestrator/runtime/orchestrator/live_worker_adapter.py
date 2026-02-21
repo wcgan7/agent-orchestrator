@@ -167,11 +167,18 @@ def _resolve_command_paths(
 
 
 def detect_project_languages(project_dir: Path) -> list[str]:
-    """Return all detected project languages based on marker files.
+    """Detect project languages from repository marker files.
 
-    Multiple markers for the same language are deduplicated (e.g. pyproject.toml
-    and setup.py both map to "python").  If a tsconfig.json is found alongside
-    package.json, only "typescript" is returned (it subsumes "javascript").
+    Args:
+        project_dir (Path): Repository root to scan for known language marker
+            files such as ``pyproject.toml`` and ``Cargo.toml``.
+
+    Returns:
+        list[str]: Ordered language identifiers inferred from marker presence.
+            Duplicates are removed when multiple markers map to the same
+            language. When both TypeScript and JavaScript markers are
+            present, ``javascript`` is omitted because ``typescript`` is
+            the stronger signal.
     """
     seen: dict[str, None] = {}  # ordered set
     for marker, lang in _LANGUAGE_MARKERS:
@@ -340,7 +347,7 @@ _WORKDOC_SKIP_STEPS = {"plan_refine", "initiative_plan_refine"}  # These steps d
 
 
 def _workdoc_prompt_section(step: str) -> str:
-    """Return the workdoc instruction block for a step, or empty string."""
+    """Build workdoc instructions for a step, or return an empty string."""
     if step in _WORKDOC_SKIP_STEPS:
         return ""
     step_specific = _WORKDOC_STEP_INSTRUCTIONS_BY_STEP.get(step)
@@ -518,7 +525,22 @@ def build_step_prompt(
     project_languages: list[str] | None = None,
     project_commands: dict[str, dict[str, str]] | None = None,
 ) -> str:
-    """Build a prompt from Task fields with step-specific instructions."""
+    """Build a prompt from Task fields with step-specific instructions.
+
+    Args:
+        task (Task): Task whose title, description, and metadata are used to
+            build the worker instruction payload.
+        step (str): Pipeline step name that selects the step-specific
+            instruction template.
+        attempt (int): One-based attempt number for the current step run.
+        project_languages (list[str] | None): Detected project languages used
+            to populate language-specific guidance in the prompt.
+        project_commands (dict[str, dict[str, str]] | None): Optional
+            language-to-command mapping surfaced to workers as execution hints.
+
+    Returns:
+        str: Fully rendered prompt text sent to the worker process.
+    """
     category = _step_category(step)
     pipeline_id = PipelineRegistry().resolve_for_task_type(task.task_type).id
     if step == "plan_refine":
@@ -1062,6 +1084,12 @@ class LiveWorkerAdapter:
     """Worker adapter that dispatches to real Codex/Ollama providers."""
 
     def __init__(self, container: Container) -> None:
+        """Initialize the LiveWorkerAdapter.
+
+        Args:
+            container (Container): Storage/service container used to resolve
+                configuration, repositories, and project paths.
+        """
         self._container = container
 
     @staticmethod
@@ -1117,14 +1145,32 @@ class LiveWorkerAdapter:
         return f"Human intervention required ({count} {suffix}): {first}"
 
     def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
-        """Return run step."""
+        """Execute one pipeline step using the configured live worker provider.
+
+        Args:
+            task (Task): Persisted task record being advanced.
+            step (str): Pipeline step to execute.
+            attempt (int): One-based retry count for this step.
+
+        Returns:
+            StepResult: Worker result including status, summary, and optional
+                structured payload fields.
+        """
         return self._execute_step(task=task, step=step, attempt=attempt, persist=True)
 
     def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:
-        """Like run_step but does not persist the task to storage.
+        """Execute a step without persisting task or run state updates.
 
-        Use for synthetic/throwaway tasks (e.g. pipeline classification,
-        dependency analysis) where the task object is only a prompt carrier.
+        This is used for synthetic tasks where the adapter only needs a prompt
+        carrier and should not mutate repositories.
+
+        Args:
+            task (Task): In-memory task payload used to build the worker prompt.
+            step (str): Pipeline step to execute.
+            attempt (int): One-based retry count for this step.
+
+        Returns:
+            StepResult: Worker response for the ephemeral execution path.
         """
         return self._execute_step(task=task, step=step, attempt=attempt, persist=False)
 
@@ -1705,7 +1751,17 @@ class LiveWorkerAdapter:
         return raw[:2000] if raw else "Summary generation failed"
 
     def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path) -> str:
-        """Produce a worker-generated summary for a completed run."""
+        """Produce a worker-generated summary for a completed run.
+
+        Args:
+            task (Task): Task that owns the completed run.
+            run (RunRecord): Completed run record to summarize.
+            project_dir (Path): Project root used to resolve workdoc context.
+
+        Returns:
+            str: Worker-produced summary text, or an empty string when summary
+                generation is unavailable.
+        """
         try:
             cfg = self._container.config.load()
             runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")

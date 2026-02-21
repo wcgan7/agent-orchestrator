@@ -9,7 +9,7 @@ from agent_orchestrator.collaboration.modes import (
 
 
 class TestHITLModes:
-    """Represents TestHITLModes."""
+    """Behavioral coverage for human-in-the-loop mode configuration rules."""
     def test_all_modes_defined(self):
         """Test that all modes defined."""
         for mode in HITLMode:

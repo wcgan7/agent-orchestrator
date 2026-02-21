@@ -37,8 +37,14 @@ class _LiveTerminal:
 
 
 class TerminalService:
-    """Represents TerminalService."""
+    """Manage interactive PTY sessions and persist their logs/metadata."""
     def __init__(self, container: Container, bus: EventBus) -> None:
+        """Initialize the TerminalService.
+
+        Args:
+            container (Container): Runtime persistence container for session records.
+            bus (EventBus): Event bus used to publish terminal lifecycle/output events.
+        """
         self._container = container
         self._bus = bus
         self._lock = threading.RLock()
@@ -115,11 +121,27 @@ class TerminalService:
             logger.debug("Failed to emit terminal event %s", event_type, exc_info=True)
 
     def get_session(self, session_id: str) -> Optional[TerminalSession]:
-        """Return get session."""
+        """Fetch a terminal session by id from persistent storage.
+
+        Args:
+            session_id (str): Identifier for the target session.
+
+        Returns:
+            Optional[TerminalSession]: Requested value when available; otherwise `None`.
+        """
         return self._container.terminal_sessions.get(session_id)
 
     def get_active_session(self, project_id: Optional[str] = None) -> Optional[TerminalSession]:
-        """Return get active session."""
+        """Fetch the currently running terminal session for a project.
+
+        Args:
+            project_id (Optional[str]): Project identifier to search. When omitted,
+                the container's default project id is used.
+
+        Returns:
+            Optional[TerminalSession]: Active session if a live PTY process still
+                exists; otherwise `None`.
+        """
         pid = project_id or self._container.project_id
         with self._lock:
             session = self._find_active_session(pid)
@@ -177,7 +199,18 @@ class TerminalService:
             pass
 
     def start_session(self, *, shell: Optional[str] = None, cols: int = 120, rows: int = 36) -> TerminalSession:
-        """Return start session."""
+        """Start a new shell session or return the current active one.
+
+        Args:
+            shell (Optional[str]): Requested shell executable path. If omitted, falls
+                back to ``$SHELL`` or a platform default.
+            cols (int): Initial terminal width in columns.
+            rows (int): Initial terminal height in rows.
+
+        Returns:
+            TerminalSession: Active terminal session metadata, including newly started
+                session details when startup succeeds.
+        """
         with self._lock:
             active = self.get_active_session(self._container.project_id)
             if active:
@@ -248,7 +281,18 @@ class TerminalService:
             return session
 
     def write_input(self, *, session_id: str, data: str) -> TerminalSession:
-        """Return write input."""
+        """Write user input to a live terminal session.
+
+        Args:
+            session_id (str): Identifier for the target session.
+            data (str): UTF-8 text payload to write to the PTY master.
+
+        Returns:
+            TerminalSession: Session metadata for the addressed terminal session.
+
+        Raises:
+            ValueError: If the session does not exist or is no longer active.
+        """
         if not data:
             session = self.get_session(session_id)
             if not session:
@@ -268,7 +312,19 @@ class TerminalService:
             return session
 
     def resize(self, *, session_id: str, cols: int, rows: int) -> TerminalSession:
-        """Return resize."""
+        """Resize the PTY for an active session.
+
+        Args:
+            session_id (str): Identifier for the target session.
+            cols (int): Desired terminal width in columns.
+            rows (int): Desired terminal height in rows.
+
+        Returns:
+            TerminalSession: Updated session metadata reflecting the new terminal size.
+
+        Raises:
+            ValueError: If the session does not exist or is no longer active.
+        """
         with self._lock:
             session = self._container.terminal_sessions.get(session_id)
             if not session:
@@ -283,7 +339,18 @@ class TerminalService:
             return session
 
     def stop_session(self, *, session_id: str, signal_name: str = "TERM") -> TerminalSession:
-        """Return stop session."""
+        """Send a termination signal to an active terminal session.
+
+        Args:
+            session_id (str): Identifier for the target session.
+            signal_name (str): Signal label to send (`TERM` by default, `KILL` supported).
+
+        Returns:
+            TerminalSession: Session metadata after attempting to send the signal.
+
+        Raises:
+            ValueError: If the session does not exist.
+        """
         with self._lock:
             session = self._container.terminal_sessions.get(session_id)
             if not session:
@@ -301,7 +368,19 @@ class TerminalService:
             return session
 
     def read_output(self, *, session_id: str, offset: int = 0, max_bytes: int = 65536) -> tuple[str, int]:
-        """Return read output."""
+        """Read session output from the persisted log starting at byte offset.
+
+        Args:
+            session_id (str): Identifier for the target session.
+            offset (int): Byte offset to start reading from in the output log.
+            max_bytes (int): Maximum number of bytes to read from the log.
+
+        Returns:
+            tuple[str, int]: Decoded output chunk and the next byte offset cursor.
+
+        Raises:
+            ValueError: If the session does not exist.
+        """
         session = self._container.terminal_sessions.get(session_id)
         if not session:
             raise ValueError("Terminal session not found")

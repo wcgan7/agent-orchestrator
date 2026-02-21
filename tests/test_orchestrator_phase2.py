@@ -252,7 +252,6 @@ def test_review_error_status_creates_step_log(tmp_path: Path) -> None:
 def test_implement_fix_sets_pipeline_phase(tmp_path: Path) -> None:
     """pipeline_phase metadata should track the logical pipeline step,
     even when current_step is a sub-step like implement_fix."""
-
     captured_phases: list[dict[str, Any]] = []
 
     class SpyAdapter(DefaultWorkerAdapter):
