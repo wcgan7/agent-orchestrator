@@ -1609,6 +1609,67 @@ _Pending: will be populated by the report step._
                 text=True,
             )
 
+    def approve_and_merge(self, task: Task) -> dict[str, Any]:
+        """Merge a preserved branch to the run branch on user approval.
+
+        Called when a user approves a blocked task whose work was preserved
+        on a git branch (e.g. after review-cap exceeded).
+        """
+        branch = task.metadata.get("preserved_branch")
+        if not branch:
+            return {"status": "ok"}
+
+        # Verify the branch exists
+        result = subprocess.run(
+            ["git", "branch", "--list", branch],
+            cwd=self.container.project_dir,
+            capture_output=True, text=True,
+        )
+        if not result.stdout.strip():
+            task.metadata.pop("preserved_branch", None)
+            self.container.tasks.upsert(task)
+            return {"status": "ok"}
+
+        self._ensure_branch()
+
+        with self._merge_lock:
+            try:
+                subprocess.run(
+                    ["git", "merge", branch, "--no-edit"],
+                    cwd=self.container.project_dir,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+            except subprocess.CalledProcessError:
+                resolved = self._resolve_merge_conflict(task, branch)
+                if not resolved:
+                    subprocess.run(
+                        ["git", "merge", "--abort"],
+                        cwd=self.container.project_dir,
+                        capture_output=True, text=True,
+                    )
+                    task.metadata["merge_conflict"] = True
+                    self.container.tasks.upsert(task)
+                    return {"status": "merge_conflict"}
+
+            # Capture SHA while still holding merge lock
+            sha = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=self.container.project_dir,
+                capture_output=True, text=True,
+            ).stdout.strip()
+
+        subprocess.run(
+            ["git", "branch", "-D", branch],
+            cwd=self.container.project_dir,
+            capture_output=True, text=True,
+        )
+        task.metadata.pop("preserved_branch", None)
+        task.metadata.pop("merge_conflict", None)
+        self.container.tasks.upsert(task)
+        return {"status": "ok", "commit_sha": sha}
+
     def _resolve_merge_conflict(self, task: Task, branch: str) -> bool:
         saved_worktree_dir = task.metadata.get("worktree_dir")
         try:
@@ -1689,6 +1750,12 @@ _Pending: will be populated by the report step._
             return
         if not (self.container.project_dir / ".git").exists():
             return
+        # Collect branches referenced as preserved by any task
+        preserved_branches: set[str] = set()
+        for t in self.container.tasks.list():
+            pb = t.metadata.get("preserved_branch") if isinstance(t.metadata, dict) else None
+            if pb:
+                preserved_branches.add(str(pb))
         for child in worktrees_dir.iterdir():
             if child.is_dir():
                 branch_name = f"task-{child.name}"
@@ -1698,12 +1765,14 @@ _Pending: will be populated by the report step._
                     capture_output=True,
                     text=True,
                 )
-                subprocess.run(
-                    ["git", "branch", "-D", branch_name],
-                    cwd=self.container.project_dir,
-                    capture_output=True,
-                    text=True,
-                )
+                # Only delete branch if it's not preserved by a task
+                if branch_name not in preserved_branches:
+                    subprocess.run(
+                        ["git", "branch", "-D", branch_name],
+                        cwd=self.container.project_dir,
+                        capture_output=True,
+                        text=True,
+                    )
 
     def _role_for_task(self, task: Task) -> str:
         cfg = self.container.config.load()
@@ -1784,6 +1853,43 @@ _Pending: will be populated by the report step._
             return bool(result.stdout.strip())
         except subprocess.CalledProcessError:
             return True
+
+    def _preserve_worktree_work(self, task: Task, worktree_dir: Path) -> bool:
+        """Commit agent edits in the worktree, remove the worktree but keep the branch.
+
+        Returns True if a branch was preserved with work on it.
+        """
+        branch = f"task-{task.id}"
+        try:
+            self._cleanup_workdoc_for_commit(worktree_dir)
+            self._commit_for_task(task, worktree_dir)
+
+            # Check if the branch has any commits beyond the run branch base
+            base_ref = self._run_branch or "HEAD"
+            try:
+                result = subprocess.run(
+                    ["git", "log", f"{base_ref}..{branch}", "--oneline"],
+                    cwd=self.container.project_dir,
+                    capture_output=True, text=True, check=True,
+                )
+                if not result.stdout.strip():
+                    return False
+            except subprocess.CalledProcessError:
+                # If we can't compare, assume there's work to preserve
+                pass
+
+            # Remove worktree directory but keep the branch
+            subprocess.run(
+                ["git", "worktree", "remove", str(worktree_dir), "--force"],
+                cwd=self.container.project_dir,
+                capture_output=True, text=True,
+            )
+            task.metadata["preserved_branch"] = branch
+            self.container.tasks.upsert(task)
+            return True
+        except Exception:
+            logger.exception("Failed to preserve worktree work for task %s", task.id)
+            return False
 
     def _exceeds_quality_gate(self, task: Task, findings: list[ReviewFinding]) -> bool:
         gate = dict(task.quality_gate or {})
@@ -2465,6 +2571,19 @@ _Pending: will be populated by the report step._
     def _execute_task_inner(self, task: Task) -> None:
         worktree_dir: Optional[Path] = None
         try:
+            # Clean up any preserved branch from a previous run (e.g. retry
+            # after review-cap block or cancellation) so _create_worktree can
+            # create a fresh branch with the same name.
+            old_preserved = task.metadata.pop("preserved_branch", None)
+            if old_preserved:
+                subprocess.run(
+                    ["git", "branch", "-D", str(old_preserved)],
+                    cwd=self.container.project_dir,
+                    capture_output=True, text=True,
+                )
+                task.metadata.pop("merge_conflict", None)
+                self.container.tasks.upsert(task)
+
             worktree_dir = self._create_worktree(task)
             if worktree_dir:
                 task.metadata["worktree_dir"] = str(worktree_dir)
@@ -2723,6 +2842,9 @@ _Pending: will be populated by the report step._
                 if not review_passed:
                     task.metadata.pop("review_history", None)
                     task.metadata.pop("verify_environment_note", None)
+                    if worktree_dir and worktree_dir.exists():
+                        if self._preserve_worktree_work(task, worktree_dir):
+                            worktree_dir = None  # prevent double-cleanup in finally
                     task.status = "blocked"
                     task.error = "Review attempt cap exceeded"
                     task.current_step = "review"
@@ -2770,7 +2892,7 @@ _Pending: will be populated by the report step._
                 if task.metadata.get("merge_conflict"):
                     task.status = "blocked"
                     task.error = "Merge conflict could not be resolved automatically"
-                    task.metadata["unmerged_branch"] = f"task-{task.id}"
+                    task.metadata["preserved_branch"] = f"task-{task.id}"
                     self.container.tasks.upsert(task)
                     self._finalize_run(task, run, status="blocked", summary="Blocked due to unresolved merge conflict")
                     self.bus.emit(
@@ -2826,20 +2948,35 @@ _Pending: will be populated by the report step._
             run.finished_at = now_iso()
             self.container.runs.upsert(run)
         finally:
-            # Clean up worktree on any failure path
             if worktree_dir and worktree_dir.exists():
-                subprocess.run(
-                    ["git", "worktree", "remove", str(worktree_dir), "--force"],
-                    cwd=self.container.project_dir,
-                    capture_output=True,
-                    text=True,
-                )
-                subprocess.run(
-                    ["git", "branch", "-D", f"task-{task.id}"],
-                    cwd=self.container.project_dir,
-                    capture_output=True,
-                    text=True,
-                )
+                preserved = task.metadata.get("preserved_branch")
+                if not preserved:
+                    # Safety net: try to commit and preserve work that would be lost
+                    try:
+                        if self._has_uncommitted_changes(worktree_dir):
+                            self._preserve_worktree_work(task, worktree_dir)
+                            preserved = task.metadata.get("preserved_branch")
+                    except Exception:
+                        pass  # best-effort; fall through to full cleanup
+                if preserved:
+                    # Branch preserved — remove worktree dir only, keep branch
+                    subprocess.run(
+                        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+                        cwd=self.container.project_dir,
+                        capture_output=True, text=True,
+                    )
+                else:
+                    # Nothing to preserve — full cleanup (worktree + branch)
+                    subprocess.run(
+                        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+                        cwd=self.container.project_dir,
+                        capture_output=True, text=True,
+                    )
+                    subprocess.run(
+                        ["git", "branch", "-D", f"task-{task.id}"],
+                        cwd=self.container.project_dir,
+                        capture_output=True, text=True,
+                    )
             if task.metadata.pop("worktree_dir", None):
                 self.container.tasks.upsert(task)
 
