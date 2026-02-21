@@ -1539,6 +1539,9 @@ class LiveWorkerAdapter:
                     return StepResult(status="ok", summary=str(diagnosis_summary).strip()[:20000])
             return StepResult(status="ok", summary=result.response_text.strip()[:20000])
 
+        if category == "fix" and result.response_text:
+            return StepResult(status="ok", summary=result.response_text.strip()[:20000])
+
         if category == "task_generation" and result.response_text:
             parsed_value = _extract_json_value(result.response_text)
             if isinstance(parsed_value, list):
