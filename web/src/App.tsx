@@ -8,7 +8,7 @@ import { humanizeLabel } from './ui/labels'
 import './styles/orchestrator.css'
 
 type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
-type CreateTab = 'task' | 'import' | 'terminal'
+type CreateTab = 'task' | 'import'
 type TaskDetailTab = 'overview' | 'plan' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
 type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition'
 
@@ -1361,6 +1361,7 @@ export default function App() {
 
   const [workOpen, setWorkOpen] = useState(false)
   const [createTab, setCreateTab] = useState<CreateTab>('task')
+  const [terminalOpen, setTerminalOpen] = useState(false)
   const [selectedTaskId, setSelectedTaskId] = useState<string>('')
   const modalDismissedRef = useRef(false)
   const modalExplicitRef = useRef(false)
@@ -1415,6 +1416,7 @@ export default function App() {
   const [editTaskProjectCommands, setEditTaskProjectCommands] = useState('')
 
   const [isSubmittingTask, setIsSubmittingTask] = useState(false)
+  const [submittingTaskTarget, setSubmittingTaskTarget] = useState<'queued' | 'backlog' | null>(null)
   const [newTaskTitle, setNewTaskTitle] = useState('')
   const [newTaskDescription, setNewTaskDescription] = useState('')
   const [newTaskType, setNewTaskType] = useState('auto')
@@ -2781,13 +2783,18 @@ export default function App() {
     }
     // For transitions the board reload changes which buttons render, so
     // clearing the pending flag early causes a brief flash of the idle
-    // button label before the new status takes effect.  Keep the pending
-    // state for transitions — React will unmount the old buttons when the
-    // task status updates.  For other mutations (save, retry) clear
-    // immediately so the UI becomes interactive again.
+    // button label before the new status takes effect.  Defer clearing
+    // for transitions so React renders the updated status first, then
+    // the new buttons become interactive.
     if (kind !== 'transition') {
       setTaskActionPending(null)
       setTaskActionDetail('')
+    } else {
+      // Use a microtask so the status-driven button swap renders first
+      queueMicrotask(() => {
+        setTaskActionPending(null)
+        setTaskActionDetail('')
+      })
     }
   }
 
@@ -2796,6 +2803,7 @@ export default function App() {
     if (!newTaskTitle.trim()) return
     if (isSubmittingTask) return
     setIsSubmittingTask(true)
+    setSubmittingTaskTarget(statusOverride ?? 'queued')
     try {
     let parsedMetadata: Record<string, unknown> | undefined
     if (newTaskMetadata.trim()) {
@@ -2941,6 +2949,7 @@ export default function App() {
     await reloadAll()
     } finally {
       setIsSubmittingTask(false)
+      setSubmittingTaskTarget(null)
     }
   }
 
@@ -5583,13 +5592,14 @@ export default function App() {
               {(selectedTaskView.pipeline_template || []).length > 0 ? (() => {
                 const pipelineSteps = selectedTaskView.pipeline_template!
                 const currentStep = selectedTaskView.current_step || null
+                const pipelinePhase = String(selectedTaskView.metadata?.pipeline_phase || '') || currentStep
                 const isDone = selectedTaskView.status === 'done' || selectedTaskView.status === 'in_review'
-                const currentIdx = currentStep ? pipelineSteps.indexOf(currentStep) : -1
+                const phaseIdx = pipelinePhase ? pipelineSteps.indexOf(pipelinePhase) : -1
                 return (
                   <div className="pipeline-flow">
                     {pipelineSteps.map((step, idx) => {
-                      const isCurrent = step === currentStep && !isDone
-                      const isCompleted = isDone || (currentIdx >= 0 && idx < currentIdx)
+                      const isCurrent = step === pipelinePhase && !isDone
+                      const isCompleted = isDone || (phaseIdx >= 0 && idx < phaseIdx)
                       const cls = isCurrent ? 'pipeline-step is-current' : isCompleted ? 'pipeline-step is-completed' : 'pipeline-step'
                       return (
                         <span key={step} className="pipeline-step-wrap">
@@ -5707,7 +5717,6 @@ export default function App() {
               <div className="tab-row">
                 <button className={`tab ${createTab === 'task' ? 'is-active' : ''}`} onClick={() => setCreateTab('task')}>Create Task</button>
                 <button className={`tab ${createTab === 'import' ? 'is-active' : ''}`} onClick={() => setCreateTab('import')}>Import PRD</button>
-                <button className={`tab ${createTab === 'terminal' ? 'is-active' : ''}`} onClick={() => setCreateTab('terminal')}>Terminal</button>
               </div>
             </div>
 
@@ -5885,16 +5894,11 @@ export default function App() {
                 </div>
               ) : null}
 
-              {createTab === 'terminal' ? (
-                <div className="form-stack">
-                  <TerminalPanel projectDir={projectDir} />
-                </div>
-              ) : null}
             </div>
             {createTab === 'task' ? (
               <div className="modal-footer">
-                <button className="button button-primary" type="submit" form="create-task-form" disabled={isSubmittingTask}>{isSubmittingTask ? 'Creating…' : 'Create & Queue'}</button>
-                <button className="button" type="button" onClick={(event) => void submitTask(event, 'backlog')} disabled={isSubmittingTask}>{isSubmittingTask ? 'Creating…' : 'Add to Backlog'}</button>
+                <button className="button button-primary" type="submit" form="create-task-form" disabled={isSubmittingTask}>{submittingTaskTarget === 'queued' ? 'Creating…' : 'Create & Queue'}</button>
+                <button className="button" type="button" onClick={(event) => void submitTask(event, 'backlog')} disabled={isSubmittingTask}>{submittingTaskTarget === 'backlog' ? 'Creating…' : 'Add to Backlog'}</button>
               </div>
             ) : null}
           </div>
@@ -5959,6 +5963,11 @@ export default function App() {
           </div>
         </div>
       ) : null}
+
+      <div className={`terminal-float ${terminalOpen ? 'is-open' : ''}`}>
+        <TerminalPanel projectDir={projectDir} visible={terminalOpen} onMinimize={() => setTerminalOpen(false)} />
+      </div>
+      <button className="terminal-fab" onClick={() => setTerminalOpen(v => !v)} aria-label="Toggle terminal" title="Terminal">&gt;_</button>
     </div>
   )
 }

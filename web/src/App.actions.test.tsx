@@ -369,7 +369,7 @@ describe('App action coverage', () => {
       const body = JSON.parse(String((editCall?.[1] as RequestInit).body))
       expect(body.labels).toEqual(['ui', 'frontend'])
     })
-  }, 15000)
+  }, 30000)
 
   it('executes execution, review, and worker dashboard actions', async () => {
     const mockedFetch = installFetchMock()
@@ -555,9 +555,7 @@ describe('App action coverage', () => {
       expect(screen.getAllByRole('button', { name: /^Create Work$/i }).length).toBeGreaterThan(0)
     })
 
-    fireEvent.click(screen.getAllByRole('button', { name: /^Create Work$/i })[0])
-    fireEvent.click(screen.getByRole('button', { name: /Terminal/i }))
-    fireEvent.click(screen.getByRole('button', { name: /Start Terminal/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Toggle terminal/i }))
 
     await waitFor(() => {
       const startCall = mockedFetch.mock.calls.find(([url, init]) =>

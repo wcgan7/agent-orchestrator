@@ -2560,13 +2560,25 @@ def create_router(
 
     @router.post("/review/{task_id}/approve")
     async def approve_review(task_id: str, body: ReviewActionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
-        container, bus, _ = _ctx(project_dir)
+        container, bus, orchestrator = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
-        if task.status != "in_review":
-            raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review")
+        if task.status not in ("in_review", "blocked"):
+            raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review or blocked")
+
+        # If there's a preserved branch, merge it before marking done
+        if task.metadata.get("preserved_branch"):
+            merge_result = orchestrator.approve_and_merge(task)
+            if merge_result.get("status") == "merge_conflict":
+                raise HTTPException(status_code=409, detail="Merge conflict could not be resolved")
+            # Re-fetch task after merge (approve_and_merge upserts)
+            task = container.tasks.get(task_id)
+            if not task:
+                raise HTTPException(status_code=404, detail="Task not found after merge")
+
         task.status = "done"
+        task.error = None
         ts = now_iso()
         task.metadata["last_review_approval"] = {"ts": ts, "guidance": body.guidance}
         history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])

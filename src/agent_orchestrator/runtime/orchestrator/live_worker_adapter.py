@@ -1387,8 +1387,16 @@ class LiveWorkerAdapter:
             return StepResult(status="error", summary="Review output formatter returned invalid JSON")
 
         findings = parsed.get("findings")
+        human_issues = parsed.get("human_blocking_issues")
+        human_blocking: list[dict[str, str]] | None = None
+        if isinstance(human_issues, list) and human_issues:
+            human_blocking = [
+                {"summary": str(h.get("summary") or h if isinstance(h, dict) else h).strip()}
+                for h in human_issues if h
+            ]
+            human_blocking = [h for h in human_blocking if h["summary"]] or None
         if isinstance(findings, list):
-            return StepResult(status="ok", findings=_normalize_review_findings(findings))
+            return StepResult(status="ok", findings=_normalize_review_findings(findings), human_blocking_issues=human_blocking)
 
         return StepResult(status="error", summary="Review output formatter returned no findings field")
 
@@ -1509,8 +1517,16 @@ class LiveWorkerAdapter:
             parsed = _extract_json(result.response_text)
             if isinstance(parsed, dict):
                 findings = parsed.get("findings")
+                human_issues = parsed.get("human_blocking_issues")
+                human_blocking: list[dict[str, str]] | None = None
+                if isinstance(human_issues, list) and human_issues:
+                    human_blocking = [
+                        {"summary": str(h.get("summary") or h if isinstance(h, dict) else h).strip()}
+                        for h in human_issues if h
+                    ]
+                    human_blocking = [h for h in human_blocking if h["summary"]] or None
                 if isinstance(findings, list):
-                    return StepResult(status="ok", findings=_normalize_review_findings(findings))
+                    return StepResult(status="ok", findings=_normalize_review_findings(findings), human_blocking_issues=human_blocking)
                 return StepResult(status="error", summary="Review output JSON missing findings array")
 
         if category == "pipeline_classification" and result.response_text:
@@ -1537,6 +1553,9 @@ class LiveWorkerAdapter:
                 diagnosis_summary = parsed.get("diagnosis") or parsed.get("summary")
                 if diagnosis_summary:
                     return StepResult(status="ok", summary=str(diagnosis_summary).strip()[:20000])
+            return StepResult(status="ok", summary=result.response_text.strip()[:20000])
+
+        if category == "fix" and result.response_text:
             return StepResult(status="ok", summary=result.response_text.strip()[:20000])
 
         if category == "task_generation" and result.response_text:

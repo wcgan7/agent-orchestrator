@@ -35,6 +35,7 @@ Severity calibration logic:
 Consistency and convergence:
 - If prior review cycles are provided, do not contradict previously accepted decisions unless new critical evidence appears.
 - Do not re-raise findings already resolved.
+- If a finding has appeared open in multiple prior review cycles and the worker has attempted but failed to fix it, do not re-raise it in `findings`. Instead, include it in `human_blocking_issues` so it is escalated for human review rather than triggering another futile fix cycle.
 - After the first cycle, do not introduce new cosmetic/low-value findings unless they stem from newly changed code.
 
 Documentation check:
@@ -54,5 +55,6 @@ Output requirements:
   - line (if known)
   - suggested_fix
   - status (`open|resolved`, default to `open`)
+- Optionally include `"human_blocking_issues": [{"summary": "description of issue requiring human attention"}]` for issues the worker has repeatedly failed to resolve and that likely require human intervention, infrastructure changes, or scope adjustment.
 - Findings must be specific, evidence-based, and reproducible.
 - Do not speculate. Do not suppress or down-rank valid findings.

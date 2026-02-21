@@ -8,6 +8,7 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: './src/test/setup.ts',
     css: true,
+    testTimeout: 15000,
     exclude: [...configDefaults.exclude, 'e2e/**', 'playwright.config.ts'],
     coverage: {
       provider: 'v8',

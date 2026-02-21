@@ -2385,3 +2385,101 @@ textarea {
   align-items: center;
   margin-top: 0.75rem;
 }
+
+/* ── Floating Terminal ── */
+.terminal-float {
+  position: fixed;
+  bottom: 1rem;
+  right: 1rem;
+  width: min(720px, calc(100vw - 2rem));
+  height: 420px;
+  z-index: 90;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border-default);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+  transform: translateY(calc(100% + 2rem));
+  opacity: 0;
+  pointer-events: none;
+  transition: transform var(--transition-slower), opacity var(--transition-base);
+}
+.terminal-float.is-open {
+  transform: translateY(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+.terminal-float-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.4rem 0.7rem;
+  border-bottom: 1px solid var(--color-border-default);
+  background: var(--color-bg-secondary);
+}
+.terminal-float-title {
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+.terminal-float-actions {
+  display: flex;
+  gap: 0.3rem;
+  align-items: center;
+}
+.terminal-float-btn {
+  background: none;
+  border: 1px solid var(--color-border-default);
+  border-radius: 6px;
+  width: 1.6rem;
+  height: 1.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 0.7rem;
+  color: var(--color-text-secondary);
+  padding: 0;
+  min-height: 0;
+}
+.terminal-float-btn:hover {
+  background: var(--color-bg-tertiary);
+}
+.terminal-float-body {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.terminal-fab {
+  position: fixed;
+  bottom: 1.2rem;
+  right: 1.2rem;
+  z-index: 90;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: none;
+  background: var(--color-primary-600);
+  color: var(--color-text-inverse);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 1rem;
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  min-height: 0;
+  padding: 0;
+  transition: opacity var(--transition-base);
+}
+.terminal-fab:hover {
+  background: var(--color-primary-700);
+}
+/* Hide FAB when panel is open */
+.terminal-float.is-open ~ .terminal-fab {
+  opacity: 0;
+  pointer-events: none;
+}

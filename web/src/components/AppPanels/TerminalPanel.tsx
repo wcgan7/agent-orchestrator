@@ -18,6 +18,8 @@ type TerminalSessionRecord = {
 
 type TerminalPanelProps = {
   projectDir: string
+  visible?: boolean
+  onMinimize?: () => void
 }
 
 function buildApiUrl(path: string, projectDir?: string): string {
@@ -27,7 +29,7 @@ function buildApiUrl(path: string, projectDir?: string): string {
   return `${path}${joiner}project_dir=${encodeURIComponent(trimmed)}`
 }
 
-export function TerminalPanel({ projectDir }: TerminalPanelProps): JSX.Element {
+export function TerminalPanel({ projectDir, visible, onMinimize }: TerminalPanelProps): JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
   const terminalRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -36,7 +38,6 @@ export function TerminalPanel({ projectDir }: TerminalPanelProps): JSX.Element {
   const logsOffsetRef = useRef<number>(0)
   const resizeTimerRef = useRef<number | null>(null)
   const [session, setSession] = useState<TerminalSessionRecord | null>(null)
-  const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
   const wsUrl = useMemo(() => {
@@ -85,6 +86,26 @@ export function TerminalPanel({ projectDir }: TerminalPanelProps): JSX.Element {
     }
   }, [projectDir])
 
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const ro = new ResizeObserver(() => { fitRef.current?.fit() })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (!visible) return
+    const id = requestAnimationFrame(() => {
+      fitRef.current?.fit()
+      terminalRef.current?.focus()
+      if (!sessionRef.current || sessionRef.current.status !== 'running') {
+        void startOrAttach()
+      }
+    })
+    return () => cancelAnimationFrame(id)
+  }, [visible])
+
   function setSessionState(next: TerminalSessionRecord | null): void {
     sessionRef.current = next
     setSession(next)
@@ -123,7 +144,6 @@ export function TerminalPanel({ projectDir }: TerminalPanelProps): JSX.Element {
   }
 
   async function startOrAttach(): Promise<void> {
-    setLoading(true)
     setError('')
     try {
       fitRef.current?.fit()
@@ -150,20 +170,22 @@ export function TerminalPanel({ projectDir }: TerminalPanelProps): JSX.Element {
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unknown error'
       setError(`Failed to start terminal session (${detail})`)
-    } finally {
-      setLoading(false)
     }
   }
 
-  async function stopSession(): Promise<void> {
+  async function hardReset(): Promise<void> {
     const current = sessionRef.current
-    if (!current) return
-    await fetch(buildApiUrl(`/api/terminal/session/${current.id}/stop`, projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signal: 'TERM' }),
-    }).catch(() => undefined)
-    await refreshActive()
+    if (current) {
+      await fetch(buildApiUrl(`/api/terminal/session/${current.id}/stop`, projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ signal: 'KILL' }),
+      }).catch(() => undefined)
+    }
+    terminalRef.current?.clear()
+    setSessionState(null)
+    logsOffsetRef.current = 0
+    await startOrAttach()
   }
 
   useEffect(() => {
@@ -260,34 +282,22 @@ export function TerminalPanel({ projectDir }: TerminalPanelProps): JSX.Element {
   }, [projectDir])
 
   return (
-    <div className="form-stack">
-      <p className="hint">Interactive shell session. Commands run directly in project directory.</p>
-      <div className="inline-actions">
-        <button className="button button-primary" onClick={() => void startOrAttach()} disabled={loading}>
-          {session ? 'Attach / Restart' : 'Start Terminal'}
-        </button>
-        <button className="button" onClick={() => void refreshActive()} disabled={loading}>
-          Reconnect
-        </button>
-        <button className="button" onClick={() => void stopSession()} disabled={!session || session.status !== 'running'}>
-          Stop
-        </button>
-        <button className="button" onClick={() => terminalRef.current?.clear()}>
-          Clear View
-        </button>
+    <>
+      <div className="terminal-float-header">
+        <span className="terminal-float-title">Terminal</span>
+        <div className="terminal-float-actions">
+          <button className="terminal-float-btn" onClick={() => terminalRef.current?.clear()} aria-label="Clear" title="Clear">&#x232B;</button>
+          <button className="terminal-float-btn" onClick={() => void hardReset()} aria-label="Restart" title="Restart session">&#x21BB;</button>
+          {onMinimize ? <button className="terminal-float-btn" onClick={onMinimize} aria-label="Minimize terminal" title="Minimize">&minus;</button> : null}
+        </div>
       </div>
-      {error ? <p className="error-banner">{error}</p> : null}
-      {session ? (
-        <p className="task-meta">
-          {session.status} · shell: {session.shell || '-'} · cwd: {session.cwd || '-'} · started: {session.started_at || '-'} · exit: {session.exit_code ?? '-'}
-        </p>
-      ) : (
-        <p className="task-meta">No active terminal session.</p>
-      )}
-      <div
-        ref={containerRef}
-        style={{ height: 360, width: '100%', background: '#111', borderRadius: 8, padding: 4 }}
-      />
-    </div>
+      <div className="terminal-float-body">
+        {error ? <p className="error-banner" style={{ margin: '0.3rem 0.5rem' }}>{error}</p> : null}
+        <div
+          ref={containerRef}
+          style={{ height: '100%', width: '100%', background: '#111', borderRadius: '0 0 12px 12px', padding: 4, flex: 1, minHeight: 0 }}
+        />
+      </div>
+    </>
   )
 }
