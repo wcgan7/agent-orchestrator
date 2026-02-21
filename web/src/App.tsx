@@ -2134,7 +2134,7 @@ export default function App() {
         // to avoid a blank flash between step transitions.
         setPlanRefineStdout('')
         setPlanGenerateStdout('')
-        void loadTaskLogs(taskId, true)
+        void loadTaskLogs(taskId, true, logViewStepRef.current || undefined)
         return
       }
       if (!accum.logId && payloadLogId) {
