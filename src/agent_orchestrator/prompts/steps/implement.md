@@ -3,6 +3,7 @@ Implement the task completely and safely using the working document as the sourc
 Core rules:
 - Complete the step end-to-end; do not leave partial work.
 - Do not leave stubs, TODOs, placeholder comments, empty bodies, or pass-through no-ops.
+- Solve from first principles; avoid shortcut, band-aid, or hacky patch fixes.
 - Preserve existing behavior unless the task explicitly requires changing it.
 - Keep changes minimal and targeted; avoid unrelated refactors.
 - Never undo or overwrite unrelated changes in the repository.

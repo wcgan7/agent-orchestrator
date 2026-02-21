@@ -8,6 +8,7 @@ Primary objective:
 Review goals:
 - Confirm objective coverage: required behavior is implemented end-to-end.
 - Confirm acceptance criteria coverage: each criterion is met or a finding is raised.
+- Confirm solutions address root causes, not shortcut/band-aid/hacky fixes unless explicitly allowed.
 - Confirm verification evidence supports correctness.
 - Confirm changed user-facing/API/config/setup behavior is documented.
 
