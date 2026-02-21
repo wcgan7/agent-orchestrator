@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import yaml
 
 from agent_orchestrator.server.api import create_app
 from agent_orchestrator.runtime.orchestrator import DefaultWorkerAdapter
@@ -258,6 +259,181 @@ def test_create_task_drops_invalid_classifier_metadata_for_manual_task(tmp_path:
         assert "classifier_reason" not in metadata
         assert "was_user_override" not in metadata
         assert metadata["final_pipeline_id"] == "feature"
+
+
+def test_tasks_board_uses_status_aware_ordering(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        seeded = {
+            "backlog_high": client.post("/api/tasks", json={"title": "Backlog high", "priority": "P1"}).json()["task"]["id"],
+            "backlog_urgent": client.post("/api/tasks", json={"title": "Backlog urgent", "priority": "P0"}).json()["task"]["id"],
+            "in_progress_old": client.post("/api/tasks", json={"title": "In progress old", "priority": "P1"}).json()["task"]["id"],
+            "in_progress_new": client.post("/api/tasks", json={"title": "In progress new", "priority": "P1"}).json()["task"]["id"],
+            "in_review_old": client.post("/api/tasks", json={"title": "In review old", "priority": "P1"}).json()["task"]["id"],
+            "in_review_new": client.post("/api/tasks", json={"title": "In review new", "priority": "P1"}).json()["task"]["id"],
+            "blocked_old": client.post("/api/tasks", json={"title": "Blocked old", "priority": "P1"}).json()["task"]["id"],
+            "blocked_new": client.post("/api/tasks", json={"title": "Blocked new", "priority": "P1"}).json()["task"]["id"],
+            "done_old": client.post("/api/tasks", json={"title": "Done old", "priority": "P2"}).json()["task"]["id"],
+            "done_new": client.post("/api/tasks", json={"title": "Done new", "priority": "P3"}).json()["task"]["id"],
+            "done_p0": client.post("/api/tasks", json={"title": "Done p0", "priority": "P0"}).json()["task"]["id"],
+            "done_p1": client.post("/api/tasks", json={"title": "Done p1", "priority": "P1"}).json()["task"]["id"],
+            "cancelled_old": client.post("/api/tasks", json={"title": "Cancelled old", "priority": "P1"}).json()["task"]["id"],
+            "cancelled_new": client.post("/api/tasks", json={"title": "Cancelled new", "priority": "P1"}).json()["task"]["id"],
+        }
+        tasks_path = tmp_path / ".agent_orchestrator" / "tasks.yaml"
+        payload = yaml.safe_load(tasks_path.read_text(encoding="utf-8")) or {}
+        records = payload.get("tasks") or []
+        by_id = {str(item.get("id")): item for item in records if isinstance(item, dict)}
+
+        for task_id, fields in {
+            seeded["backlog_high"]: {
+                "status": "backlog",
+                "created_at": "2026-01-02T00:00:00+00:00",
+                "updated_at": "2026-01-02T00:00:00+00:00",
+            },
+            seeded["backlog_urgent"]: {
+                "status": "backlog",
+                "created_at": "2026-01-10T00:00:00+00:00",
+                "updated_at": "2026-01-10T00:00:00+00:00",
+            },
+            seeded["in_progress_old"]: {
+                "status": "in_progress",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-05T00:00:00+00:00",
+            },
+            seeded["in_progress_new"]: {
+                "status": "in_progress",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-06T00:00:00+00:00",
+            },
+            seeded["in_review_old"]: {
+                "status": "in_review",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-05T00:00:00+00:00",
+            },
+            seeded["in_review_new"]: {
+                "status": "in_review",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-06T00:00:00+00:00",
+            },
+            seeded["blocked_old"]: {
+                "status": "blocked",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-03T00:00:00+00:00",
+            },
+            seeded["blocked_new"]: {
+                "status": "blocked",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-04T00:00:00+00:00",
+            },
+            seeded["done_old"]: {
+                "status": "done",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-05T00:00:00+00:00",
+            },
+            seeded["done_new"]: {
+                "status": "done",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-07T00:00:00+00:00",
+            },
+            seeded["done_p0"]: {
+                "status": "done",
+                "created_at": "2026-01-02T00:00:00+00:00",
+                "updated_at": "2026-01-06T00:00:00+00:00",
+            },
+            seeded["done_p1"]: {
+                "status": "done",
+                "created_at": "2026-01-03T00:00:00+00:00",
+                "updated_at": "2026-01-06T00:00:00+00:00",
+            },
+            seeded["cancelled_old"]: {
+                "status": "cancelled",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-02T00:00:00+00:00",
+            },
+            seeded["cancelled_new"]: {
+                "status": "cancelled",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-03T00:00:00+00:00",
+            },
+        }.items():
+            assert task_id in by_id
+            by_id[task_id].update(fields)
+
+        tasks_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+        board = client.get("/api/tasks/board")
+        assert board.status_code == 200
+        columns = board.json()["columns"]
+
+        assert [item["id"] for item in columns["backlog"]] == [seeded["backlog_urgent"], seeded["backlog_high"]]
+        assert [item["id"] for item in columns["in_progress"]] == [seeded["in_progress_new"], seeded["in_progress_old"]]
+        assert [item["id"] for item in columns["in_review"]] == [seeded["in_review_old"], seeded["in_review_new"]]
+        assert [item["id"] for item in columns["blocked"]] == [seeded["blocked_new"], seeded["blocked_old"]]
+        assert [item["id"] for item in columns["done"]] == [
+            seeded["done_new"],
+            seeded["done_p0"],
+            seeded["done_p1"],
+            seeded["done_old"],
+        ]
+        assert [item["id"] for item in columns["cancelled"]] == [seeded["cancelled_new"], seeded["cancelled_old"]]
+
+
+def test_tasks_board_sorting_is_deterministic_for_ties_and_missing_timestamps(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        done_new = client.post("/api/tasks", json={"title": "Done with timestamp", "priority": "P2"}).json()["task"]["id"]
+        done_bad_a = client.post("/api/tasks", json={"title": "Done malformed A", "priority": "P2"}).json()["task"]["id"]
+        done_bad_b = client.post("/api/tasks", json={"title": "Done malformed B", "priority": "P2"}).json()["task"]["id"]
+        backlog_tie_a = client.post("/api/tasks", json={"title": "Backlog tie A", "priority": "P2"}).json()["task"]["id"]
+        backlog_tie_b = client.post("/api/tasks", json={"title": "Backlog tie B", "priority": "P2"}).json()["task"]["id"]
+
+        done_tie_ids = sorted([done_bad_a, done_bad_b])
+        backlog_tie_ids = sorted([backlog_tie_a, backlog_tie_b])
+
+        tasks_path = tmp_path / ".agent_orchestrator" / "tasks.yaml"
+        payload = yaml.safe_load(tasks_path.read_text(encoding="utf-8")) or {}
+        records = payload.get("tasks") or []
+        by_id = {str(item.get("id")): item for item in records if isinstance(item, dict)}
+
+        for task_id, fields in {
+            done_new: {
+                "status": "done",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-04T00:00:00+00:00",
+            },
+            done_bad_a: {
+                "status": "done",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "not-a-timestamp",
+            },
+            done_bad_b: {
+                "status": "done",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "not-a-timestamp",
+            },
+            backlog_tie_a: {
+                "status": "backlog",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+            backlog_tie_b: {
+                "status": "backlog",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+        }.items():
+            assert task_id in by_id
+            by_id[task_id].update(fields)
+
+        tasks_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+        board = client.get("/api/tasks/board")
+        assert board.status_code == 200
+        columns = board.json()["columns"]
+
+        assert [item["id"] for item in columns["done"]] == [done_new, *done_tie_ids]
+        assert [item["id"] for item in columns["backlog"]] == backlog_tie_ids
 
 
 def test_terminal_session_is_singleton_per_project(tmp_path: Path) -> None:

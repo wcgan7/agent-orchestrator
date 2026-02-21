@@ -179,10 +179,12 @@ class WorktreeManager:
 
             other_tasks_info: list[str] = []
             other_objectives: list[str] = []
-            for other in svc.container.tasks.list():
-                if other.id != task.id and other.status == "done":
-                    other_tasks_info.append(f"- {other.title}: {other.description}")
-                    other_objectives.append(self.format_task_objective_summary(other))
+            peers = [other for other in svc.container.tasks.list() if other.id != task.id and other.status == "done"]
+            if not peers:
+                peers = [other for other in svc.container.tasks.list() if other.id != task.id]
+            for other in peers:
+                other_tasks_info.append(f"- {other.title}: {other.description}")
+                other_objectives.append(self.format_task_objective_summary(other))
 
             task.metadata.pop("worktree_dir", None)
             task.metadata["merge_conflict_files"] = conflict_contents

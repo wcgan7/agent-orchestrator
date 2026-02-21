@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime
 from typing import Any, Optional, cast
 
 from fastapi import APIRouter, HTTPException, Query
@@ -44,6 +45,42 @@ _read_from_offset = impl._read_from_offset
 _read_tail = impl._read_tail
 _safe_state_path = impl._safe_state_path
 _task_payload = impl._task_payload
+
+
+def _timestamp_sort_value(value: Any, *, descending: bool) -> float:
+    """Convert ISO timestamps into sortable numeric values."""
+    raw = str(value or "").strip()
+    if not raw:
+        return float("inf")
+    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return float("inf")
+    stamp = parsed.timestamp()
+    return -stamp if descending else stamp
+
+
+def _board_item_sort_key(status: str, item: dict[str, Any]) -> tuple[Any, ...]:
+    """Return status-aware sort keys for Kanban board columns."""
+    priority = _priority_rank(str(item.get("priority") or "P3"))
+    created_at = _timestamp_sort_value(item.get("created_at"), descending=False)
+    updated_at_asc = _timestamp_sort_value(item.get("updated_at"), descending=False)
+    updated_at_desc = _timestamp_sort_value(item.get("updated_at"), descending=True)
+    task_id = str(item.get("id") or "")
+    if status in {"backlog", "queued"}:
+        return (priority, created_at, updated_at_asc, task_id)
+    if status == "in_progress":
+        return (priority, updated_at_desc, created_at, task_id)
+    if status == "in_review":
+        return (priority, updated_at_asc, created_at, task_id)
+    if status == "blocked":
+        return (priority, updated_at_desc, created_at, task_id)
+    if status == "done":
+        return (updated_at_desc, priority, created_at, task_id)
+    if status == "cancelled":
+        return (updated_at_desc, priority, created_at, task_id)
+    return (priority, created_at, updated_at_asc, task_id)
 
 
 def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
@@ -224,8 +261,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         }
         for task in container.tasks.list():
             columns.setdefault(task.status, []).append(_task_payload(task))
-        for key, items in columns.items():
-            items.sort(key=lambda x: (_priority_rank(str(x.get("priority") or "P3")), str(x.get("created_at") or "")))
+        for status, items in columns.items():
+            items.sort(key=lambda item: _board_item_sort_key(status, item))
         return {"columns": columns}
 
     @router.get("/tasks/execution-order")

@@ -13,6 +13,10 @@ Primary surfaces in the web app:
 - `Settings`
 - `Create Work` drawer (`Create Task`, `Import PRD`, `Terminal`)
 
+Board ordering defaults:
+- Active columns prioritize urgency (`P0` first) with status-specific recency signals.
+- `Done` shows newest completions first (based on most recent `updated_at`).
+
 ## Quick Start
 
 Start backend:
