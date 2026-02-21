@@ -1129,6 +1129,14 @@ function coerceMessageText(value: unknown): string {
 }
 
 function renderStructuredStdoutChunk(raw: string, prevHasTextDelta = false): StructuredStdoutChunk {
+  const shouldPreservePlainLine = (trimmed: string): boolean => {
+    if (!trimmed) return false
+    // Drop likely orphaned JSON fragments introduced by chunk boundaries.
+    const looksUuidFragment = /[0-9a-f]{4,}(?:-[0-9a-f]{2,}){2,}/i.test(trimmed) && !/\s/.test(trimmed)
+    if (looksUuidFragment) return false
+    if (!/[A-Za-z]/.test(trimmed)) return false
+    return true
+  }
   const input = String(raw || '')
   if (!input.trim()) {
     return { text: '', hasContent: false, structured: false, parsedLines: 0, streamEvents: 0, hasTextDelta: prevHasTextDelta }
@@ -1159,14 +1167,22 @@ function renderStructuredStdoutChunk(raw: string, prevHasTextDelta = false): Str
     try {
       obj = JSON.parse(trimmed)
     } catch {
+      if (shouldPreservePlainLine(trimmed)) {
+        // Preserve plain text lines when logs mix prose with JSON events.
+        pushLine(line)
+      }
       continue
     }
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+      if (shouldPreservePlainLine(trimmed)) {
+        pushLine(line)
+      }
       continue
     }
     parsedLines += 1
     const record = obj as Record<string, unknown>
-    const type = String(record.type || '')
+    const hasType = typeof record.type === 'string' && String(record.type || '').trim().length > 0
+    const type = hasType ? String(record.type || '') : ''
     const emittedToolErrors = new Set<string>()
     const emitToolError = (rawError: string): void => {
       const toolError = rawError.trim()
@@ -1275,7 +1291,11 @@ function renderStructuredStdoutChunk(raw: string, prevHasTextDelta = false): Str
       }
       continue
     }
-    // Other top-level events are intentionally ignored.
+    // Preserve opaque JSON records (for example final verification/review JSON)
+    // only when they don't declare a stream event type.
+    if (!hasType) {
+      pushLine(trimmed)
+    }
   }
 
   if (parsedLines === 0) {
@@ -4435,9 +4455,22 @@ export default function App() {
                 }
                 if (current) fileChunks.push(current)
               }
+              const totalAdditions = fileChunks.reduce((sum, chunk) => sum + chunk.additions, 0)
+              const totalDeletions = fileChunks.reduce((sum, chunk) => sum + chunk.deletions, 0)
               return (
                 <>
-                  <p className="task-meta">Commit: <code>{taskDiff.commit.slice(0, 12)}</code> · {taskDiff.files.length} file{taskDiff.files.length !== 1 ? 's' : ''} changed</p>
+                  <p className="task-meta">
+                    Commit: <code>{taskDiff.commit.slice(0, 12)}</code> · {taskDiff.files.length} file{taskDiff.files.length !== 1 ? 's' : ''} changed
+                    {fileChunks.length > 0 ? (
+                      <>
+                        {' · '}
+                        <span className="diff-file-stats">
+                          <span className="diff-stat-add">+{totalAdditions}</span>
+                          <span className="diff-stat-del">-{totalDeletions}</span>
+                        </span>
+                      </>
+                    ) : null}
+                  </p>
                   {fileChunks.length > 0 ? (
                     <div className="diff-file-sections">
                       {fileChunks.map((chunk) => (
