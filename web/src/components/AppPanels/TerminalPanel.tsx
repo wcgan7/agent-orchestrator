@@ -37,6 +37,8 @@ export function TerminalPanel({ projectDir, visible, onMinimize }: TerminalPanel
   const wsRef = useRef<WebSocket | null>(null)
   const logsOffsetRef = useRef<number>(0)
   const resizeTimerRef = useRef<number | null>(null)
+  const longPressRef = useRef<number | null>(null)
+  const longPressFiredRef = useRef(false)
   const [session, setSession] = useState<TerminalSessionRecord | null>(null)
   const [error, setError] = useState('')
 
@@ -173,6 +175,21 @@ export function TerminalPanel({ projectDir, visible, onMinimize }: TerminalPanel
     }
   }
 
+  async function hardReset(): Promise<void> {
+    const current = sessionRef.current
+    if (current) {
+      await fetch(buildApiUrl(`/api/terminal/session/${current.id}/stop`, projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ signal: 'KILL' }),
+      }).catch(() => undefined)
+    }
+    terminalRef.current?.clear()
+    setSessionState(null)
+    logsOffsetRef.current = 0
+    await startOrAttach()
+  }
+
   useEffect(() => {
     let stopped = false
     let reconnectTimer: number | null = null
@@ -271,7 +288,18 @@ export function TerminalPanel({ projectDir, visible, onMinimize }: TerminalPanel
       <div className="terminal-float-header">
         <span className="terminal-float-title">Terminal</span>
         <div className="terminal-float-actions">
-          <button className="terminal-float-btn" onClick={() => terminalRef.current?.clear()} aria-label="Clear" title="Clear">&#x232B;</button>
+          <button
+            className="terminal-float-btn"
+            aria-label="Clear"
+            title="Clear (hold to reset)"
+            onClick={() => { if (!longPressFiredRef.current) terminalRef.current?.clear() }}
+            onPointerDown={() => {
+              longPressFiredRef.current = false
+              longPressRef.current = window.setTimeout(() => { longPressFiredRef.current = true; void hardReset() }, 600)
+            }}
+            onPointerUp={() => { if (longPressRef.current !== null) { window.clearTimeout(longPressRef.current); longPressRef.current = null } }}
+            onPointerLeave={() => { if (longPressRef.current !== null) { window.clearTimeout(longPressRef.current); longPressRef.current = null } }}
+          >&#x232B;</button>
           {onMinimize ? <button className="terminal-float-btn" onClick={onMinimize} aria-label="Minimize terminal" title="Minimize">&minus;</button> : null}
         </div>
       </div>
