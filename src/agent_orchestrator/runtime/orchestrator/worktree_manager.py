@@ -56,7 +56,7 @@ class WorktreeManager:
         with svc._merge_lock:
             try:
                 subprocess.run(
-                    ["git", "merge", branch, "--no-edit"],
+                    ["git", "merge", branch, "--ff", "--no-edit"],
                     cwd=svc.container.project_dir,
                     check=True,
                     capture_output=True,
@@ -114,7 +114,7 @@ class WorktreeManager:
         with svc._merge_lock:
             try:
                 subprocess.run(
-                    ["git", "merge", branch, "--no-edit"],
+                    ["git", "merge", branch, "--ff", "--no-edit"],
                     cwd=svc.container.project_dir,
                     check=True,
                     capture_output=True,

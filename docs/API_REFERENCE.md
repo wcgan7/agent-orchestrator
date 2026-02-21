@@ -148,6 +148,13 @@ Response:
 ### `GET /api/tasks/{task_id}`
 Fetch one task. Returns `404` if not found.
 
+Additive timing fields in task payload:
+- `timing_summary.total_completed_seconds`: Sum of completed run durations in seconds.
+- `timing_summary.active_run_started_at`: ISO timestamp of current in-progress run start, when present.
+- `timing_summary.is_running`: `true` when an active run is in progress.
+- `timing_summary.first_started_at`: Earliest valid run start timestamp in run history.
+- `timing_summary.last_finished_at`: Latest valid run finish timestamp in run history.
+
 ### `PATCH /api/tasks/{task_id}`
 Patch mutable fields.
 

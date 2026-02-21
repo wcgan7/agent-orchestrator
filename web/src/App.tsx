@@ -39,6 +39,7 @@ type TaskRecord = {
   human_blocking_issues?: HumanBlockingIssue[]
   human_review_actions?: ReviewAction[]
   error?: string | null
+  timing_summary?: TaskTimingSummary | null
   execution_summary?: ExecutionSummary | null
   project_commands?: Record<string, Record<string, string>> | null
 }
@@ -67,6 +68,14 @@ type ExecutionSummary = {
   finished_at: string | null
   duration_seconds?: number | null
   steps: ExecutionStepSummary[]
+}
+
+type TaskTimingSummary = {
+  total_completed_seconds?: number | null
+  active_run_started_at?: string | null
+  is_running?: boolean
+  first_started_at?: string | null
+  last_finished_at?: string | null
 }
 
 type BoardResponse = {
@@ -1061,6 +1070,22 @@ function formatDuration(seconds: number | null | undefined): string {
   return rm > 0 ? `${h}h ${rm}m` : `${h}h`
 }
 
+function taskTotalDurationSeconds(summary: TaskTimingSummary | null | undefined, nowMs: number): number | null {
+  if (!summary) return null
+  const totalCompleted = typeof summary.total_completed_seconds === 'number' && Number.isFinite(summary.total_completed_seconds)
+    ? Math.max(summary.total_completed_seconds, 0)
+    : 0
+  if (!summary.is_running || !summary.active_run_started_at) {
+    return totalCompleted
+  }
+  const started = new Date(summary.active_run_started_at).getTime()
+  if (Number.isNaN(started)) {
+    return totalCompleted
+  }
+  const activeSeconds = Math.max((nowMs - started) / 1000, 0)
+  return totalCompleted + activeSeconds
+}
+
 function inferProjectId(projectDir: string): string {
   const normalized = projectDir.trim().replace(/[\\/]+$/, '')
   if (!normalized) return ''
@@ -1389,6 +1414,7 @@ export default function App() {
   const [planningTaskId, setPlanningTaskId] = useState('')
   const [selectedTaskDetail, setSelectedTaskDetail] = useState<TaskRecord | null>(null)
   const [selectedTaskDetailLoading, setSelectedTaskDetailLoading] = useState(false)
+  const [taskDetailNowMs, setTaskDetailNowMs] = useState<number>(() => Date.now())
   const [selectedTaskPlan, setSelectedTaskPlan] = useState<TaskPlanDocument | null>(null)
   const [selectedTaskPlanJobs, setSelectedTaskPlanJobs] = useState<PlanRefineJobRecord[]>([])
   const [selectedPlanRevisionId, setSelectedPlanRevisionId] = useState('')
@@ -3721,11 +3747,26 @@ export default function App() {
   )
   // Guard: if the Plan tab is selected but no longer visible, fall back to overview.
   const effectiveTaskDetailTab = (taskDetailTab === 'plan' && !showPlanTab) ? 'overview' : taskDetailTab
+  const selectedTaskTotalSeconds = taskTotalDurationSeconds(selectedTaskView?.timing_summary, taskDetailNowMs)
+
+  useEffect(() => {
+    const timingSummary = selectedTaskView?.timing_summary
+    if (!selectedTaskId || !timingSummary?.is_running || !timingSummary.active_run_started_at) return
+    setTaskDetailNowMs(Date.now())
+    const timer = window.setInterval(() => setTaskDetailNowMs(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [selectedTaskId, selectedTaskView?.id, selectedTaskView?.timing_summary?.is_running, selectedTaskView?.timing_summary?.active_run_started_at])
 
   const taskDetailContent = selectedTaskView ? (
       <div className="detail-card">
         {selectedTaskDetailLoading ? <p className="field-label">Loading full task detail...</p> : null}
         <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}</p>
+        {selectedTaskTotalSeconds != null ? (
+          <p className="task-meta">
+            Total time taken: {formatDuration(selectedTaskTotalSeconds) || '0s'}
+            {selectedTaskView.timing_summary?.is_running ? ' · running' : ''}
+          </p>
+        ) : null}
         <div className="detail-tabs" role="tablist" aria-label="Task detail sections">
           <button
             className={`detail-tab ${effectiveTaskDetailTab === 'overview' ? 'is-active' : ''}`}

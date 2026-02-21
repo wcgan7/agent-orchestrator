@@ -17,7 +17,7 @@ Execution runs under enforced coding standards and a continuous review-and-fix c
 - Use an embedded interactive terminal directly in the project directory.
 - Control orchestrator execution (`pause`, `resume`, `drain`, `stop`).
 - Choose a Human-in-the-Loop (HITL) mode per task: **Autopilot**, **Supervised**, **Collaborative**, or **Review Only**.
-- View execution summaries with per-step status, review findings, and commit SHAs in the task detail modal.
+- View total time taken and execution summaries with per-step status, review findings, and commit SHAs in the task detail modal.
 - Manage worker providers (Codex, Claude, Ollama) and configure step-to-provider routing.
 - Observe real-time updates across board, execution, and task detail via WebSocket.
 

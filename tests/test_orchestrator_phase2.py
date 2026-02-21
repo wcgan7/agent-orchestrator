@@ -128,6 +128,34 @@ def test_single_run_branch_receives_per_task_commits(tmp_path: Path) -> None:
     assert log[1].startswith(f"task({first.id})")
 
 
+def test_single_run_branch_uses_fast_forward_even_when_merge_ff_disabled(tmp_path: Path) -> None:
+    subprocess.run(["git", "init"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.name", "Test Runner"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "config", "merge.ff", "false"], cwd=tmp_path, check=True, capture_output=True)
+    (tmp_path / "README.md").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=tmp_path, check=True, capture_output=True)
+
+    container, service = _service(tmp_path)
+
+    first = Task(title="First task", status="queued", approval_mode="auto_approve", metadata={"scripted_files": {"first.txt": "first"}})
+    second = Task(title="Second task", status="queued", approval_mode="auto_approve", metadata={"scripted_files": {"second.txt": "second"}})
+    container.tasks.upsert(first)
+    container.tasks.upsert(second)
+
+    one = service.run_task(first.id)
+    two = service.run_task(second.id)
+
+    assert one.status == "done"
+    assert two.status == "done"
+
+    log = subprocess.run(["git", "log", "--pretty=%s", "-n", "2"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.splitlines()
+    assert len(log) == 2
+    assert log[0].startswith(f"task({second.id})")
+    assert log[1].startswith(f"task({first.id})")
+
+
 def test_scheduler_respects_priority_and_dependency(tmp_path: Path) -> None:
     container, _ = _service(tmp_path)
     high = Task(title="High", status="queued", priority="P0")

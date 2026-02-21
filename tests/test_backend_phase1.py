@@ -594,6 +594,153 @@ def test_create_task_worker_model_round_trip(tmp_path: Path) -> None:
         assert loaded.json()["task"]["worker_model"] == "gpt-5-codex"
 
 
+def test_get_task_includes_timing_summary_for_completed_runs(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Timing complete runs"}).json()["task"]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        run_one = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-02-21T10:00:00Z",
+            finished_at="2026-02-21T10:00:30Z",
+        )
+        run_two = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-02-21T10:02:00Z",
+            finished_at="2026-02-21T10:03:00Z",
+        )
+        container.runs.upsert(run_one)
+        container.runs.upsert(run_two)
+        task.run_ids = [run_one.id, run_two.id]
+        container.tasks.upsert(task)
+
+        loaded = client.get(f"/api/tasks/{task.id}")
+        assert loaded.status_code == 200
+        timing = loaded.json()["task"]["timing_summary"]
+        assert timing["is_running"] is False
+        assert timing["active_run_started_at"] is None
+        assert timing["total_completed_seconds"] == 90.0
+        assert timing["first_started_at"] == "2026-02-21T10:00:00+00:00"
+        assert timing["last_finished_at"] == "2026-02-21T10:03:00+00:00"
+
+
+def test_get_task_timing_summary_keeps_completed_total_while_running(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Timing running run"}).json()["task"]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        completed = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-02-21T11:00:00Z",
+            finished_at="2026-02-21T11:01:00Z",
+        )
+        active = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at="2026-02-21T11:05:00Z",
+            finished_at=None,
+        )
+        container.runs.upsert(completed)
+        container.runs.upsert(active)
+        task.run_ids = [completed.id, active.id]
+        container.tasks.upsert(task)
+
+        loaded = client.get(f"/api/tasks/{task.id}")
+        assert loaded.status_code == 200
+        timing = loaded.json()["task"]["timing_summary"]
+        assert timing["is_running"] is True
+        assert timing["active_run_started_at"] == "2026-02-21T11:05:00+00:00"
+        assert timing["total_completed_seconds"] == 60.0
+        assert timing["first_started_at"] == "2026-02-21T11:00:00+00:00"
+        assert timing["last_finished_at"] == "2026-02-21T11:01:00+00:00"
+
+
+def test_get_task_timing_summary_ignores_malformed_timestamps(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Timing malformed"}).json()["task"]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        bad_completed = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="not-a-timestamp",
+            finished_at="2026-02-21T12:01:00Z",
+        )
+        bad_running = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at="bad-start",
+            finished_at=None,
+        )
+        container.runs.upsert(bad_completed)
+        container.runs.upsert(bad_running)
+        task.run_ids = [bad_completed.id, bad_running.id]
+        container.tasks.upsert(task)
+
+        loaded = client.get(f"/api/tasks/{task.id}")
+        assert loaded.status_code == 200
+        timing = loaded.json()["task"]["timing_summary"]
+        assert timing["is_running"] is False
+        assert timing["active_run_started_at"] is None
+        assert timing["total_completed_seconds"] == 0.0
+        assert timing["first_started_at"] is None
+        assert timing["last_finished_at"] == "2026-02-21T12:01:00+00:00"
+
+
+def test_get_task_timing_summary_handles_mixed_timezone_formats(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Timing mixed timezone formats"}).json()["task"]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        aware_run = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-02-21T10:00:00Z",
+            finished_at="2026-02-21T10:00:30+00:00",
+        )
+        naive_run = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-02-21T10:01:00",
+            finished_at="2026-02-21T10:02:00",
+        )
+        active_naive = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at="2026-02-21T10:03:00",
+            finished_at=None,
+        )
+        container.runs.upsert(aware_run)
+        container.runs.upsert(naive_run)
+        container.runs.upsert(active_naive)
+        task.run_ids = [aware_run.id, naive_run.id, active_naive.id]
+        container.tasks.upsert(task)
+
+        loaded = client.get(f"/api/tasks/{task.id}")
+        assert loaded.status_code == 200
+        timing = loaded.json()["task"]["timing_summary"]
+        assert timing["is_running"] is True
+        assert timing["active_run_started_at"] == "2026-02-21T10:03:00+00:00"
+        assert timing["total_completed_seconds"] == 90.0
+        assert timing["first_started_at"] == "2026-02-21T10:00:00+00:00"
+        assert timing["last_finished_at"] == "2026-02-21T10:02:00+00:00"
+
+
 def test_project_commands_settings_round_trip(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:

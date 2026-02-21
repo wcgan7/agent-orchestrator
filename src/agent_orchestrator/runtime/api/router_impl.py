@@ -458,6 +458,64 @@ def _reconcile_summary_run_status(task: Task, run: Any) -> str:
     return run_status
 
 
+def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp string into a datetime value."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _build_task_timing_summary(task: Task, container: "Container") -> Optional[dict[str, Any]]:
+    """Build cumulative task timing data across run history."""
+    if not task.run_ids:
+        return None
+
+    total_completed_seconds = 0.0
+    first_started_at: Optional[datetime] = None
+    last_finished_at: Optional[datetime] = None
+    active_run_started_at: Optional[datetime] = None
+    seen_run = False
+
+    for run_id in task.run_ids:
+        run = container.runs.get(run_id)
+        if run is None:
+            continue
+        seen_run = True
+
+        started = _parse_iso_timestamp(run.started_at)
+        finished = _parse_iso_timestamp(run.finished_at)
+
+        if started is not None and (first_started_at is None or started < first_started_at):
+            first_started_at = started
+
+        if finished is not None and (last_finished_at is None or finished > last_finished_at):
+            last_finished_at = finished
+
+        if run.status == "in_progress" and started is not None:
+            active_run_started_at = started
+            continue
+
+        if started is not None and finished is not None:
+            total_completed_seconds += max((finished - started).total_seconds(), 0.0)
+
+    if not seen_run:
+        return None
+
+    return {
+        "total_completed_seconds": total_completed_seconds,
+        "active_run_started_at": active_run_started_at.isoformat() if active_run_started_at else None,
+        "is_running": active_run_started_at is not None,
+        "first_started_at": first_started_at.isoformat() if first_started_at else None,
+        "last_finished_at": last_finished_at.isoformat() if last_finished_at else None,
+    }
+
+
 def _build_execution_summary(task: Task, container: "Container") -> Optional[dict[str, Any]]:
     """Build API-safe execution summary for terminal or in-review tasks.
 
@@ -525,6 +583,9 @@ def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[s
     raw_actions = metadata.get("human_review_actions")
     payload["human_review_actions"] = list(raw_actions) if isinstance(raw_actions, list) else []
     if container is not None:
+        timing_summary = _build_task_timing_summary(task, container)
+        if timing_summary is not None:
+            payload["timing_summary"] = timing_summary
         summary = _build_execution_summary(task, container)
         if summary is not None:
             payload["execution_summary"] = summary
