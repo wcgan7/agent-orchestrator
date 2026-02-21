@@ -556,7 +556,7 @@ describe('App action coverage', () => {
     })
 
     fireEvent.click(screen.getByRole('button', { name: /Toggle terminal/i }))
-    fireEvent.click(screen.getByRole('button', { name: /Start Terminal/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^Start$/i }))
 
     await waitFor(() => {
       const startCall = mockedFetch.mock.calls.find(([url, init]) =>

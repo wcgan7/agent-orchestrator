@@ -280,18 +280,12 @@ export function TerminalPanel({ projectDir, visible }: TerminalPanelProps): JSX.
   return (
     <div className="terminal-panel-root">
       <div className="inline-actions">
-        <button className="button button-primary" onClick={() => void startOrAttach()} disabled={loading}>
-          {session ? 'Attach / Restart' : 'Start Terminal'}
-        </button>
-        <button className="button" onClick={() => void refreshActive()} disabled={loading}>
-          Reconnect
-        </button>
-        <button className="button" onClick={() => void stopSession()} disabled={!session || session.status !== 'running'}>
-          Stop
-        </button>
-        <button className="button" onClick={() => terminalRef.current?.clear()}>
-          Clear View
-        </button>
+        {session && session.status === 'running' ? (
+          <button className="button button-danger" onClick={() => void stopSession()} disabled={loading}>Stop</button>
+        ) : (
+          <button className="button button-primary" onClick={() => void startOrAttach()} disabled={loading}>Start</button>
+        )}
+        <button className="button" onClick={() => terminalRef.current?.clear()}>Clear</button>
       </div>
       {error ? <p className="error-banner">{error}</p> : null}
       {session ? (
