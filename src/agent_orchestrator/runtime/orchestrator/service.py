@@ -185,6 +185,8 @@ class OrchestratorService:
             task.current_agent_id = None
             task.pending_gate = None
             task.error = "Recovered from interrupted run"
+            if isinstance(task.metadata, dict):
+                task.metadata.pop("pipeline_phase", None)
             self.container.tasks.upsert(task)
             self.bus.emit(
                 channel="tasks",
@@ -2617,6 +2619,7 @@ _Pending: will be populated by the report step._
 
             task.run_ids.append(run.id)
             task.current_step = steps[0] if steps else None
+            task.metadata["pipeline_phase"] = steps[0] if steps else None
             task.status = "in_progress"
             task.current_agent_id = self._choose_agent_for_task(task)
             self.container.tasks.upsert(task)
@@ -2648,6 +2651,7 @@ _Pending: will be populated by the report step._
                         continue
                 self._check_cancelled(task)
                 task.current_step = step
+                task.metadata["pipeline_phase"] = step
                 self.container.tasks.upsert(task)
                 gate_name = self._GATE_MAPPING.get(step)
                 if gate_name and should_gate(mode, gate_name):
@@ -2675,12 +2679,14 @@ _Pending: will be populated by the report step._
                             self.container.runs.upsert(run)
 
                             task.current_step = "implement_fix"
+                            task.metadata["pipeline_phase"] = step
                             self.container.tasks.upsert(task)
                             if not self._run_non_review_step(task, run, "implement_fix", attempt=fix_attempt + 1):
                                 return
                             task.metadata.pop("verify_failure", None)
                             task.metadata.pop("verify_output", None)
                             task.current_step = step
+                            task.metadata["pipeline_phase"] = step
                             self.container.tasks.upsert(task)
                             if self._run_non_review_step(task, run, step, attempt=fix_attempt + 1):
                                 fixed = True
@@ -2702,6 +2708,7 @@ _Pending: will be populated by the report step._
                     task.status = "blocked"
                     task.error = "No file changes detected after implementation"
                     task.current_step = last_phase1_step or "implement"
+                    task.metadata["pipeline_phase"] = last_phase1_step or "implement"
                     self.container.tasks.upsert(task)
                     self._finalize_run(task, run, status="blocked", summary="Blocked: no changes produced by implementation steps")
                     self.bus.emit(
@@ -2727,6 +2734,7 @@ _Pending: will be populated by the report step._
                     self._check_cancelled(task)
                     review_attempt += 1
                     task.current_step = "review"
+                    task.metadata["pipeline_phase"] = "review"
                     if review_attempt > 1:
                         task.metadata["review_history"] = self._build_review_history_summary(task.id)
                     else:
@@ -2734,7 +2742,19 @@ _Pending: will be populated by the report step._
                     self.container.tasks.upsert(task)
                     review_started = now_iso()
                     findings, review_result = self._findings_from_result(task, review_attempt)
+                    # Build step log immediately so log paths are always stored
+                    # in run.steps (same pattern as _run_non_review_step).
+                    review_step_log: dict[str, Any] = {"step": "review", "status": "ok", "ts": now_iso(), "started_at": review_started}
+                    review_last_logs = task.metadata.get("last_logs") if isinstance(task.metadata, dict) else None
+                    if isinstance(review_last_logs, dict):
+                        for key in ("stdout_path", "stderr_path", "progress_path"):
+                            if review_last_logs.get(key):
+                                review_step_log[key] = review_last_logs[key]
                     if review_result.human_blocking_issues:
+                        review_step_log["status"] = "blocked"
+                        review_step_log["human_blocking_issues"] = review_result.human_blocking_issues
+                        run.steps.append(review_step_log)
+                        self.container.runs.upsert(run)
                         self._block_for_human_issues(
                             task,
                             run,
@@ -2744,10 +2764,14 @@ _Pending: will be populated by the report step._
                         )
                         return
                     if review_result.status != "ok":
+                        review_step_log["status"] = review_result.status or "error"
+                        run.steps.append(review_step_log)
+                        self.container.runs.upsert(run)
                         task.status = "blocked"
                         task.error = review_result.summary or "Review step failed"
                         task.pending_gate = None
                         task.current_step = "review"
+                        task.metadata["pipeline_phase"] = "review"
                         self.container.tasks.upsert(task)
                         self._finalize_run(task, run, status="blocked", summary="Blocked during review")
                         self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
@@ -2765,12 +2789,8 @@ _Pending: will be populated by the report step._
                     )
                     self.container.reviews.append(cycle)
                     self._sync_workdoc_review(task, cycle, worktree_dir or self.container.project_dir)
-                    review_step_log: dict[str, Any] = {"step": "review", "status": cycle.decision, "ts": now_iso(), "started_at": review_started, "open_counts": open_counts}
-                    review_last_logs = task.metadata.get("last_logs") if isinstance(task.metadata, dict) else None
-                    if isinstance(review_last_logs, dict):
-                        for key in ("stdout_path", "stderr_path", "progress_path"):
-                            if review_last_logs.get(key):
-                                review_step_log[key] = review_last_logs[key]
+                    review_step_log["status"] = cycle.decision
+                    review_step_log["open_counts"] = open_counts
                     run.steps.append(review_step_log)
                     self.container.runs.upsert(run)
                     self.bus.emit(
@@ -2795,6 +2815,7 @@ _Pending: will be populated by the report step._
                     # Run implement_fix
                     task.retry_count += 1
                     task.current_step = "implement_fix"
+                    task.metadata["pipeline_phase"] = "review"
                     self.container.tasks.upsert(task)
                     if not self._run_non_review_step(task, run, "implement_fix", attempt=review_attempt):
                         return
@@ -2802,10 +2823,12 @@ _Pending: will be populated by the report step._
                     if post_fix_validation_step:
                         # Run post-fix validation with retry loop (same as Phase 1)
                         task.current_step = post_fix_validation_step
+                        task.metadata["pipeline_phase"] = "review"
                         self.container.tasks.upsert(task)
                         if not self._run_non_review_step(task, run, post_fix_validation_step, attempt=review_attempt):
                             if self._consume_verify_non_actionable_flag(task):
                                 task.current_step = "review"
+                                task.metadata["pipeline_phase"] = "review"
                                 self.container.tasks.upsert(task)
                                 continue
                             validation_fixed = False
@@ -2822,12 +2845,14 @@ _Pending: will be populated by the report step._
                                 self.container.runs.upsert(run)
 
                                 task.current_step = "implement_fix"
+                                task.metadata["pipeline_phase"] = "review"
                                 self.container.tasks.upsert(task)
                                 if not self._run_non_review_step(task, run, "implement_fix", attempt=vfix + 1):
                                     return
                                 task.metadata.pop("verify_failure", None)
                                 task.metadata.pop("verify_output", None)
                                 task.current_step = post_fix_validation_step
+                                task.metadata["pipeline_phase"] = "review"
                                 self.container.tasks.upsert(task)
                                 if self._run_non_review_step(task, run, post_fix_validation_step, attempt=vfix + 1):
                                     validation_fixed = True
@@ -2848,6 +2873,7 @@ _Pending: will be populated by the report step._
                     task.status = "blocked"
                     task.error = "Review attempt cap exceeded"
                     task.current_step = "review"
+                    task.metadata["pipeline_phase"] = "review"
                     self.container.tasks.upsert(task)
                     self._finalize_run(task, run, status="blocked", summary="Blocked due to unresolved review findings")
                     self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
@@ -2857,6 +2883,7 @@ _Pending: will be populated by the report step._
             self._check_cancelled(task)
             if has_commit:
                 task.current_step = "commit"
+                task.metadata["pipeline_phase"] = "commit"
                 self.container.tasks.upsert(task)
                 if should_gate(mode, "before_commit"):
                     if not self._wait_for_gate(task, "before_commit"):
@@ -2907,12 +2934,14 @@ _Pending: will be populated by the report step._
                 if task.approval_mode == "auto_approve":
                     task.status = "done"
                     task.current_step = None
+                    task.metadata.pop("pipeline_phase", None)
                     run.status = "done"
                     run.summary = "Completed with auto-approve"
                     self.bus.emit(channel="tasks", event_type="task.done", entity_id=task.id, payload={"commit": commit_sha})
                 else:
                     task.status = "in_review"
                     task.current_step = None
+                    task.metadata.pop("pipeline_phase", None)
                     run.status = "in_review"
                     run.summary = "Awaiting human review"
                     self.bus.emit(channel="review", event_type="task.awaiting_human", entity_id=task.id, payload={"commit": commit_sha})
@@ -2937,6 +2966,7 @@ _Pending: will be populated by the report step._
                 self._run_summarize_step(task, run)
                 task.status = "done"
                 task.current_step = None
+                task.metadata.pop("pipeline_phase", None)
                 run.status = "done"
                 run.summary = "Pipeline completed"
                 self.bus.emit(channel="tasks", event_type="task.done", entity_id=task.id, payload={})
