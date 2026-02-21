@@ -12,7 +12,14 @@ from .config import WorkerProviderSpec
 
 
 def test_worker(spec: WorkerProviderSpec) -> tuple[bool, str]:
-    """Run a lightweight health check for a worker provider."""
+    """Run a lightweight health check for a worker provider.
+
+    Args:
+        spec (WorkerProviderSpec): Spec for this call.
+
+    Returns:
+        tuple[bool, str]: Result produced by this call.
+    """
     if spec.type in {"codex", "claude"}:
         from shutil import which
 

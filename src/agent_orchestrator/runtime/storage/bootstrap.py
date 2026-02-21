@@ -79,7 +79,14 @@ def _ensure_gitignored(project_dir: Path) -> None:
 
 
 def ensure_state_root(project_dir: Path) -> Path:
-    """Ensure runtime state files/directories exist and return the state root."""
+    """Ensure runtime state files/directories exist and return the state root.
+
+    Args:
+        project_dir (Path): Project dir for this call.
+
+    Returns:
+        Path: Result produced by this call.
+    """
     base = project_dir / ".agent_orchestrator"
     state_root = base
 

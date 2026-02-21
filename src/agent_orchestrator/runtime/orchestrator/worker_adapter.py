@@ -23,14 +23,31 @@ class StepResult:
 class WorkerAdapter(Protocol):
     """Adapter contract used by the orchestrator to execute pipeline steps."""
     def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
-        """Execute one pipeline step for a persisted task."""
+        """Execute one pipeline step for a persisted task.
+
+        Args:
+            task (Task): Persisted task record being advanced through its pipeline.
+            step (str): Canonical step name to execute (for example `implement` or `review`).
+            attempt (int): One-based retry attempt number for this step execution.
+
+        Returns:
+            StepResult: Normalized execution payload consumed by the orchestrator.
+        """
         ...
 
     def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:
-        """Like run_step but does not persist the task to storage.
+        """Execute a pipeline step for a temporary task that is not persisted.
 
-        Use for synthetic/throwaway tasks (e.g. pipeline classification,
-        dependency analysis) where the task object is only a prompt carrier.
+        Use this for synthetic tasks such as pipeline classification and dependency
+        analysis where the task object is only a prompt/context carrier.
+
+        Args:
+            task (Task): Synthetic task context used to build the worker prompt.
+            step (str): Ephemeral step name that maps to worker behavior.
+            attempt (int): One-based retry attempt number for this ephemeral call.
+
+        Returns:
+            StepResult: Normalized worker output for the orchestrator.
         """
         ...
 
@@ -43,7 +60,16 @@ class DefaultWorkerAdapter:
     """
 
     def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
-        """Produce deterministic step results for tests and local-first execution."""
+        """Produce deterministic step results for tests and local-first execution.
+
+        Args:
+            task (Task): Task record containing scripted metadata overrides.
+            step (str): Step name to execute for the task.
+            attempt (int): One-based attempt number for the step.
+
+        Returns:
+            StepResult: Deterministic step result derived from scripted metadata.
+        """
         scripted_steps = task.metadata.get("scripted_steps") if isinstance(task.metadata, dict) else None
         if isinstance(scripted_steps, dict):
             key = f"{step}:{attempt}"
@@ -95,9 +121,27 @@ class DefaultWorkerAdapter:
         return StepResult(status="ok")
 
     def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:
-        """Execute a step for ephemeral tasks that are not written to storage."""
+        """Execute a step for an ephemeral task without storage-side effects.
+
+        Args:
+            task (Task): Synthetic task object carrying prompt and metadata context.
+            step (str): Step name to execute.
+            attempt (int): One-based attempt number for this call.
+
+        Returns:
+            StepResult: Deterministic step result for the ephemeral execution.
+        """
         return self.run_step(task=task, step=step, attempt=attempt)
 
     def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path) -> str:
-        """Generate a human-readable summary for a completed run."""
+        """Generate a human-readable summary for a completed run.
+
+        Args:
+            task (Task): Task associated with the completed run.
+            run (RunRecord): Run record containing outcome metadata.
+            project_dir (Path): Repository directory where the run executed.
+
+        Returns:
+            str: Markdown-ready summary text for the run report.
+        """
         return ""

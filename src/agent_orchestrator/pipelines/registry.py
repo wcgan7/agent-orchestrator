@@ -53,7 +53,11 @@ class PipelineTemplate:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def step_names(self) -> list[str]:
-        """List step ids in execution order for this template."""
+        """List step ids in execution order for this template.
+
+        Returns:
+            list[str]: Step names in the order the pipeline executes them.
+        """
         return [s.name for s in self.steps]
 
 
@@ -292,6 +296,7 @@ class PipelineRegistry:
     """
 
     def __init__(self) -> None:
+        """Initialize the PipelineRegistry."""
         self._templates: dict[str, PipelineTemplate] = dict(BUILTIN_TEMPLATES)
         self._type_mapping: dict[str, str] = {}
         self._rebuild_type_mapping()
@@ -305,18 +310,39 @@ class PipelineRegistry:
     # -- query ---------------------------------------------------------------
 
     def get(self, template_id: str) -> PipelineTemplate:
-        """Fetch a pipeline template by id or raise ``KeyError`` if missing."""
+        """Fetch a pipeline template by id or raise ``KeyError`` if missing.
+
+        Args:
+            template_id (str): Pipeline template identifier, such as ``feature``.
+
+        Returns:
+            PipelineTemplate: Registered pipeline template matching ``template_id``.
+
+        Raises:
+            KeyError: If no template is registered for ``template_id``.
+        """
         if template_id not in self._templates:
             available = ", ".join(sorted(self._templates.keys()))
             raise KeyError(f"Unknown pipeline '{template_id}' (available: {available})")
         return self._templates[template_id]
 
     def list_templates(self) -> list[PipelineTemplate]:
-        """List all registered pipeline templates."""
+        """List all registered pipeline templates.
+
+        Returns:
+            list[PipelineTemplate]: Registered templates including built-ins and overrides.
+        """
         return list(self._templates.values())
 
     def resolve_for_task_type(self, task_type: str) -> PipelineTemplate:
-        """Resolve the default pipeline template for a task type."""
+        """Resolve the default pipeline template for a task type.
+
+        Args:
+            task_type (str): Task type label (for example ``feature`` or ``bug_fix``).
+
+        Returns:
+            PipelineTemplate: Best-match template for the task type, defaulting to ``feature``.
+        """
         tmpl_id = self._type_mapping.get(task_type)
         if tmpl_id:
             return self._templates[tmpl_id]
@@ -326,12 +352,20 @@ class PipelineRegistry:
     # -- mutation ------------------------------------------------------------
 
     def register(self, template: PipelineTemplate) -> None:
-        """Register or replace a pipeline template."""
+        """Register or replace a pipeline template.
+
+        Args:
+            template (PipelineTemplate): Template definition to store by ``template.id``.
+        """
         self._templates[template.id] = template
         self._rebuild_type_mapping()
 
     def unregister(self, template_id: str) -> None:
-        """Remove a template by id if present."""
+        """Remove a template by id if present.
+
+        Args:
+            template_id (str): Template identifier to remove from the registry.
+        """
         self._templates.pop(template_id, None)
         self._rebuild_type_mapping()
 
@@ -346,6 +380,12 @@ class PipelineRegistry:
 
         Each YAML file must be a mapping with at least ``id``, ``display_name``,
         ``description``, and ``steps`` (a list of step definitions).
+
+        Args:
+            path (Path): File or directory containing pipeline template YAML definitions.
+
+        Raises:
+            RuntimeError: If PyYAML is unavailable in the current environment.
         """
         if yaml is None:
             raise RuntimeError(

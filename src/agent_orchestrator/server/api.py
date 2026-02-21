@@ -22,7 +22,21 @@ def create_app(
     enable_cors: bool = True,
     worker_adapter: Optional[WorkerAdapter] = None,
 ) -> FastAPI:
-    """Create and configure the FastAPI application."""
+    """Create and configure the FastAPI application.
+
+    Args:
+        project_dir (Optional[Path]): Default project directory used when request-level
+            ``project_dir`` query parameters are not provided.
+        enable_cors (bool): Whether to install permissive CORS middleware for browser
+            clients.
+        worker_adapter (Optional[WorkerAdapter]): Optional worker adapter forwarded to
+            newly created orchestrator instances.
+
+    Returns:
+        FastAPI: Configured application instance with router endpoints, websocket
+        bridge, and per-project container/orchestrator caches stored on
+        ``app.state``.
+    """
     @asynccontextmanager
     async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         hub.attach_loop(asyncio.get_running_loop())
@@ -91,6 +105,14 @@ def create_app(
 
     @app.get("/")
     async def root(project_dir: Optional[str] = Query(None)) -> dict[str, object]:
+        """Return basic service metadata for the selected project context.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing service metadata and project identity fields.
+        """
         container = _resolve_container(project_dir)
         return {
             "name": "Agent Orchestrator",
@@ -102,10 +124,23 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz() -> dict[str, object]:
+        """Expose liveness status for process-level health checks.
+        
+        Returns:
+            A payload indicating the API process is running.
+        """
         return {"status": "ok", "version": "3.0.0"}
 
     @app.get("/readyz")
     async def readyz(project_dir: Optional[str] = Query(None)) -> dict[str, object]:
+        """Expose readiness status for the selected project context.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload indicating readiness and current orchestrator cache size.
+        """
         container = _resolve_container(project_dir)
         return {
             "status": "ready",
@@ -116,6 +151,14 @@ def create_app(
 
     @app.websocket("/ws")
     async def websocket_endpoint(websocket: WebSocket) -> None:
+        """Bridge websocket clients to the shared event hub handler.
+        
+        Args:
+            websocket: Active websocket connection accepted by FastAPI.
+        
+        Returns:
+            ``None`` after the connection lifecycle ends.
+        """
         await hub.handle_connection(websocket)
 
     return app

@@ -7,7 +7,14 @@ _cache: dict[str, str] = {}
 
 
 def load(name: str) -> str:
-    """Load a prompt template by relative path (e.g. 'steps/plan.md')."""
+    """Load a prompt template by relative path (e.g. 'steps/plan.md').
+
+    Args:
+        name (str): Name for this call.
+
+    Returns:
+        str: str result produced by this operation.
+    """
     if name not in _cache:
         _cache[name] = (_DIR / name).read_text().strip()
     return _cache[name]

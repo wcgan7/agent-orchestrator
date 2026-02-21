@@ -1157,7 +1157,23 @@ def create_router(
     resolve_orchestrator: Any,
     job_store: dict[str, dict[str, Any]],
 ) -> APIRouter:
-    """Create the runtime API router."""
+    """Create the runtime API router.
+
+    Args:
+        resolve_container (Any): Callable that resolves and returns the
+            project-scoped ``Container`` for an optional ``project_dir`` value.
+        resolve_orchestrator (Any): Callable that resolves and returns the
+            project-scoped ``OrchestratorService`` for an optional
+            ``project_dir`` value.
+        job_store (dict[str, dict[str, Any]]): Shared in-memory map used to keep
+            asynchronous import and plan-refinement job state visible across API
+            requests.
+
+    Returns:
+        APIRouter: Router exposing runtime endpoints for task lifecycle,
+        orchestration operations, collaboration metadata, terminal sessions, and
+        import workflows.
+    """
     router = APIRouter(prefix="/api", tags=["api"])
     terminal_services: dict[str, TerminalService] = {}
 
@@ -1246,6 +1262,15 @@ def create_router(
 
     @router.get("/projects")
     async def list_projects(project_dir: Optional[str] = Query(None), include_non_git: bool = Query(False)) -> dict[str, Any]:
+        """List discoverable and pinned projects for the current workspace.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+            include_non_git: Whether to include directories without a `.git` repository.
+        
+        Returns:
+            A payload containing deduplicated project entries.
+        """
         container, _, _ = _ctx(project_dir)
         cfg = container.config.load()
         pinned = list(cfg.get("pinned_projects") or [])
@@ -1261,12 +1286,32 @@ def create_router(
 
     @router.get("/projects/pinned")
     async def list_pinned_projects(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return projects pinned in persisted runtime configuration.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload with the list of pinned project records.
+        """
         container, _, _ = _ctx(project_dir)
         cfg = container.config.load()
         return {"items": list(cfg.get("pinned_projects") or [])}
 
     @router.post("/projects/pinned")
     async def pin_project(body: dict[str, Any], project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Persist a project path in the pinned project list.
+        
+        Args:
+            body: Request payload containing the path and optional pin metadata.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload describing the pinned project record.
+        
+        Raises:
+            HTTPException: If the requested path is invalid or fails pinning policy checks.
+        """
         path = Path(str(body.get("path") or "")).expanduser().resolve()
         allow_non_git = bool(body.get("allow_non_git", False))
         if not path.exists() or not path.is_dir() or not os_access(path):
@@ -1285,6 +1330,15 @@ def create_router(
 
     @router.delete("/projects/pinned/{project_id}")
     async def unpin_project(project_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Remove a pinned project entry by its identifier.
+        
+        Args:
+            project_id: Identifier of the pinned project to remove.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload indicating whether a matching project was removed.
+        """
         container, _, _ = _ctx(project_dir)
         cfg = container.config.load()
         pinned = list(cfg.get("pinned_projects") or [])
@@ -1300,6 +1354,20 @@ def create_router(
         include_hidden: bool = Query(False),
         limit: int = Query(200, ge=1, le=1000),
     ) -> dict[str, Any]:
+        """Browse filesystem directories for project selection.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+            path: Optional directory path to browse; defaults to the user's home directory.
+            include_hidden: Whether to include hidden directories.
+            limit: Maximum number of directories returned.
+        
+        Returns:
+            A payload with the current path, parent path, and child directory entries.
+        
+        Raises:
+            HTTPException: If the browse path is invalid or unreadable.
+        """
         _ctx(project_dir)
         target = Path(path).expanduser().resolve() if path else Path.home().resolve()
         if not target.exists() or not target.is_dir() or not os_access(target):
@@ -1339,6 +1407,18 @@ def create_router(
 
     @router.post("/tasks")
     async def create_task(body: CreateTaskRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Create and persist a task with resolved pipeline configuration.
+        
+        Args:
+            body: Request payload describing task metadata and pipeline preferences.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the created task details.
+        
+        Raises:
+            HTTPException: If task type auto-resolution inputs are invalid.
+        """
         container, bus, _ = _ctx(project_dir)
         registry = PipelineRegistry()
         allowed_pipelines = sorted(template.id for template in registry.list_templates())
@@ -1413,6 +1493,15 @@ def create_router(
         body: PipelineClassificationRequest,
         project_dir: Optional[str] = Query(None),
     ) -> PipelineClassificationResponse:
+        """Classify the best pipeline template for a proposed task.
+        
+        Args:
+            body: Request payload with title, description, and optional metadata.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A normalized pipeline classification result with confidence and rationale.
+        """
         container, _, orchestrator = _ctx(project_dir)
         registry = PipelineRegistry()
         allowed_pipelines = sorted(template.id for template in registry.list_templates())
@@ -1451,6 +1540,17 @@ def create_router(
         task_type: Optional[str] = Query(None),
         priority: Optional[str] = Query(None),
     ) -> dict[str, Any]:
+        """List tasks filtered by lifecycle, type, or priority.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+            status: Optional status filter.
+            task_type: Optional task type filter.
+            priority: Optional priority filter.
+        
+        Returns:
+            A payload with sorted task summaries and total count.
+        """
         container, _, _ = _ctx(project_dir)
         tasks = container.tasks.list()
         filtered = []
@@ -1467,6 +1567,14 @@ def create_router(
 
     @router.get("/tasks/board")
     async def board(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return task data grouped by Kanban-style status columns.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload keyed by task status with sorted task cards.
+        """
         container, _, _ = _ctx(project_dir)
         columns: dict[str, list[dict[str, Any]]] = {
             name: [] for name in ["backlog", "queued", "in_progress", "in_review", "blocked", "done", "cancelled"]
@@ -1479,6 +1587,14 @@ def create_router(
 
     @router.get("/tasks/execution-order")
     async def execution_order(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Compute execution batches for non-terminal tasks.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing ready-to-run batches and recently completed tasks.
+        """
         container, _, _ = _ctx(project_dir)
         tasks = container.tasks.list()
         terminal = {"done", "cancelled"}
@@ -1492,6 +1608,18 @@ def create_router(
 
     @router.get("/tasks/{task_id}")
     async def get_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Load one task and return its expanded payload.
+        
+        Args:
+            task_id: Identifier of the task to fetch.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the requested task.
+        
+        Raises:
+            HTTPException: If the task does not exist.
+        """
         container, _, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -1500,7 +1628,22 @@ def create_router(
 
     @router.get("/tasks/{task_id}/diff")
     async def get_task_diff(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
-        """Load the git diff and stat output for a task's latest commit."""
+        """Load git diff metadata for the most recent commit step on a task.
+
+        Args:
+            task_id: Identifier of the task whose commit diff should be loaded.
+            project_dir: Optional project directory used to resolve runtime
+                state and git context.
+
+        Returns:
+            A payload with ``commit``, ``files``, ``diff``, and ``stat`` keys.
+            When no commit step exists, returns
+            ``{"commit": None, "files": [], "diff": "", "stat": ""}``.
+
+        Raises:
+            HTTPException: If the task does not exist (404) or git diff/stat
+                retrieval fails (500).
+        """
         container, _, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -1566,6 +1709,25 @@ def create_router(
         stderr_read_to: int = Query(0, ge=0),
         step: Optional[str] = Query(None),
     ) -> dict[str, Any]:
+        """Return active, historical, or incremental task log output.
+        
+        Args:
+            task_id: Identifier of the task whose logs are requested.
+            project_dir: Optional project directory used to resolve runtime state.
+            max_chars: Maximum number of characters returned from each stream read.
+            stdout_offset: Byte offset for incremental stdout reads.
+            stderr_offset: Byte offset for incremental stderr reads.
+            backfill: Whether to align incremental reads to full-line boundaries.
+            stdout_read_to: Optional upper byte boundary for stdout reads.
+            stderr_read_to: Optional upper byte boundary for stderr reads.
+            step: Optional step name to load logs from historical run metadata.
+        
+        Returns:
+            A payload containing log text, offsets, and progress metadata.
+        
+        Raises:
+            HTTPException: If the task does not exist.
+        """
         container, _, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -1685,6 +1847,19 @@ def create_router(
 
     @router.patch("/tasks/{task_id}")
     async def patch_task(task_id: str, body: UpdateTaskRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Apply mutable field updates to an existing task.
+        
+        Args:
+            task_id: Identifier of the task to update.
+            body: Partial task update payload.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the updated task.
+        
+        Raises:
+            HTTPException: If the task is missing or if status mutation is requested.
+        """
         container, bus, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -1706,6 +1881,19 @@ def create_router(
 
     @router.post("/tasks/{task_id}/transition")
     async def transition_task(task_id: str, body: TransitionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Transition a task to a valid next status.
+        
+        Args:
+            task_id: Identifier of the task to transition.
+            body: Requested target status payload.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the transitioned task.
+        
+        Raises:
+            HTTPException: If the task is missing, the transition is invalid, or blockers remain.
+        """
         container, bus, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -1726,6 +1914,18 @@ def create_router(
 
     @router.post("/tasks/{task_id}/run")
     async def run_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Trigger orchestrator execution for a queued task.
+        
+        Args:
+            task_id: Identifier of the task to execute.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the task after run dispatch.
+        
+        Raises:
+            HTTPException: If the task cannot be run.
+        """
         _, _, orchestrator = _ctx(project_dir)
         try:
             task = orchestrator.run_task(task_id)
@@ -1737,6 +1937,19 @@ def create_router(
 
     @router.post("/tasks/{task_id}/retry")
     async def retry_task(task_id: str, body: Optional[RetryTaskRequest] = None, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Retry a task after clearing error and gate state.
+        
+        Args:
+            task_id: Identifier of the task to retry.
+            body: Optional retry payload containing guidance and restart step.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the retried task.
+        
+        Raises:
+            HTTPException: If the task is missing or unresolved blockers remain.
+        """
         container, bus, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -1775,6 +1988,18 @@ def create_router(
 
     @router.post("/tasks/{task_id}/cancel")
     async def cancel_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Cancel a task and emit a cancellation event.
+        
+        Args:
+            task_id: Identifier of the task to cancel.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the cancelled task.
+        
+        Raises:
+            HTTPException: If the task does not exist.
+        """
         container, bus, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -1786,6 +2011,19 @@ def create_router(
 
     @router.post("/tasks/{task_id}/approve-gate")
     async def approve_gate(task_id: str, body: ApproveGateRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Clear a pending human gate on a task.
+        
+        Args:
+            task_id: Identifier of the task awaiting gate approval.
+            body: Gate approval payload, including optional gate name validation.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload with the updated task and cleared gate value.
+        
+        Raises:
+            HTTPException: If the task is missing or no matching pending gate exists.
+        """
         container, bus, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -1803,6 +2041,19 @@ def create_router(
 
     @router.post("/tasks/{task_id}/dependencies")
     async def add_dependency(task_id: str, body: AddDependencyRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Link a task to another task as a blocker.
+        
+        Args:
+            task_id: Identifier of the blocked task.
+            body: Dependency payload identifying the blocker task.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the updated blocked task.
+        
+        Raises:
+            HTTPException: If either task cannot be found.
+        """
         container, bus, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         blocker = container.tasks.get(body.depends_on)
@@ -1819,6 +2070,19 @@ def create_router(
 
     @router.delete("/tasks/{task_id}/dependencies/{dep_id}")
     async def remove_dependency(task_id: str, dep_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Remove an existing dependency edge between two tasks.
+        
+        Args:
+            task_id: Identifier of the task being unblocked.
+            dep_id: Identifier of the blocker task to unlink.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the updated task.
+        
+        Raises:
+            HTTPException: If the task cannot be found.
+        """
         container, bus, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -1834,6 +2098,14 @@ def create_router(
 
     @router.post("/tasks/analyze-dependencies")
     async def analyze_dependencies(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Run dependency inference and return inferred edges.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing inferred dependency edges across tasks.
+        """
         container, _, orchestrator = _ctx(project_dir)
         orchestrator._maybe_analyze_dependencies()
         # Collect all inferred edges across tasks
@@ -1848,6 +2120,18 @@ def create_router(
 
     @router.post("/tasks/{task_id}/reset-dep-analysis")
     async def reset_dep_analysis(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Remove dependency-analysis metadata from a task.
+        
+        Args:
+            task_id: Identifier of the task whose analysis metadata is reset.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the updated task.
+        
+        Raises:
+            HTTPException: If the task cannot be found.
+        """
         container, bus, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -1878,6 +2162,18 @@ def create_router(
 
     @router.get("/tasks/{task_id}/workdoc")
     async def get_task_workdoc(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return the orchestrator work document for a task.
+        
+        Args:
+            task_id: Identifier of the task whose work document is requested.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            The serialized work document payload.
+        
+        Raises:
+            HTTPException: If the task cannot be found.
+        """
         container, _, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -1887,6 +2183,18 @@ def create_router(
 
     @router.get("/tasks/{task_id}/plan")
     async def get_task_plan(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return the current plan document for a task.
+        
+        Args:
+            task_id: Identifier of the task whose plan is requested.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            The serialized plan document payload.
+        
+        Raises:
+            HTTPException: If the task is missing or plan retrieval fails validation.
+        """
         container, _, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -1903,6 +2211,19 @@ def create_router(
         body: PlanRefineRequest,
         project_dir: Optional[str] = Query(None),
     ) -> dict[str, Any]:
+        """Queue a plan-refinement job for a task.
+        
+        Args:
+            task_id: Identifier of the task whose plan is being refined.
+            body: Refinement request with feedback, optional instructions, and priority.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the queued refinement job.
+        
+        Raises:
+            HTTPException: If the task is missing, feedback is empty, or queueing fails.
+        """
         container, _, orchestrator = _ctx(project_dir)
         if not container.tasks.get(task_id):
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1924,6 +2245,18 @@ def create_router(
 
     @router.get("/tasks/{task_id}/plan/jobs")
     async def list_plan_refine_jobs(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """List plan-refinement jobs associated with a task.
+        
+        Args:
+            task_id: Identifier of the task whose refinement jobs are requested.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing serialized refinement jobs.
+        
+        Raises:
+            HTTPException: If the task is missing or job lookup fails.
+        """
         container, _, orchestrator = _ctx(project_dir)
         if not container.tasks.get(task_id):
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1935,6 +2268,19 @@ def create_router(
 
     @router.get("/tasks/{task_id}/plan/jobs/{job_id}")
     async def get_plan_refine_job(task_id: str, job_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Fetch a specific plan-refinement job for a task.
+        
+        Args:
+            task_id: Identifier of the owning task.
+            job_id: Identifier of the refinement job.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the requested refinement job.
+        
+        Raises:
+            HTTPException: If the task or job cannot be found.
+        """
         container, _, orchestrator = _ctx(project_dir)
         if not container.tasks.get(task_id):
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1950,6 +2296,19 @@ def create_router(
         body: CommitPlanRequest,
         project_dir: Optional[str] = Query(None),
     ) -> dict[str, Any]:
+        """Commit a plan revision as the task's accepted plan.
+        
+        Args:
+            task_id: Identifier of the task whose plan is being committed.
+            body: Commit payload containing the revision identifier.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload with committed and latest revision identifiers.
+        
+        Raises:
+            HTTPException: If the task is missing or revision commit fails.
+        """
         container, _, orchestrator = _ctx(project_dir)
         if not container.tasks.get(task_id):
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1970,6 +2329,19 @@ def create_router(
         body: CreatePlanRevisionRequest,
         project_dir: Optional[str] = Query(None),
     ) -> dict[str, Any]:
+        """Create a manual plan revision for a task.
+        
+        Args:
+            task_id: Identifier of the task whose plan revision is created.
+            body: Revision payload containing content and optional parent metadata.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the created plan revision.
+        
+        Raises:
+            HTTPException: If the task is missing or content is invalid.
+        """
         container, _, orchestrator = _ctx(project_dir)
         if not container.tasks.get(task_id):
             raise HTTPException(status_code=404, detail="Task not found")
@@ -1992,6 +2364,19 @@ def create_router(
     async def generate_tasks_from_plan(
         task_id: str, body: GenerateTasksRequest, project_dir: Optional[str] = Query(None)
     ) -> dict[str, Any]:
+        """Generate child tasks from selected or override plan text.
+        
+        Args:
+            task_id: Identifier of the parent task receiving generated children.
+            body: Generation payload selecting plan source and dependency inference mode.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload with generated child identifiers and resolved source metadata.
+        
+        Raises:
+            HTTPException: If the task is missing or generation inputs are inconsistent.
+        """
         container, _, orchestrator = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -2040,6 +2425,15 @@ def create_router(
 
     @router.post("/import/prd/preview")
     async def preview_import(body: PrdPreviewRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Ingest PRD content and return a preview graph of candidate tasks.
+        
+        Args:
+            body: PRD preview request with raw content and default priority.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the temporary import job id and preview graph.
+        """
         container, _, _ = _ctx(project_dir)
         _prune_in_memory_jobs()
         ingestion = _ingest_prd(body.content, body.default_priority)
@@ -2081,6 +2475,18 @@ def create_router(
 
     @router.post("/import/prd/commit")
     async def commit_import(body: PrdCommitRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Commit a previewed PRD import and run initiative generation.
+        
+        Args:
+            body: PRD commit request identifying the preview job to finalize.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload with created task identifiers and the parent initiative task id.
+        
+        Raises:
+            HTTPException: If the import job is missing, invalid, or execution fails.
+        """
         container, bus, orchestrator = _ctx(project_dir)
         _prune_in_memory_jobs()
         job = job_store.get(body.job_id)
@@ -2142,6 +2548,18 @@ def create_router(
 
     @router.get("/import/{job_id}")
     async def get_import_job(job_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return the current state of a PRD import job.
+        
+        Args:
+            job_id: Identifier of the import job.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the import job record.
+        
+        Raises:
+            HTTPException: If the job cannot be found.
+        """
         _prune_in_memory_jobs()
         job = job_store.get(job_id)
         if not job:
@@ -2153,6 +2571,14 @@ def create_router(
 
     @router.get("/metrics")
     async def get_metrics(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Compute runtime metrics from tasks, runs, and recent events.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A metrics payload for UI dashboard summaries.
+        """
         container, _, orchestrator = _ctx(project_dir)
         status = orchestrator.status()
         tasks = container.tasks.list()
@@ -2193,6 +2619,14 @@ def create_router(
 
     @router.get("/phases")
     async def get_phases(project_dir: Optional[str] = Query(None)) -> list[dict[str, Any]]:
+        """Return phase progress entries for each task.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A list of task phase records with status and progress estimates.
+        """
         container, _, _ = _ctx(project_dir)
         phases: list[dict[str, Any]] = []
         for task in container.tasks.list():
@@ -2229,6 +2663,14 @@ def create_router(
 
     @router.get("/agents/types")
     async def get_agent_types(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """List supported agent roles and routing affinities.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload describing available agent role definitions.
+        """
         container, _, _ = _ctx(project_dir)
         cfg = container.config.load()
         routing = dict(cfg.get("agent_routing") or {})
@@ -2256,14 +2698,33 @@ def create_router(
 
     @router.get("/collaboration/modes")
     async def get_collaboration_modes() -> dict[str, Any]:
+        """Return configured collaboration mode options.
+        
+        Returns:
+            A payload containing all collaboration mode definitions.
+        """
         return {"modes": [config.to_dict() for config in MODE_CONFIGS.values()]}
 
     @router.get("/collaboration/presence")
     async def get_collaboration_presence() -> dict[str, Any]:
+        """Return active collaboration presence information.
+        
+        Returns:
+            A payload containing currently active users.
+        """
         return {"users": []}
 
     @router.get("/collaboration/timeline/{task_id}")
     async def get_collaboration_timeline(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Assemble timeline events for task collaboration activity.
+        
+        Args:
+            task_id: Identifier of the task whose timeline is requested.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing timeline entries sorted by recency.
+        """
         container, _, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -2385,6 +2846,15 @@ def create_router(
 
     @router.get("/collaboration/feedback/{task_id}")
     async def get_collaboration_feedback(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """List feedback records linked to a task.
+        
+        Args:
+            task_id: Identifier of the task whose feedback is requested.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing feedback entries sorted by creation time.
+        """
         container, _, _ = _ctx(project_dir)
         items = [item for item in _load_feedback_records(container) if item.get("task_id") == task_id]
         items.sort(key=lambda item: str(item.get("created_at") or ""), reverse=True)
@@ -2392,6 +2862,18 @@ def create_router(
 
     @router.post("/collaboration/feedback")
     async def add_collaboration_feedback(body: AddFeedbackRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Create a new collaboration feedback entry for a task.
+        
+        Args:
+            body: Feedback creation payload with summary and target metadata.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the newly created feedback entry.
+        
+        Raises:
+            HTTPException: If the task does not exist.
+        """
         container, bus, _ = _ctx(project_dir)
         task = container.tasks.get(body.task_id)
         if not task:
@@ -2418,6 +2900,18 @@ def create_router(
 
     @router.post("/collaboration/feedback/{feedback_id}/dismiss")
     async def dismiss_collaboration_feedback(feedback_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Mark a feedback item as addressed.
+        
+        Args:
+            feedback_id: Identifier of the feedback item to dismiss.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the updated feedback entry.
+        
+        Raises:
+            HTTPException: If the feedback item cannot be found.
+        """
         container, bus, _ = _ctx(project_dir)
         items = _load_feedback_records(container)
         for item in items:
@@ -2431,6 +2925,16 @@ def create_router(
 
     @router.get("/collaboration/comments/{task_id}")
     async def get_collaboration_comments(task_id: str, project_dir: Optional[str] = Query(None), file_path: Optional[str] = Query(None)) -> dict[str, Any]:
+        """List collaboration comments for a task, optionally by file path.
+        
+        Args:
+            task_id: Identifier of the task whose comments are requested.
+            project_dir: Optional project directory used to resolve runtime state.
+            file_path: Optional file path filter.
+        
+        Returns:
+            A payload containing sorted comment records.
+        """
         container, _, _ = _ctx(project_dir)
         items = []
         for item in _load_comment_records(container):
@@ -2444,6 +2948,18 @@ def create_router(
 
     @router.post("/collaboration/comments")
     async def add_collaboration_comment(body: AddCommentRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Create a collaboration comment linked to a task or file location.
+        
+        Args:
+            body: Comment creation payload.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the created comment record.
+        
+        Raises:
+            HTTPException: If the target task does not exist.
+        """
         container, bus, _ = _ctx(project_dir)
         task = container.tasks.get(body.task_id)
         if not task:
@@ -2468,6 +2984,18 @@ def create_router(
 
     @router.post("/collaboration/comments/{comment_id}/resolve")
     async def resolve_collaboration_comment(comment_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Mark an existing collaboration comment as resolved.
+        
+        Args:
+            comment_id: Identifier of the comment to resolve.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the resolved comment record.
+        
+        Raises:
+            HTTPException: If the comment cannot be found.
+        """
         container, bus, _ = _ctx(project_dir)
         items = _load_comment_records(container)
         for item in items:
@@ -2483,12 +3011,29 @@ def create_router(
         body: StartTerminalSessionRequest,
         project_dir: Optional[str] = Query(None),
     ) -> dict[str, Any]:
+        """Start a managed terminal session for the current project.
+        
+        Args:
+            body: Terminal session configuration payload.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the created session and project identifier.
+        """
         container, _, terminal = _terminal_ctx(project_dir)
         session = terminal.start_session(shell=body.shell, cols=body.cols or 120, rows=body.rows or 36)
         return {"session": session.to_dict(), "project_id": container.project_id}
 
     @router.get("/terminal/session")
     async def get_terminal_session(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return the currently active terminal session for the project.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the active session, if any.
+        """
         container, _, terminal = _terminal_ctx(project_dir)
         session = terminal.get_active_session(container.project_id)
         return {"session": session.to_dict() if session else None}
@@ -2499,6 +3044,19 @@ def create_router(
         body: TerminalInputRequest,
         project_dir: Optional[str] = Query(None),
     ) -> dict[str, Any]:
+        """Write input bytes to a managed terminal session.
+        
+        Args:
+            session_id: Identifier of the terminal session.
+            body: Input payload containing data to write.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the updated session state.
+        
+        Raises:
+            HTTPException: If the terminal session cannot be found.
+        """
         _, _, terminal = _terminal_ctx(project_dir)
         try:
             session = terminal.write_input(session_id=session_id, data=body.data)
@@ -2512,6 +3070,19 @@ def create_router(
         body: TerminalResizeRequest,
         project_dir: Optional[str] = Query(None),
     ) -> dict[str, Any]:
+        """Resize a managed terminal session pseudo-terminal.
+        
+        Args:
+            session_id: Identifier of the terminal session.
+            body: Resize payload with column and row counts.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the updated session state.
+        
+        Raises:
+            HTTPException: If the terminal session cannot be found.
+        """
         _, _, terminal = _terminal_ctx(project_dir)
         try:
             session = terminal.resize(session_id=session_id, cols=body.cols, rows=body.rows)
@@ -2525,6 +3096,19 @@ def create_router(
         body: StopTerminalSessionRequest,
         project_dir: Optional[str] = Query(None),
     ) -> dict[str, Any]:
+        """Stop a managed terminal session with an optional signal.
+        
+        Args:
+            session_id: Identifier of the terminal session.
+            body: Stop payload containing the signal name.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the stopped session state.
+        
+        Raises:
+            HTTPException: If the terminal session cannot be found.
+        """
         _, _, terminal = _terminal_ctx(project_dir)
         try:
             session = terminal.stop_session(session_id=session_id, signal_name=body.signal)
@@ -2539,6 +3123,20 @@ def create_router(
         offset: int = Query(0),
         max_bytes: int = Query(65536),
     ) -> dict[str, Any]:
+        """Read terminal session output from a byte offset.
+        
+        Args:
+            session_id: Identifier of the terminal session.
+            project_dir: Optional project directory used to resolve runtime state.
+            offset: Starting byte offset in the output stream.
+            max_bytes: Maximum number of bytes to read.
+        
+        Returns:
+            A payload containing output data, new offset, and session status.
+        
+        Raises:
+            HTTPException: If the terminal session cannot be found.
+        """
         _, _, terminal = _terminal_ctx(project_dir)
         try:
             output, new_offset = terminal.read_output(session_id=session_id, offset=offset, max_bytes=max_bytes)
@@ -2554,12 +3152,33 @@ def create_router(
 
     @router.get("/review-queue")
     async def review_queue(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """List tasks currently awaiting human review.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing in-review tasks and total count.
+        """
         container, _, _ = _ctx(project_dir)
         items = [_task_payload(task) for task in container.tasks.list() if task.status == "in_review"]
         return {"tasks": items, "total": len(items)}
 
     @router.post("/review/{task_id}/approve")
     async def approve_review(task_id: str, body: ReviewActionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Approve a reviewed task and optionally merge preserved branch work.
+        
+        Args:
+            task_id: Identifier of the task being approved.
+            body: Review action payload containing optional guidance.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the approved task.
+        
+        Raises:
+            HTTPException: If task lookup fails, status is invalid, or merge conflicts occur.
+        """
         container, bus, orchestrator = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -2589,6 +3208,19 @@ def create_router(
 
     @router.post("/review/{task_id}/request-changes")
     async def request_review_changes(task_id: str, body: ReviewActionRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return a task from review to implementation with reviewer guidance.
+        
+        Args:
+            task_id: Identifier of the task requiring changes.
+            body: Review action payload containing change guidance.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the updated task.
+        
+        Raises:
+            HTTPException: If the task is missing or not in review.
+        """
         container, bus, _ = _ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
@@ -2607,34 +3239,84 @@ def create_router(
 
     @router.get("/orchestrator/status")
     async def orchestrator_status(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return current orchestrator queue and worker status metrics.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            The orchestrator status payload.
+        """
         _, _, orchestrator = _ctx(project_dir)
         return orchestrator.status()
 
     @router.post("/orchestrator/control")
     async def orchestrator_control(body: OrchestratorControlRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Apply a control action to the orchestrator runtime.
+        
+        Args:
+            body: Control request specifying the desired orchestrator action.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            The orchestrator control action result payload.
+        """
         _, _, orchestrator = _ctx(project_dir)
         return orchestrator.control(body.action)
 
     @router.get("/settings")
     async def get_settings(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return normalized runtime settings for the project.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            The settings payload consumed by the UI.
+        """
         container, _, _ = _ctx(project_dir)
         cfg = container.config.load()
         return _settings_payload(cfg)
 
     @router.get("/workers/health")
     async def workers_health(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return worker health summary derived from persisted configuration.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A worker health payload.
+        """
         container, _, _ = _ctx(project_dir)
         cfg = container.config.load()
         return _workers_health_payload(cfg)
 
     @router.get("/workers/routing")
     async def workers_routing(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return worker routing configuration details.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A worker routing payload.
+        """
         container, _, _ = _ctx(project_dir)
         cfg = container.config.load()
         return _workers_routing_payload(cfg)
 
     @router.patch("/settings")
     async def patch_settings(body: UpdateSettingsRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Apply partial settings updates across orchestrator configuration sections.
+        
+        Args:
+            body: Settings patch payload with optional section updates.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            The normalized settings payload after persistence.
+        """
         container, bus, _ = _ctx(project_dir)
         cfg = container.config.load()
         touched_sections: list[str] = []
@@ -2724,11 +3406,28 @@ def create_router(
 
     @router.get("/agents")
     async def list_agents(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """List all persisted agent records for the project.
+        
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing serialized agent records.
+        """
         container, _, _ = _ctx(project_dir)
         return {"agents": [agent.to_dict() for agent in container.agents.list()]}
 
     @router.post("/agents/spawn")
     async def spawn_agent(body: SpawnAgentRequest, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Create a new agent record and publish an agent-created event.
+        
+        Args:
+            body: Agent spawn payload with role, capacity, and provider override.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the created agent record.
+        """
         container, bus, _ = _ctx(project_dir)
         agent = AgentRecord(role=body.role, capacity=body.capacity, override_provider=body.override_provider)
         container.agents.upsert(agent)
@@ -2737,6 +3436,18 @@ def create_router(
 
     @router.post("/agents/{agent_id}/pause")
     async def pause_agent(agent_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Pause an existing agent record.
+        
+        Args:
+            agent_id: Identifier of the agent to pause.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the updated agent record.
+        
+        Raises:
+            HTTPException: If the agent cannot be found.
+        """
         container, bus, _ = _ctx(project_dir)
         agent = container.agents.get(agent_id)
         if not agent:
@@ -2748,6 +3459,18 @@ def create_router(
 
     @router.post("/agents/{agent_id}/resume")
     async def resume_agent(agent_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Resume a previously paused agent record.
+        
+        Args:
+            agent_id: Identifier of the agent to resume.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the updated agent record.
+        
+        Raises:
+            HTTPException: If the agent cannot be found.
+        """
         container, bus, _ = _ctx(project_dir)
         agent = container.agents.get(agent_id)
         if not agent:
@@ -2759,6 +3482,18 @@ def create_router(
 
     @router.post("/agents/{agent_id}/terminate")
     async def terminate_agent(agent_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Mark an agent record as terminated.
+        
+        Args:
+            agent_id: Identifier of the agent to terminate.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload containing the updated agent record.
+        
+        Raises:
+            HTTPException: If the agent cannot be found.
+        """
         container, bus, _ = _ctx(project_dir)
         agent = container.agents.get(agent_id)
         if not agent:
@@ -2770,6 +3505,18 @@ def create_router(
 
     @router.delete("/agents/{agent_id}")
     async def remove_agent(agent_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Delete an agent record by identifier.
+        
+        Args:
+            agent_id: Identifier of the agent to remove.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload indicating successful removal.
+        
+        Raises:
+            HTTPException: If the agent cannot be found.
+        """
         container, bus, _ = _ctx(project_dir)
         removed = container.agents.delete(agent_id)
         if not removed:
@@ -2779,6 +3526,18 @@ def create_router(
 
     @router.post("/agents/{agent_id}/remove")
     async def remove_agent_post(agent_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Delete an agent record through the POST compatibility endpoint.
+        
+        Args:
+            agent_id: Identifier of the agent to remove.
+            project_dir: Optional project directory used to resolve runtime state.
+        
+        Returns:
+            A payload indicating successful removal.
+        
+        Raises:
+            HTTPException: If the agent cannot be found.
+        """
         container, bus, _ = _ctx(project_dir)
         removed = container.agents.delete(agent_id)
         if not removed:
@@ -2790,7 +3549,14 @@ def create_router(
 
 
 def os_access(path: Path) -> bool:
-    """Check whether the current process can enumerate a directory path."""
+    """Check whether the current process can enumerate a directory path.
+
+    Args:
+        path (Path): Filesystem path to validate.
+
+    Returns:
+        bool: `True` when the operation succeeds, otherwise `False`.
+    """
     try:
         list(path.iterdir())
     except Exception:

@@ -129,7 +129,12 @@ def _server(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """Build and return the top-level CLI parser."""
+    """Build and return the top-level CLI parser.
+
+    Returns:
+        argparse.ArgumentParser: Configured parser with server, project, task,
+            and orchestrator command groups.
+    """
     parser = argparse.ArgumentParser(description='Agent Orchestrator CLI (UI-first minimal)')
     parser.add_argument('--project-dir', default=None, help='Target project directory (default: current working directory)')
     subparsers = parser.add_subparsers(dest='command', required=True)
@@ -180,7 +185,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run the CLI and return a process exit code."""
+    """Run the CLI and return a process exit code.
+
+    Args:
+        argv (list[str] | None): Optional argument vector. When omitted,
+            arguments are read from ``sys.argv``.
+
+    Returns:
+        int: Process exit code returned by the selected subcommand, or ``1``
+            when no subcommand is provided.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     handler = getattr(args, 'func', None)

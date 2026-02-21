@@ -50,6 +50,17 @@ class _YamlCollectionRepo(Generic[T]):
         loader: Callable[[dict[str, Any]], T],
         dumper: Callable[[T], dict[str, Any]],
     ) -> None:
+        """Initialize the YamlCollectionRepo.
+
+        Args:
+            path (Path): YAML file path containing this repository collection.
+            lock_path (Path): Lock file path used for cross-process synchronization.
+            key (str): Top-level YAML key that stores serialized collection items.
+            loader (Callable[[dict[str, Any]], T]): Callable converting raw dictionaries
+                into domain models.
+            dumper (Callable[[T], dict[str, Any]]): Callable converting domain models
+                into dictionaries for persistence.
+        """
         self._path = path
         self._lock = FileLock(lock_path)
         self._thread_lock = threading.RLock()
@@ -88,6 +99,12 @@ class _YamlCollectionRepo(Generic[T]):
 class FileTaskRepository(TaskRepository):
     """YAML-backed task repository with coarse file/process locking."""
     def __init__(self, path: Path, lock_path: Path) -> None:
+        """Initialize the FileTaskRepository.
+
+        Args:
+            path (Path): YAML file path for task records.
+            lock_path (Path): Lock file path used while mutating task data.
+        """
         self._repo = _YamlCollectionRepo[Task](
             path,
             lock_path,
@@ -97,20 +114,38 @@ class FileTaskRepository(TaskRepository):
         )
 
     def list(self) -> list[Task]:
-        """Load all persisted tasks."""
+        """Load all persisted tasks.
+
+        Returns:
+            list[Task]: All persisted task records.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 return self._repo._load()
 
     def get(self, task_id: str) -> Optional[Task]:
-        """Fetch a single task by identifier."""
+        """Fetch a single task by identifier.
+
+        Args:
+            task_id (str): Identifier for the target task.
+
+        Returns:
+            Optional[Task]: Requested value when available; otherwise `None`.
+        """
         for task in self.list():
             if task.id == task_id:
                 return task
         return None
 
     def upsert(self, task: Task) -> Task:
-        """Insert or update a task and refresh timestamps."""
+        """Insert or update a task and refresh timestamps.
+
+        Args:
+            task (Task): Task model to insert or replace by id.
+
+        Returns:
+            Task: Persisted task record after timestamps are refreshed.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 tasks = self._repo._load()
@@ -129,7 +164,14 @@ class FileTaskRepository(TaskRepository):
         return task
 
     def delete(self, task_id: str) -> bool:
-        """Delete a task by id."""
+        """Delete a task by id.
+
+        Args:
+            task_id (str): Identifier for the target task.
+
+        Returns:
+            bool: `True` when the operation succeeds, otherwise `False`.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 tasks = self._repo._load()
@@ -140,7 +182,14 @@ class FileTaskRepository(TaskRepository):
         return True
 
     def claim_next_runnable(self, *, max_in_progress: int) -> Optional[Task]:
-        """Select and atomically mark the next runnable queued task."""
+        """Select and atomically mark the next runnable queued task.
+
+        Args:
+            max_in_progress (int): Maximum number of tasks allowed in `in_progress`.
+
+        Returns:
+            Optional[Task]: Claimed runnable task, or `None` when none can be claimed.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 tasks = self._repo._load()
@@ -179,6 +228,12 @@ class FileTaskRepository(TaskRepository):
 class FileRunRepository(RunRepository):
     """YAML-backed repository for run execution records."""
     def __init__(self, path: Path, lock_path: Path) -> None:
+        """Initialize the FileRunRepository.
+
+        Args:
+            path (Path): YAML file path for run records.
+            lock_path (Path): Lock file path used while mutating run data.
+        """
         self._repo = _YamlCollectionRepo[RunRecord](
             path,
             lock_path,
@@ -188,20 +243,38 @@ class FileRunRepository(RunRepository):
         )
 
     def list(self) -> list[RunRecord]:
-        """Load all runs."""
+        """Load all runs.
+
+        Returns:
+            list[RunRecord]: All persisted run records.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 return self._repo._load()
 
     def get(self, run_id: str) -> Optional[RunRecord]:
-        """Fetch a single run by identifier."""
+        """Fetch a single run by identifier.
+
+        Args:
+            run_id (str): Identifier for the target run.
+
+        Returns:
+            Optional[RunRecord]: Requested value when available; otherwise `None`.
+        """
         for run in self.list():
             if run.id == run_id:
                 return run
         return None
 
     def upsert(self, run: RunRecord) -> RunRecord:
-        """Insert or update a run record."""
+        """Insert or update a run record.
+
+        Args:
+            run (RunRecord): Run model to insert or replace by id.
+
+        Returns:
+            RunRecord: Persisted run record after the write operation.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 runs = self._repo._load()
@@ -218,6 +291,12 @@ class FileRunRepository(RunRepository):
 class FileReviewRepository(ReviewRepository):
     """YAML-backed repository for review cycle history."""
     def __init__(self, path: Path, lock_path: Path) -> None:
+        """Initialize the FileReviewRepository.
+
+        Args:
+            path (Path): YAML file path for review cycle records.
+            lock_path (Path): Lock file path used while mutating review data.
+        """
         self._repo = _YamlCollectionRepo[ReviewCycle](
             path,
             lock_path,
@@ -227,17 +306,35 @@ class FileReviewRepository(ReviewRepository):
         )
 
     def list(self) -> list[ReviewCycle]:
-        """Load all review cycles."""
+        """Load all review cycles.
+
+        Returns:
+            list[ReviewCycle]: All persisted review cycles.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 return self._repo._load()
 
     def for_task(self, task_id: str) -> List[ReviewCycle]:
-        """List review cycles associated with one task id."""
+        """List review cycles associated with one task id.
+
+        Args:
+            task_id (str): Identifier for the target task.
+
+        Returns:
+            List[ReviewCycle]: Review cycles associated with ``task_id``.
+        """
         return [cycle for cycle in self.list() if cycle.task_id == task_id]
 
     def append(self, cycle: ReviewCycle) -> ReviewCycle:
-        """Append a new review cycle entry."""
+        """Append a new review cycle entry.
+
+        Args:
+            cycle (ReviewCycle): Review cycle record to append.
+
+        Returns:
+            ReviewCycle: Persisted review cycle record.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 cycles = self._repo._load()
@@ -249,6 +346,12 @@ class FileReviewRepository(ReviewRepository):
 class FileAgentRepository(AgentRepository):
     """YAML-backed repository for active and historical agents."""
     def __init__(self, path: Path, lock_path: Path) -> None:
+        """Initialize the FileAgentRepository.
+
+        Args:
+            path (Path): YAML file path for agent records.
+            lock_path (Path): Lock file path used while mutating agent data.
+        """
         self._repo = _YamlCollectionRepo[AgentRecord](
             path,
             lock_path,
@@ -258,20 +361,38 @@ class FileAgentRepository(AgentRepository):
         )
 
     def list(self) -> list[AgentRecord]:
-        """Load all agents."""
+        """Load all agents.
+
+        Returns:
+            list[AgentRecord]: All persisted agent records.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 return self._repo._load()
 
     def get(self, agent_id: str) -> Optional[AgentRecord]:
-        """Fetch a single agent by identifier."""
+        """Fetch a single agent by identifier.
+
+        Args:
+            agent_id (str): Identifier for the target agent.
+
+        Returns:
+            Optional[AgentRecord]: Requested value when available; otherwise `None`.
+        """
         for agent in self.list():
             if agent.id == agent_id:
                 return agent
         return None
 
     def upsert(self, agent: AgentRecord) -> AgentRecord:
-        """Insert or update an agent record."""
+        """Insert or update an agent record.
+
+        Args:
+            agent (AgentRecord): Agent record to insert or replace by id.
+
+        Returns:
+            AgentRecord: Persisted agent record after the write operation.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 agents = self._repo._load()
@@ -285,7 +406,14 @@ class FileAgentRepository(AgentRepository):
         return agent
 
     def delete(self, agent_id: str) -> bool:
-        """Delete an agent record by id."""
+        """Delete an agent record by id.
+
+        Args:
+            agent_id (str): Identifier for the target agent.
+
+        Returns:
+            bool: `True` when the operation succeeds, otherwise `False`.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 agents = self._repo._load()
@@ -299,6 +427,12 @@ class FileAgentRepository(AgentRepository):
 class FileTerminalSessionRepository(TerminalSessionRepository):
     """YAML-backed repository for terminal session metadata."""
     def __init__(self, path: Path, lock_path: Path) -> None:
+        """Initialize the FileTerminalSessionRepository.
+
+        Args:
+            path (Path): YAML file path for terminal session records.
+            lock_path (Path): Lock file path used while mutating session data.
+        """
         self._repo = _YamlCollectionRepo[TerminalSession](
             path,
             lock_path,
@@ -308,20 +442,38 @@ class FileTerminalSessionRepository(TerminalSessionRepository):
         )
 
     def list(self) -> list[TerminalSession]:
-        """Load all terminal sessions."""
+        """Load all terminal sessions.
+
+        Returns:
+            list[TerminalSession]: All persisted terminal session records.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 return self._repo._load()
 
     def get(self, session_id: str) -> Optional[TerminalSession]:
-        """Fetch a single terminal session by identifier."""
+        """Fetch a single terminal session by identifier.
+
+        Args:
+            session_id (str): Identifier for the target session.
+
+        Returns:
+            Optional[TerminalSession]: Requested value when available; otherwise `None`.
+        """
         for run in self.list():
             if run.id == session_id:
                 return run
         return None
 
     def upsert(self, session: TerminalSession) -> TerminalSession:
-        """Insert or update a terminal session record."""
+        """Insert or update a terminal session record.
+
+        Args:
+            session (TerminalSession): Terminal session record to insert or replace by id.
+
+        Returns:
+            TerminalSession: Persisted terminal session record after the write operation.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 runs = self._repo._load()
@@ -338,12 +490,29 @@ class FileTerminalSessionRepository(TerminalSessionRepository):
 class FileEventRepository(EventRepository):
     """JSONL-backed event stream repository."""
     def __init__(self, path: Path, lock_path: Path) -> None:
+        """Initialize the FileEventRepository.
+
+        Args:
+            path (Path): JSONL file path where event envelopes are appended.
+            lock_path (Path): Lock file path used while writing or reading events.
+        """
         self._path = path
         self._lock = FileLock(lock_path)
         self._thread_lock = threading.RLock()
 
     def append(self, *, channel: str, event_type: str, entity_id: str, payload: dict[str, Any], project_id: str) -> dict[str, Any]:
-        """Append one event envelope to the JSONL stream."""
+        """Append one event envelope to the JSONL stream.
+
+        Args:
+            channel (str): Channel namespace for the event stream.
+            event_type (str): Specific event type emitted in the channel.
+            entity_id (str): Identifier for the related entity.
+            payload (dict[str, Any]): JSON-serializable event payload body.
+            project_id (str): Identifier for the related project.
+
+        Returns:
+            dict[str, Any]: Persisted event envelope including generated id and timestamp.
+        """
         event = {
             "id": f"evt-{uuid.uuid4().hex[:10]}",
             "ts": now_iso(),
@@ -363,7 +532,14 @@ class FileEventRepository(EventRepository):
         return event
 
     def list_recent(self, limit: int = 100) -> list[dict[str, Any]]:
-        """Read the newest events up to ``limit``."""
+        """Read the newest events up to ``limit``.
+
+        Args:
+            limit (int): Maximum number of newest events to return.
+
+        Returns:
+            list[dict[str, Any]]: Parsed event envelopes from the tail of the stream.
+        """
         if limit <= 0 or not self._path.exists():
             return []
         with self._thread_lock:
@@ -384,6 +560,12 @@ class FileEventRepository(EventRepository):
 class FilePlanRevisionRepository(PlanRevisionRepository):
     """YAML-backed repository for plan revisions."""
     def __init__(self, path: Path, lock_path: Path) -> None:
+        """Initialize the FilePlanRevisionRepository.
+
+        Args:
+            path (Path): YAML file path for plan revision records.
+            lock_path (Path): Lock file path used while mutating revision data.
+        """
         self._repo = _YamlCollectionRepo[PlanRevision](
             path,
             lock_path,
@@ -393,25 +575,50 @@ class FilePlanRevisionRepository(PlanRevisionRepository):
         )
 
     def list(self) -> list[PlanRevision]:
-        """Load and return revisions sorted by creation time."""
+        """Load and return revisions sorted by creation time.
+
+        Returns:
+            list[PlanRevision]: Persisted revisions sorted by creation timestamp.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 items = self._repo._load()
         return sorted(items, key=lambda item: item.created_at)
 
     def for_task(self, task_id: str) -> List[PlanRevision]:
-        """List revisions that belong to a given task."""
+        """List revisions that belong to a given task.
+
+        Args:
+            task_id (str): Identifier for the target task.
+
+        Returns:
+            List[PlanRevision]: Plan revisions associated with ``task_id``.
+        """
         return [item for item in self.list() if item.task_id == task_id]
 
     def get(self, revision_id: str) -> Optional[PlanRevision]:
-        """Fetch a single revision by identifier."""
+        """Fetch a single revision by identifier.
+
+        Args:
+            revision_id (str): Identifier for the target revision.
+
+        Returns:
+            Optional[PlanRevision]: Requested value when available; otherwise `None`.
+        """
         for item in self.list():
             if item.id == revision_id:
                 return item
         return None
 
     def upsert(self, revision: PlanRevision) -> PlanRevision:
-        """Insert or update a revision."""
+        """Insert or update a revision.
+
+        Args:
+            revision (PlanRevision): Plan revision record to insert or replace by id.
+
+        Returns:
+            PlanRevision: Persisted plan revision record after the write operation.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 items = self._repo._load()
@@ -428,6 +635,12 @@ class FilePlanRevisionRepository(PlanRevisionRepository):
 class FilePlanRefineJobRepository(PlanRefineJobRepository):
     """YAML-backed repository for plan-refine job state."""
     def __init__(self, path: Path, lock_path: Path) -> None:
+        """Initialize the FilePlanRefineJobRepository.
+
+        Args:
+            path (Path): YAML file path for plan-refine job records.
+            lock_path (Path): Lock file path used while mutating job data.
+        """
         self._repo = _YamlCollectionRepo[PlanRefineJob](
             path,
             lock_path,
@@ -437,25 +650,50 @@ class FilePlanRefineJobRepository(PlanRefineJobRepository):
         )
 
     def list(self) -> list[PlanRefineJob]:
-        """Load and return jobs newest-first."""
+        """Load and return jobs newest-first.
+
+        Returns:
+            list[PlanRefineJob]: Persisted jobs sorted newest-first by creation time.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 items = self._repo._load()
         return sorted(items, key=lambda item: item.created_at, reverse=True)
 
     def for_task(self, task_id: str) -> List[PlanRefineJob]:
-        """List plan-refine jobs that belong to a given task."""
+        """List plan-refine jobs that belong to a given task.
+
+        Args:
+            task_id (str): Identifier for the target task.
+
+        Returns:
+            List[PlanRefineJob]: Plan-refine jobs associated with ``task_id``.
+        """
         return [item for item in self.list() if item.task_id == task_id]
 
     def get(self, job_id: str) -> Optional[PlanRefineJob]:
-        """Fetch a single plan-refine job by identifier."""
+        """Fetch a single plan-refine job by identifier.
+
+        Args:
+            job_id (str): Identifier for the target job.
+
+        Returns:
+            Optional[PlanRefineJob]: Requested value when available; otherwise `None`.
+        """
         for item in self.list():
             if item.id == job_id:
                 return item
         return None
 
     def upsert(self, job: PlanRefineJob) -> PlanRefineJob:
-        """Insert or update a refine job."""
+        """Insert or update a refine job.
+
+        Args:
+            job (PlanRefineJob): Plan-refine job record to insert or replace by id.
+
+        Returns:
+            PlanRefineJob: Persisted plan-refine job record after the write operation.
+        """
         with self._repo._thread_lock:
             with self._repo._lock:
                 items = self._repo._load()
@@ -472,12 +710,22 @@ class FilePlanRefineJobRepository(PlanRefineJobRepository):
 class FileConfigRepository:
     """YAML-backed repository for runtime configuration."""
     def __init__(self, path: Path, lock_path: Path) -> None:
+        """Initialize the FileConfigRepository.
+
+        Args:
+            path (Path): YAML file path for runtime configuration.
+            lock_path (Path): Lock file path used while reading or writing config.
+        """
         self._path = path
         self._lock = FileLock(lock_path)
         self._thread_lock = threading.RLock()
 
     def load(self) -> dict[str, Any]:
-        """Load configuration from disk."""
+        """Load configuration from disk.
+
+        Returns:
+            dict[str, Any]: Configuration mapping from disk, or an empty mapping.
+        """
         _require_yaml()
         with self._thread_lock:
             with self._lock:
@@ -487,7 +735,14 @@ class FileConfigRepository:
                 return raw if isinstance(raw, dict) else {}
 
     def save(self, config: dict[str, Any]) -> dict[str, Any]:
-        """Persist configuration to disk atomically."""
+        """Persist configuration to disk atomically.
+
+        Args:
+            config (dict[str, Any]): Configuration mapping to persist.
+
+        Returns:
+            dict[str, Any]: Saved configuration mapping.
+        """
         _require_yaml()
         with self._thread_lock:
             with self._lock:
