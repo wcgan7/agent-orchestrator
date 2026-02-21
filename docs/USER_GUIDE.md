@@ -71,6 +71,16 @@ Constraint:
 
 Blockers are resolved when dependent tasks are `done` or `cancelled`.
 
+Terminal-task cleanup:
+- Tasks in `done` or `cancelled` can be permanently deleted from task detail.
+- Non-terminal tasks cannot be deleted.
+
+Board clear-all behavior:
+- `Clear All Tasks` archives the existing `.agent_orchestrator/` directory to
+  `.agent_orchestrator_archive/state_<timestamp>/`, then initializes a fresh
+  empty `.agent_orchestrator/`.
+- The UI shows the archive destination path after a successful clear.
+
 ## Typical Workflows
 
 ### 1. Create and run a task

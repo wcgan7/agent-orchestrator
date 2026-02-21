@@ -1030,6 +1030,82 @@ def test_state_machine_allows_and_rejects_expected_transitions(tmp_path: Path) -
         assert "Invalid transition" in invalid.text
 
 
+def test_delete_terminal_task_cleans_relationship_references(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+
+    task_to_delete = Task(title="Terminal delete target", status="done")
+    child = Task(title="Child task", status="done", parent_id=task_to_delete.id)
+    predecessor = Task(title="Predecessor", status="done", blocks=[task_to_delete.id], children_ids=[task_to_delete.id])
+    dependent = Task(title="Dependent", status="done", blocked_by=[task_to_delete.id])
+    parent_ref = Task(title="Parent ref", status="done", children_ids=[task_to_delete.id])
+
+    container.tasks.upsert(task_to_delete)
+    container.tasks.upsert(child)
+    container.tasks.upsert(predecessor)
+    container.tasks.upsert(dependent)
+    container.tasks.upsert(parent_ref)
+
+    with TestClient(app) as client:
+        resp = client.delete(f"/api/tasks/{task_to_delete.id}")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["deleted"] is True
+        assert payload["task_id"] == task_to_delete.id
+
+    fresh = Container(tmp_path)
+    assert fresh.tasks.get(task_to_delete.id) is None
+    assert fresh.tasks.get(child.id) is not None
+    assert fresh.tasks.get(child.id).parent_id is None
+    assert task_to_delete.id not in (fresh.tasks.get(predecessor.id).blocks or [])
+    assert task_to_delete.id not in (fresh.tasks.get(predecessor.id).children_ids or [])
+    assert task_to_delete.id not in (fresh.tasks.get(dependent.id).blocked_by or [])
+    assert task_to_delete.id not in (fresh.tasks.get(parent_ref.id).children_ids or [])
+
+
+def test_delete_non_terminal_task_rejected(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Queued task", "status": "queued"}).json()["task"]
+        resp = client.delete(f"/api/tasks/{created['id']}")
+        assert resp.status_code == 400
+        assert "Only terminal tasks" in resp.json()["detail"]
+
+
+def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Archive me", "status": "queued"}).json()["task"]
+
+        clear_resp = client.post("/api/tasks/clear")
+        assert clear_resp.status_code == 200
+        body = clear_resp.json()
+        assert body["cleared"] is True
+        archived_to = str(body["archived_to"] or "")
+        assert archived_to
+        assert "Archived previous runtime state to" in body["message"]
+
+        archived_path = Path(archived_to)
+        assert archived_path.exists()
+        assert archived_path.parent == tmp_path / ".agent_orchestrator_archive"
+        archived_tasks = (archived_path / "tasks.yaml").read_text(encoding="utf-8")
+        assert created["id"] in archived_tasks
+
+        board = client.get("/api/tasks/board")
+        assert board.status_code == 200
+        columns = board.json()["columns"]
+        assert columns["backlog"] == []
+        assert columns["queued"] == []
+        assert columns["in_progress"] == []
+        assert columns["in_review"] == []
+        assert columns["blocked"] == []
+        assert columns["done"] == []
+        assert columns["cancelled"] == []
+
+        fresh_tasks = (tmp_path / ".agent_orchestrator" / "tasks.yaml").read_text(encoding="utf-8")
+        assert created["id"] not in fresh_tasks
+
+
 def test_api_surfaces_human_blocking_issues_on_task_and_timeline(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:

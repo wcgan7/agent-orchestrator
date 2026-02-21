@@ -10,7 +10,7 @@ import './styles/orchestrator.css'
 type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
 type CreateTab = 'task' | 'import'
 type TaskDetailTab = 'overview' | 'plan' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
-type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition'
+type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear'
 
 type TaskRecord = {
   id: string
@@ -3082,6 +3082,58 @@ export default function App() {
     )
   }
 
+  async function deleteTask(taskId: string): Promise<void> {
+    if (!window.confirm('Delete this terminal task permanently?')) {
+      return
+    }
+    await runTaskMutation(
+      'delete',
+      async () => {
+        await requestJson<{ deleted: boolean; task_id: string }>(buildApiUrl(`/api/tasks/${taskId}`, projectDir), {
+          method: 'DELETE',
+        })
+        await reloadAll()
+        if (selectedTaskIdRef.current === taskId) {
+          modalDismissedRef.current = true
+          modalExplicitRef.current = false
+          setSelectedTaskId('')
+          setSelectedTaskDetail(null)
+          setSelectedTaskPlan(null)
+        }
+      },
+      {
+        successMessage: 'Task deleted.',
+        errorPrefix: 'Failed to delete task',
+      },
+    )
+  }
+
+  async function clearAllTasks(): Promise<void> {
+    if (!window.confirm('Clear all tasks? Existing runtime state will be archived to disk.')) {
+      return
+    }
+    await runTaskMutation(
+      'clear',
+      async () => {
+        const result = await requestJson<{ cleared: boolean; archived_to?: string; message?: string }>(
+          buildApiUrl('/api/tasks/clear', projectDir),
+          { method: 'POST' },
+        )
+        await reloadAll()
+        modalDismissedRef.current = true
+        modalExplicitRef.current = false
+        setSelectedTaskId('')
+        setSelectedTaskDetail(null)
+        setSelectedTaskPlan(null)
+        setTaskActionMessage(String(result.message || 'Cleared all tasks.'))
+      },
+      {
+        startMessage: 'Clearing all tasks...',
+        errorPrefix: 'Failed to clear tasks',
+      },
+    )
+  }
+
   function switchLogStep(step: string): void {
     const effective = step || ''
     setLogViewStep(effective)
@@ -4571,8 +4623,15 @@ export default function App() {
       <section className="panel">
         <header className="panel-head">
           <h2>Board</h2>
-          <label className="switch-label"><input type="checkbox" role="switch" checked={boardCompact} onChange={() => setBoardCompact((v) => !v)} /> Compact</label>
+          <div className="inline-actions">
+            <label className="switch-label"><input type="checkbox" role="switch" checked={boardCompact} onChange={() => setBoardCompact((v) => !v)} /> Compact</label>
+            <button className="button button-danger" onClick={() => void clearAllTasks()} disabled={taskActionPending === 'clear'}>
+              {taskActionPending === 'clear' ? 'Clearing...' : 'Clear All Tasks'}
+            </button>
+          </div>
         </header>
+        {taskActionMessage ? <p className="field-label">{taskActionMessage}</p> : null}
+        {taskActionError ? <p className="error-banner">{taskActionError}</p> : null}
         <div className="board-grid">
           {boardColumns.map((column) => (
             <article className="board-col" key={column}>
@@ -5798,10 +5857,16 @@ export default function App() {
                   </>
                 ) : null}
                 {taskStatus === 'cancelled' ? (
-                  <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'backlog')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'backlog' ? 'Moving...' : 'Move to Backlog'}</button>
+                  <>
+                    <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'backlog')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'backlog' ? 'Moving...' : 'Move to Backlog'}</button>
+                    <button className="button button-danger" onClick={() => void deleteTask(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'delete' ? 'Deleting...' : 'Delete'}</button>
+                  </>
                 ) : null}
                 {taskStatus === 'done' && showViewPlan ? (
                   <button className="button button-primary" onClick={() => { setPlanningTaskId(selectedTaskView.id); handleRouteChange('planning'); modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') }}>View Plan</button>
+                ) : null}
+                {taskStatus === 'done' ? (
+                  <button className="button button-danger" onClick={() => void deleteTask(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'delete' ? 'Deleting...' : 'Delete'}</button>
                 ) : null}
                 <span className="foot-spacer" />
                 <button className="button" onClick={() => { modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') }}>Close</button>

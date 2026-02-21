@@ -16,6 +16,8 @@ Built-in prompts, pipeline templates, and quality controls let teams submit task
 - Run a full task lifecycle on a kanban board (`backlog` → `queued` → `in_progress` → `in_review` → `done`, plus `blocked` and `cancelled`).
 - Submit tasks with explicit types or use `task_type="auto"` to classify to the best pipeline first.
 - Execute task-specific pipelines that enforce multi-step quality (plan/analyze, implement, verify, review, commit) instead of single-pass coding.
+- Delete terminal tasks (`done`/`cancelled`) directly from task detail.
+- Clear the entire board while archiving prior runtime state to `.agent_orchestrator_archive/` instead of destructive wipe.
 - Import PRDs into executable task graphs, then execute in dependency-aware batches.
 - Parallelize safely with git worktree isolation for same-repo tasks.
 - Auto-handle merge integration and run conflict-resolution flows when branches collide.

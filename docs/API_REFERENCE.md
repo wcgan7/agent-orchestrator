@@ -151,6 +151,15 @@ Notes:
 - `done` recency is based on task `updated_at`.
 - Missing or malformed timestamps are sorted last with deterministic ID tie-breakers.
 
+### `POST /api/tasks/clear`
+Clear all board tasks by archiving runtime state and reinitializing empty state.
+
+Response:
+- `cleared` (`true` on success)
+- `archived_to` (absolute archive directory path; empty when no prior state existed)
+- `message` (user-facing archive/clear summary)
+- `cleared_at` (ISO timestamp)
+
 ### `GET /api/tasks/execution-order`
 Returns dependency-aware batches for non-terminal tasks.
 
@@ -167,6 +176,13 @@ Additive timing fields in task payload:
 - `timing_summary.is_running`: `true` when an active run is in progress.
 - `timing_summary.first_started_at`: Earliest valid run start timestamp in run history.
 - `timing_summary.last_finished_at`: Latest valid run finish timestamp in run history.
+
+### `DELETE /api/tasks/{task_id}`
+Delete a task only when it is terminal (`done` or `cancelled`).
+
+Behavior:
+- Returns `400` for non-terminal statuses.
+- Cleans references from remaining tasks (`blocked_by`, `blocks`, `parent_id`, `children_ids`).
 
 ### `PATCH /api/tasks/{task_id}`
 Patch mutable fields.
