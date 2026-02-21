@@ -232,6 +232,18 @@ Remove inferred dependency metadata and inferred blocker links for a task.
 ### `GET /api/tasks/{task_id}/workdoc`
 Return task work document payload.
 
+Behavior:
+- Reads the canonical orchestrator workdoc for the task.
+- Returns `409 Conflict` when the canonical workdoc is missing (`Missing required workdoc for task {task_id}`).
+
+Response:
+- `task_id`
+- `content` (markdown text)
+- `exists` (`true` when returned)
+
+UI usage:
+- Task detail exposes a **Workdoc** panel that renders `content` as markdown.
+
 ### `GET /api/tasks/{task_id}/plan`
 Return iterative plan document, including revisions and active refine job.
 

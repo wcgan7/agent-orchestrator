@@ -9,7 +9,7 @@ import './styles/orchestrator.css'
 
 type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
 type CreateTab = 'task' | 'import'
-type TaskDetailTab = 'overview' | 'plan' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
+type TaskDetailTab = 'overview' | 'plan' | 'workdoc' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
 type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition'
 
 type TaskRecord = {
@@ -346,6 +346,12 @@ type TaskPlanDocument = {
   committed_revision_id?: string | null
   revisions: PlanRevisionRecord[]
   active_refine_job?: PlanRefineJobRecord | null
+}
+
+type TaskWorkdocDocument = {
+  task_id: string
+  content: string
+  exists: boolean
 }
 
 const STORAGE_PROJECT = 'agent-orchestrator-project'
@@ -1417,6 +1423,9 @@ export default function App() {
   const [taskDetailNowMs, setTaskDetailNowMs] = useState<number>(() => Date.now())
   const [selectedTaskPlan, setSelectedTaskPlan] = useState<TaskPlanDocument | null>(null)
   const [selectedTaskPlanJobs, setSelectedTaskPlanJobs] = useState<PlanRefineJobRecord[]>([])
+  const [selectedTaskWorkdoc, setSelectedTaskWorkdoc] = useState<TaskWorkdocDocument | null>(null)
+  const [selectedTaskWorkdocLoading, setSelectedTaskWorkdocLoading] = useState(false)
+  const [selectedTaskWorkdocError, setSelectedTaskWorkdocError] = useState('')
   const [selectedPlanRevisionId, setSelectedPlanRevisionId] = useState('')
   const [planManualContent, setPlanManualContent] = useState('')
   const [planManualFeedbackNote, setPlanManualFeedbackNote] = useState('')
@@ -1635,6 +1644,9 @@ export default function App() {
     setRetryFromStep('')
     setShowAllActivity(false)
     setPlanTabMode('view')
+    setSelectedTaskWorkdoc(null)
+    setSelectedTaskWorkdocLoading(false)
+    setSelectedTaskWorkdocError('')
   }, [selectedTaskId])
 
   useEffect(() => {
@@ -1908,6 +1920,7 @@ export default function App() {
       const task = detail.task
       setSelectedTaskDetail(task)
       void loadTaskPlan(taskId)
+      void loadTaskWorkdoc(taskId)
       setEditTaskTitle(task.title || '')
       setEditTaskDescription(task.description || '')
       setEditTaskType(task.task_type || 'feature')
@@ -1926,9 +1939,48 @@ export default function App() {
       }
       setSelectedTaskDetail(null)
       setSelectedTaskPlan(null)
+      setSelectedTaskWorkdoc(null)
     } finally {
       if (requestSeq === taskDetailRequestSeqRef.current) {
         setSelectedTaskDetailLoading(false)
+      }
+    }
+  }
+
+  async function loadTaskWorkdoc(taskId: string): Promise<void> {
+    if (!taskId) {
+      setSelectedTaskWorkdoc(null)
+      setSelectedTaskWorkdocError('')
+      return
+    }
+    setSelectedTaskWorkdocLoading(true)
+    setSelectedTaskWorkdocError('')
+    try {
+      const payload = await requestJson<unknown>(buildApiUrl(`/api/tasks/${taskId}/workdoc`, projectDir))
+      if (selectedTaskIdRef.current !== taskId) {
+        return
+      }
+      const root = (payload && typeof payload === 'object') ? payload as Record<string, unknown> : {}
+      const content = typeof root.content === 'string' ? root.content : ''
+      setSelectedTaskWorkdoc({
+        task_id: String(root.task_id || taskId),
+        content,
+        exists: !!root.exists,
+      })
+    } catch (err) {
+      if (selectedTaskIdRef.current !== taskId) {
+        return
+      }
+      setSelectedTaskWorkdoc(null)
+      const detail = err instanceof Error ? err.message : ''
+      if (detail.includes('409 ')) {
+        setSelectedTaskWorkdocError('Workdoc is missing for this task.')
+      } else {
+        setSelectedTaskWorkdocError(toErrorMessage('Failed to load workdoc', err))
+      }
+    } finally {
+      if (selectedTaskIdRef.current === taskId) {
+        setSelectedTaskWorkdocLoading(false)
       }
     }
   }
@@ -1998,6 +2050,9 @@ export default function App() {
     if (!selectedTaskId) {
       setSelectedTaskPlan(null)
       setSelectedTaskPlanJobs([])
+      setSelectedTaskWorkdoc(null)
+      setSelectedTaskWorkdocLoading(false)
+      setSelectedTaskWorkdocError('')
       setSelectedPlanRevisionId('')
       setPlanActionMessage('')
       setPlanActionError('')
@@ -3803,6 +3858,13 @@ export default function App() {
             </button>
           ) : null}
           <button
+            className={`detail-tab ${taskDetailTab === 'workdoc' ? 'is-active' : ''}`}
+            aria-pressed={taskDetailTab === 'workdoc'}
+            onClick={() => setTaskDetailTab('workdoc')}
+          >
+            Workdoc
+          </button>
+          <button
             className={`detail-tab ${taskDetailTab === 'logs' ? 'is-active' : ''}`}
             aria-pressed={taskDetailTab === 'logs'}
             onClick={() => setTaskDetailTab('logs')}
@@ -4183,6 +4245,20 @@ export default function App() {
             </div>
           )
         })() : null}
+        {taskDetailTab === 'workdoc' ? (
+          <div className="task-detail-section-body">
+            {selectedTaskWorkdocLoading ? <p className="field-label">Loading workdoc...</p> : null}
+            {selectedTaskWorkdocError ? <p className="field-label" style={{ color: 'var(--color-danger, #d9534f)' }}>{selectedTaskWorkdocError}</p> : null}
+            {!selectedTaskWorkdocLoading && !selectedTaskWorkdocError && selectedTaskWorkdoc?.content ? (
+              <div className="preview-box">
+                <RenderedMarkdown content={selectedTaskWorkdoc.content} className="plan-content-field" />
+              </div>
+            ) : null}
+            {!selectedTaskWorkdocLoading && !selectedTaskWorkdocError && !selectedTaskWorkdoc?.content ? (
+              <p className="empty">No workdoc content available.</p>
+            ) : null}
+          </div>
+        ) : null}
         {taskDetailTab === 'configuration' ? (
           <div className="task-detail-section-body">
               <div className="form-stack">

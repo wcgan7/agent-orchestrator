@@ -26,6 +26,14 @@ class TaskExecutor:
         """Store orchestrator service dependencies used across execution phases."""
         self._service = service
 
+    def _ensure_workdoc_or_block(self, task: Task, run: RunRecord, *, step: str) -> bool:
+        """Verify canonical workdoc exists; otherwise block task/run for this step."""
+        svc = self._service
+        if svc._validate_task_workdoc(task) is not None:
+            return True
+        svc._block_for_missing_workdoc(task, run, step=step)
+        return False
+
     def execute_task(self, task: Task) -> None:
         """Execute one task and normalize top-level cancellation/error outcomes.
 
@@ -186,6 +194,11 @@ class TaskExecutor:
                     return
                 last_phase1_step = step
 
+            next_phase = "review" if has_review and retry_from != "commit" else "commit"
+            if (has_review and retry_from != "commit") or has_commit:
+                if not self._ensure_workdoc_or_block(task, run, step=next_phase):
+                    return
+
             if has_commit:
                 impl_dir = worktree_dir or svc.container.project_dir
                 svc._cleanup_workdoc_for_commit(impl_dir)
@@ -226,6 +239,8 @@ class TaskExecutor:
                     else:
                         task.metadata.pop("review_history", None)
                     svc.container.tasks.upsert(task)
+                    if not self._ensure_workdoc_or_block(task, run, step="review"):
+                        return
                     review_project_dir = worktree_dir or svc.container.project_dir
                     svc._refresh_workdoc(task, review_project_dir)
                     review_started = now_iso()
@@ -283,6 +298,8 @@ class TaskExecutor:
                         open_counts=open_counts,
                         decision="changes_requested" if svc._exceeds_quality_gate(task, findings) else "approved",
                     )
+                    if not self._ensure_workdoc_or_block(task, run, step="review"):
+                        return
                     svc.container.reviews.append(cycle)
                     svc._sync_workdoc_review(task, cycle, worktree_dir or svc.container.project_dir)
                     review_step_log["status"] = cycle.decision
@@ -382,6 +399,8 @@ class TaskExecutor:
                 task.current_step = "commit"
                 task.metadata["pipeline_phase"] = "commit"
                 svc.container.tasks.upsert(task)
+                if not self._ensure_workdoc_or_block(task, run, step="commit"):
+                    return
                 if svc._should_gate(mode, "before_commit"):
                     if not svc._wait_for_gate(task, "before_commit"):
                         svc._abort_for_gate(task, run, "before_commit")
