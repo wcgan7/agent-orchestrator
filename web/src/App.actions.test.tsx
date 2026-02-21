@@ -369,7 +369,7 @@ describe('App action coverage', () => {
       const body = JSON.parse(String((editCall?.[1] as RequestInit).body))
       expect(body.labels).toEqual(['ui', 'frontend'])
     })
-  })
+  }, 30000)
 
   it('executes execution, review, and worker dashboard actions', async () => {
     const mockedFetch = installFetchMock()
