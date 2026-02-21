@@ -582,6 +582,149 @@ describe('App default route', () => {
     })
   })
 
+  it('renders workdoc markdown in task detail', async () => {
+    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
+    mockedFetch.mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            columns: {
+              backlog: [{ id: 'task-1', title: 'Task 1', priority: 'P2', status: 'backlog', task_type: 'feature' }],
+              queued: [],
+              in_progress: [],
+              in_review: [],
+              blocked: [],
+              done: [],
+            },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks/task-1/workdoc')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            task_id: 'task-1',
+            exists: true,
+            content: '# Workdoc Heading\n\n- Bullet item',
+          }),
+        })
+      }
+      if (u.includes('/api/tasks/task-1')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            task: { id: 'task-1', title: 'Task 1', priority: 'P2', status: 'backlog', task_type: 'feature', blocked_by: [], blocks: [] },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/agents')) {
+        return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      }
+      if (u.includes('/api/projects')) {
+        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Task 1')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Task 1'))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Workdoc$/i })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Workdoc$/i }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Workdoc Heading/i })).toBeInTheDocument()
+      expect(screen.getByText('Bullet item')).toBeInTheDocument()
+    })
+  })
+
+  it('shows stable fallback when task workdoc is missing', async () => {
+    const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
+    mockedFetch.mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            columns: {
+              backlog: [{ id: 'task-1', title: 'Task 1', priority: 'P2', status: 'backlog', task_type: 'feature' }],
+              queued: [],
+              in_progress: [],
+              in_review: [],
+              blocked: [],
+              done: [],
+            },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks/task-1/workdoc')) {
+        return Promise.resolve({
+          ok: false,
+          status: 409,
+          statusText: 'Conflict',
+          json: async () => ({ detail: 'Missing required workdoc for task task-1' }),
+        })
+      }
+      if (u.includes('/api/tasks/task-1')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            task: { id: 'task-1', title: 'Task 1', priority: 'P2', status: 'backlog', task_type: 'feature', blocked_by: [], blocks: [] },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/agents')) {
+        return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      }
+      if (u.includes('/api/projects')) {
+        return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      }
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Task 1')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Task 1'))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Workdoc$/i })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Workdoc$/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Workdoc is missing for this task.')).toBeInTheDocument()
+    })
+  })
+
   it('shows live total time taken for running tasks in task detail', async () => {
     const baseline = new Date('2026-02-21T11:10:00Z')
     vi.useFakeTimers({ toFake: ['Date'] })

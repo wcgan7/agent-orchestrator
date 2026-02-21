@@ -722,6 +722,72 @@ def test_no_changes_blocks_task(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 16a. Missing canonical workdoc blocks before review/commit regardless of phase
+# ---------------------------------------------------------------------------
+
+
+def test_missing_workdoc_blocks_before_review_phase(tmp_path: Path) -> None:
+    """Feature pipeline should block before review if canonical workdoc disappears."""
+
+    class DeleteWorkdocBeforeReviewAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step in ("plan", "implement"):
+                (Path(wt) / "change.txt").write_text("impl\n")
+            if step == "verify":
+                workdoc_path = task.metadata.get("workdoc_path")
+                if isinstance(workdoc_path, str) and workdoc_path:
+                    Path(workdoc_path).unlink(missing_ok=True)
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=DeleteWorkdocBeforeReviewAdapter())
+    task = Task(
+        title="Block before review",
+        task_type="feature",
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert result.current_step == "review"
+    assert result.error and "Missing required workdoc" in result.error
+    assert container.reviews.for_task(task.id) == []
+
+
+def test_missing_workdoc_blocks_before_commit_phase(tmp_path: Path) -> None:
+    """Commit-only path should block before commit if canonical workdoc disappears."""
+
+    class DeleteWorkdocBeforeCommitAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / "change.txt").write_text("impl\n")
+            if step == "verify":
+                workdoc_path = task.metadata.get("workdoc_path")
+                if isinstance(workdoc_path, str) and workdoc_path:
+                    Path(workdoc_path).unlink(missing_ok=True)
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=DeleteWorkdocBeforeCommitAdapter())
+    task = Task(
+        title="Block before commit",
+        task_type="chore",
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert result.current_step == "commit"
+    assert result.error and "Missing required workdoc" in result.error
+
+
+# ---------------------------------------------------------------------------
 # 16. Review cap preserves branch instead of deleting work
 # ---------------------------------------------------------------------------
 

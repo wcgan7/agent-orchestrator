@@ -937,7 +937,10 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         orchestrator = deps.resolve_orchestrator(project_dir)
-        return orchestrator.get_workdoc(task_id)
+        try:
+            return orchestrator.get_workdoc(task_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @router.get("/tasks/{task_id}/plan")
     async def get_task_plan(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:

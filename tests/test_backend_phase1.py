@@ -1679,18 +1679,15 @@ def test_get_workdoc_returns_content(tmp_path: Path) -> None:
         assert "Workdoc task" in data["content"]
 
 
-def test_get_workdoc_returns_not_exists(tmp_path: Path) -> None:
+def test_get_workdoc_returns_409_when_missing(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         task = client.post("/api/tasks", json={"title": "No workdoc"}).json()["task"]
         task_id = task["id"]
 
         resp = client.get(f"/api/tasks/{task_id}/workdoc")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["task_id"] == task_id
-        assert data["exists"] is False
-        assert data["content"] is None
+        assert resp.status_code == 409
+        assert "Missing required workdoc" in resp.json()["detail"]
 
 
 def test_get_workdoc_404_for_unknown_task(tmp_path: Path) -> None:

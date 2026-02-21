@@ -568,13 +568,39 @@ class OrchestratorService:
     def _sync_workdoc_review(self, task: Task, cycle: ReviewCycle, project_dir: Path) -> None:
         """Append review cycle findings to the workdoc."""
         self._workdoc_manager.sync_workdoc_review(task, cycle, project_dir)
+
+    def _validate_task_workdoc(self, task: Task) -> Path | None:
+        """Return canonical workdoc path when present, else ``None``."""
+        canonical = self._workdoc_canonical_path(task.id)
+        if canonical.exists():
+            return canonical
+        return None
+
+    def _block_for_missing_workdoc(self, task: Task, run: RunRecord, *, step: str) -> None:
+        """Fail fast when a task loses its required canonical workdoc."""
+        canonical = self._workdoc_canonical_path(task.id)
+        task.status = "blocked"
+        task.error = f"Missing required workdoc: {canonical.name}"
+        task.pending_gate = None
+        task.current_step = step
+        task.metadata["pipeline_phase"] = step
+        task.metadata["missing_workdoc_path"] = str(canonical)
+        self.container.tasks.upsert(task)
+        self._finalize_run(task, run, status="blocked", summary=f"Blocked during {step}: missing required workdoc")
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.blocked",
+            entity_id=task.id,
+            payload={"error": task.error},
+        )
+
     def _step_project_dir(self, task: Task) -> Path:
         """Resolve task worktree directory, falling back to the main project root."""
         worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
         return Path(worktree_path) if worktree_path else self.container.project_dir
 
     def get_workdoc(self, task_id: str) -> dict[str, Any]:
-        """Read canonical workdoc for a task. Returns {task_id, content, exists}.
+        """Read canonical workdoc for a task.
 
         Args:
             task_id (str): Identifier for the target task.
@@ -583,9 +609,9 @@ class OrchestratorService:
             dict[str, Any]: Result produced by this call.
         """
         canonical = self._workdoc_canonical_path(task_id)
-        if canonical.exists():
-            return {"task_id": task_id, "content": canonical.read_text(encoding="utf-8"), "exists": True}
-        return {"task_id": task_id, "content": None, "exists": False}
+        if not canonical.exists():
+            raise FileNotFoundError(f"Missing required workdoc for task {task_id}")
+        return {"task_id": task_id, "content": canonical.read_text(encoding="utf-8"), "exists": True}
 
     def _merge_and_cleanup(self, task: Task, worktree_dir: Path) -> None:
         self._worktree_manager.merge_and_cleanup(task, worktree_dir)
@@ -828,6 +854,9 @@ class OrchestratorService:
         return None
 
     def _run_non_review_step(self, task: Task, run: RunRecord, step: str, attempt: int = 1) -> bool:
+        if self._validate_task_workdoc(task) is None:
+            self._block_for_missing_workdoc(task, run, step=step)
+            return False
         # Refresh workdoc before each step so the worker sees the latest version.
         step_project_dir = self._step_project_dir(task)
         self._refresh_workdoc(task, step_project_dir)
