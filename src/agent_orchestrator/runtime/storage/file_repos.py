@@ -1,3 +1,5 @@
+"""File-backed repository implementations for runtime state."""
+
 from __future__ import annotations
 
 import json
@@ -6,7 +8,7 @@ import threading
 import uuid
 from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Generic, Optional, TypeVar
+from typing import Any, Callable, Generic, List, Optional, TypeVar
 
 from ...io_utils import FileLock
 from ..domain.models import AgentRecord, PlanRefineJob, PlanRevision, ReviewCycle, RunRecord, Task, TerminalSession, now_iso
@@ -22,7 +24,7 @@ from .interfaces import (
 )
 
 try:
-    import yaml
+    import yaml  # type: ignore[import-untyped]
 except ImportError:  # pragma: no cover
     yaml = None
 
@@ -84,6 +86,7 @@ class _YamlCollectionRepo(Generic[T]):
 
 
 class FileTaskRepository(TaskRepository):
+    """Represents FileTaskRepository."""
     def __init__(self, path: Path, lock_path: Path) -> None:
         self._repo = _YamlCollectionRepo[Task](
             path,
@@ -94,17 +97,20 @@ class FileTaskRepository(TaskRepository):
         )
 
     def list(self) -> list[Task]:
+        """Return list."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 return self._repo._load()
 
     def get(self, task_id: str) -> Optional[Task]:
+        """Return get."""
         for task in self.list():
             if task.id == task_id:
                 return task
         return None
 
     def upsert(self, task: Task) -> Task:
+        """Return upsert."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 tasks = self._repo._load()
@@ -123,6 +129,7 @@ class FileTaskRepository(TaskRepository):
         return task
 
     def delete(self, task_id: str) -> bool:
+        """Return delete."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 tasks = self._repo._load()
@@ -133,6 +140,7 @@ class FileTaskRepository(TaskRepository):
         return True
 
     def claim_next_runnable(self, *, max_in_progress: int) -> Optional[Task]:
+        """Return claim next runnable."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 tasks = self._repo._load()
@@ -169,6 +177,7 @@ class FileTaskRepository(TaskRepository):
 
 
 class FileRunRepository(RunRepository):
+    """Represents FileRunRepository."""
     def __init__(self, path: Path, lock_path: Path) -> None:
         self._repo = _YamlCollectionRepo[RunRecord](
             path,
@@ -179,17 +188,20 @@ class FileRunRepository(RunRepository):
         )
 
     def list(self) -> list[RunRecord]:
+        """Return list."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 return self._repo._load()
 
     def get(self, run_id: str) -> Optional[RunRecord]:
+        """Return get."""
         for run in self.list():
             if run.id == run_id:
                 return run
         return None
 
     def upsert(self, run: RunRecord) -> RunRecord:
+        """Return upsert."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 runs = self._repo._load()
@@ -204,6 +216,7 @@ class FileRunRepository(RunRepository):
 
 
 class FileReviewRepository(ReviewRepository):
+    """Represents FileReviewRepository."""
     def __init__(self, path: Path, lock_path: Path) -> None:
         self._repo = _YamlCollectionRepo[ReviewCycle](
             path,
@@ -214,14 +227,17 @@ class FileReviewRepository(ReviewRepository):
         )
 
     def list(self) -> list[ReviewCycle]:
+        """Return list."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 return self._repo._load()
 
-    def for_task(self, task_id: str) -> list[ReviewCycle]:
+    def for_task(self, task_id: str) -> List[ReviewCycle]:
+        """Return for task."""
         return [cycle for cycle in self.list() if cycle.task_id == task_id]
 
     def append(self, cycle: ReviewCycle) -> ReviewCycle:
+        """Return append."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 cycles = self._repo._load()
@@ -231,6 +247,7 @@ class FileReviewRepository(ReviewRepository):
 
 
 class FileAgentRepository(AgentRepository):
+    """Represents FileAgentRepository."""
     def __init__(self, path: Path, lock_path: Path) -> None:
         self._repo = _YamlCollectionRepo[AgentRecord](
             path,
@@ -241,17 +258,20 @@ class FileAgentRepository(AgentRepository):
         )
 
     def list(self) -> list[AgentRecord]:
+        """Return list."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 return self._repo._load()
 
     def get(self, agent_id: str) -> Optional[AgentRecord]:
+        """Return get."""
         for agent in self.list():
             if agent.id == agent_id:
                 return agent
         return None
 
     def upsert(self, agent: AgentRecord) -> AgentRecord:
+        """Return upsert."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 agents = self._repo._load()
@@ -265,6 +285,7 @@ class FileAgentRepository(AgentRepository):
         return agent
 
     def delete(self, agent_id: str) -> bool:
+        """Return delete."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 agents = self._repo._load()
@@ -276,6 +297,7 @@ class FileAgentRepository(AgentRepository):
 
 
 class FileTerminalSessionRepository(TerminalSessionRepository):
+    """Represents FileTerminalSessionRepository."""
     def __init__(self, path: Path, lock_path: Path) -> None:
         self._repo = _YamlCollectionRepo[TerminalSession](
             path,
@@ -286,17 +308,20 @@ class FileTerminalSessionRepository(TerminalSessionRepository):
         )
 
     def list(self) -> list[TerminalSession]:
+        """Return list."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 return self._repo._load()
 
     def get(self, session_id: str) -> Optional[TerminalSession]:
+        """Return get."""
         for run in self.list():
             if run.id == session_id:
                 return run
         return None
 
     def upsert(self, session: TerminalSession) -> TerminalSession:
+        """Return upsert."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 runs = self._repo._load()
@@ -311,12 +336,14 @@ class FileTerminalSessionRepository(TerminalSessionRepository):
 
 
 class FileEventRepository(EventRepository):
+    """Represents FileEventRepository."""
     def __init__(self, path: Path, lock_path: Path) -> None:
         self._path = path
         self._lock = FileLock(lock_path)
         self._thread_lock = threading.RLock()
 
     def append(self, *, channel: str, event_type: str, entity_id: str, payload: dict[str, Any], project_id: str) -> dict[str, Any]:
+        """Return append."""
         event = {
             "id": f"evt-{uuid.uuid4().hex[:10]}",
             "ts": now_iso(),
@@ -336,6 +363,7 @@ class FileEventRepository(EventRepository):
         return event
 
     def list_recent(self, limit: int = 100) -> list[dict[str, Any]]:
+        """Return list recent."""
         if limit <= 0 or not self._path.exists():
             return []
         with self._thread_lock:
@@ -354,6 +382,7 @@ class FileEventRepository(EventRepository):
 
 
 class FilePlanRevisionRepository(PlanRevisionRepository):
+    """Represents FilePlanRevisionRepository."""
     def __init__(self, path: Path, lock_path: Path) -> None:
         self._repo = _YamlCollectionRepo[PlanRevision](
             path,
@@ -364,21 +393,25 @@ class FilePlanRevisionRepository(PlanRevisionRepository):
         )
 
     def list(self) -> list[PlanRevision]:
+        """Return list."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 items = self._repo._load()
         return sorted(items, key=lambda item: item.created_at)
 
-    def for_task(self, task_id: str) -> list[PlanRevision]:
+    def for_task(self, task_id: str) -> List[PlanRevision]:
+        """Return for task."""
         return [item for item in self.list() if item.task_id == task_id]
 
     def get(self, revision_id: str) -> Optional[PlanRevision]:
+        """Return get."""
         for item in self.list():
             if item.id == revision_id:
                 return item
         return None
 
     def upsert(self, revision: PlanRevision) -> PlanRevision:
+        """Return upsert."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 items = self._repo._load()
@@ -393,6 +426,7 @@ class FilePlanRevisionRepository(PlanRevisionRepository):
 
 
 class FilePlanRefineJobRepository(PlanRefineJobRepository):
+    """Represents FilePlanRefineJobRepository."""
     def __init__(self, path: Path, lock_path: Path) -> None:
         self._repo = _YamlCollectionRepo[PlanRefineJob](
             path,
@@ -403,21 +437,25 @@ class FilePlanRefineJobRepository(PlanRefineJobRepository):
         )
 
     def list(self) -> list[PlanRefineJob]:
+        """Return list."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 items = self._repo._load()
         return sorted(items, key=lambda item: item.created_at, reverse=True)
 
-    def for_task(self, task_id: str) -> list[PlanRefineJob]:
+    def for_task(self, task_id: str) -> List[PlanRefineJob]:
+        """Return for task."""
         return [item for item in self.list() if item.task_id == task_id]
 
     def get(self, job_id: str) -> Optional[PlanRefineJob]:
+        """Return get."""
         for item in self.list():
             if item.id == job_id:
                 return item
         return None
 
     def upsert(self, job: PlanRefineJob) -> PlanRefineJob:
+        """Return upsert."""
         with self._repo._thread_lock:
             with self._repo._lock:
                 items = self._repo._load()
@@ -432,12 +470,14 @@ class FilePlanRefineJobRepository(PlanRefineJobRepository):
 
 
 class FileConfigRepository:
+    """Represents FileConfigRepository."""
     def __init__(self, path: Path, lock_path: Path) -> None:
         self._path = path
         self._lock = FileLock(lock_path)
         self._thread_lock = threading.RLock()
 
     def load(self) -> dict[str, Any]:
+        """Return load."""
         _require_yaml()
         with self._thread_lock:
             with self._lock:
@@ -447,6 +487,7 @@ class FileConfigRepository:
                 return raw if isinstance(raw, dict) else {}
 
     def save(self, config: dict[str, Any]) -> dict[str, Any]:
+        """Return save."""
         _require_yaml()
         with self._thread_lock:
             with self._lock:

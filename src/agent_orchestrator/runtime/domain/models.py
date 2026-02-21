@@ -1,10 +1,12 @@
+"""Domain model dataclasses and normalization helpers."""
+
 from __future__ import annotations
 
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from hashlib import sha256
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 
 
 TaskStatus = Literal[
@@ -23,9 +25,17 @@ DependencyPolicy = Literal["permissive", "prudent", "strict"]
 PlanRevisionSource = Literal["worker_plan", "worker_refine", "human_edit", "import"]
 PlanRevisionStatus = Literal["draft", "committed"]
 PlanRefineJobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
+_VALID_PRIORITIES = {"P0", "P1", "P2", "P3"}
+_VALID_TASK_STATUSES = {"backlog", "queued", "in_progress", "in_review", "done", "blocked", "cancelled"}
+_VALID_APPROVAL_MODES = {"human_review", "auto_approve"}
+_VALID_DEPENDENCY_POLICIES = {"permissive", "prudent", "strict"}
+_VALID_PLAN_REVISION_SOURCES = {"worker_plan", "worker_refine", "human_edit", "import"}
+_VALID_PLAN_REVISION_STATUSES = {"draft", "committed"}
+_VALID_PLAN_REFINE_JOB_STATUSES = {"queued", "running", "completed", "failed", "cancelled"}
 
 
 def now_iso() -> str:
+    """Return the current UTC timestamp in ISO-8601 format."""
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -34,11 +44,13 @@ def _id(prefix: str) -> str:
 
 
 def content_sha256(value: str) -> str:
+    """Hash text content to a deterministic SHA-256 hex digest."""
     return sha256(str(value or "").encode("utf-8")).hexdigest()
 
 
 @dataclass
 class ReviewFinding:
+    """Represents ReviewFinding."""
     id: str = field(default_factory=lambda: _id("finding"))
     task_id: str = ""
     severity: str = "medium"
@@ -50,15 +62,34 @@ class ReviewFinding:
     status: str = "open"
 
     def to_dict(self) -> dict[str, Any]:
+        """Return to dict."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReviewFinding":
-        return cls(**{k: data.get(k) for k in cls.__dataclass_fields__})
+        """Return from dict."""
+        raw_line = data.get("line")
+        line: int | None
+        try:
+            line = int(raw_line) if raw_line is not None else None
+        except (TypeError, ValueError):
+            line = None
+        return cls(
+            id=str(data.get("id") or _id("finding")),
+            task_id=str(data.get("task_id") or ""),
+            severity=str(data.get("severity") or "medium"),
+            category=str(data.get("category") or "quality"),
+            summary=str(data.get("summary") or ""),
+            file=(str(data.get("file")) if data.get("file") is not None else None),
+            line=line,
+            suggested_fix=(str(data.get("suggested_fix")) if data.get("suggested_fix") is not None else None),
+            status=str(data.get("status") or "open"),
+        )
 
 
 @dataclass
 class ReviewCycle:
+    """Represents ReviewCycle."""
     id: str = field(default_factory=lambda: _id("rc"))
     task_id: str = ""
     attempt: int = 1
@@ -68,12 +99,14 @@ class ReviewCycle:
     created_at: str = field(default_factory=now_iso)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return to dict."""
         data = asdict(self)
         data["findings"] = [f.to_dict() for f in self.findings]
         return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ReviewCycle":
+        """Return from dict."""
         findings = [ReviewFinding.from_dict(f) for f in list(data.get("findings", []) or []) if isinstance(f, dict)]
         return cls(
             id=str(data.get("id") or _id("rc")),
@@ -88,6 +121,7 @@ class ReviewCycle:
 
 @dataclass
 class Task:
+    """Represents Task."""
     id: str = field(default_factory=lambda: _id("task"))
     title: str = ""
     description: str = ""
@@ -123,44 +157,73 @@ class Task:
     project_commands: Optional[dict[str, dict[str, str]]] = None
 
     def to_dict(self) -> dict[str, Any]:
+        """Return to dict."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Task":
-        payload = {k: data.get(k) for k in cls.__dataclass_fields__}
-        payload["id"] = str(data.get("id") or _id("task"))
-        payload["title"] = str(data.get("title") or "")
-        payload["priority"] = str(data.get("priority") or "P2")
+        """Return from dict."""
+        priority = str(data.get("priority") or "P2")
+        if priority not in _VALID_PRIORITIES:
+            priority = "P2"
         raw_status = str(data.get("status") or "backlog")
-        payload["status"] = "queued" if raw_status == "ready" else raw_status
-        payload["created_at"] = str(data.get("created_at") or now_iso())
-        payload["updated_at"] = str(data.get("updated_at") or now_iso())
-        payload["blocked_by"] = list(data.get("blocked_by") or [])
-        payload["blocks"] = list(data.get("blocks") or [])
-        payload["children_ids"] = list(data.get("children_ids") or [])
-        payload["run_ids"] = list(data.get("run_ids") or [])
-        payload["labels"] = list(data.get("labels") or [])
-        payload["pipeline_template"] = list(data.get("pipeline_template") or [])
-        payload["quality_gate"] = dict(data.get("quality_gate") or {"critical": 0, "high": 0, "medium": 0, "low": 0})
-        payload["metadata"] = dict(data.get("metadata") or {})
+        status = "queued" if raw_status == "ready" else raw_status
+        if status not in _VALID_TASK_STATUSES:
+            status = "queued"
         raw_pc = data.get("project_commands")
-        payload["project_commands"] = (
+        project_commands = (
             {k: dict(v) for k, v in raw_pc.items() if isinstance(v, dict) and v}
             if isinstance(raw_pc, dict) and raw_pc
             else None
         )
-        payload["hitl_mode"] = str(data.get("hitl_mode") or "autopilot")
+        approval_mode = str(data.get("approval_mode") or "human_review")
+        if approval_mode not in _VALID_APPROVAL_MODES:
+            approval_mode = "human_review"
+        hitl_mode = str(data.get("hitl_mode") or "autopilot")
         raw_dep_policy = str(data.get("dependency_policy") or "prudent")
-        payload["dependency_policy"] = raw_dep_policy if raw_dep_policy in ("permissive", "prudent", "strict") else "prudent"
-        payload["pending_gate"] = data.get("pending_gate")
+        dependency_policy = raw_dep_policy if raw_dep_policy in _VALID_DEPENDENCY_POLICIES else "prudent"
         if "hitl_mode" not in data:
-            am = str(data.get("approval_mode") or "human_review")
-            payload["hitl_mode"] = "autopilot" if am == "auto_approve" else "review_only"
-        return cls(**payload)
+            hitl_mode = "autopilot" if approval_mode == "auto_approve" else "review_only"
+        raw_retry_count = data.get("retry_count")
+        try:
+            retry_count = int(raw_retry_count) if raw_retry_count is not None else 0
+        except (TypeError, ValueError):
+            retry_count = 0
+        return cls(
+            id=str(data.get("id") or _id("task")),
+            title=str(data.get("title") or ""),
+            description=str(data.get("description") or ""),
+            task_type=str(data.get("task_type") or "feature"),
+            priority=cast(Priority, priority),
+            status=cast(TaskStatus, status),
+            labels=list(data.get("labels") or []),
+            blocked_by=list(data.get("blocked_by") or []),
+            blocks=list(data.get("blocks") or []),
+            parent_id=(str(data.get("parent_id")) if data.get("parent_id") else None),
+            children_ids=list(data.get("children_ids") or []),
+            pipeline_template=list(data.get("pipeline_template") or []),
+            current_step=(str(data.get("current_step")) if data.get("current_step") else None),
+            current_agent_id=(str(data.get("current_agent_id")) if data.get("current_agent_id") else None),
+            run_ids=list(data.get("run_ids") or []),
+            retry_count=retry_count,
+            error=(str(data.get("error")) if data.get("error") is not None else None),
+            quality_gate=dict(data.get("quality_gate") or {"critical": 0, "high": 0, "medium": 0, "low": 0}),
+            approval_mode=cast(ApprovalMode, approval_mode),
+            hitl_mode=hitl_mode,
+            dependency_policy=cast(DependencyPolicy, dependency_policy),
+            pending_gate=(str(data.get("pending_gate")) if data.get("pending_gate") else None),
+            source=str(data.get("source") or "manual"),
+            worker_model=(str(data.get("worker_model")) if data.get("worker_model") else None),
+            created_at=str(data.get("created_at") or now_iso()),
+            updated_at=str(data.get("updated_at") or now_iso()),
+            metadata=dict(data.get("metadata") or {}),
+            project_commands=project_commands,
+        )
 
 
 @dataclass
 class RunRecord:
+    """Represents RunRecord."""
     id: str = field(default_factory=lambda: _id("run"))
     task_id: str = ""
     branch: Optional[str] = None
@@ -171,10 +234,12 @@ class RunRecord:
     steps: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return to dict."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "RunRecord":
+        """Return from dict."""
         return cls(
             id=str(data.get("id") or _id("run")),
             task_id=str(data.get("task_id") or ""),
@@ -189,6 +254,7 @@ class RunRecord:
 
 @dataclass
 class TerminalSession:
+    """Represents TerminalSession."""
     id: str = field(default_factory=lambda: _id("term"))
     project_id: str = ""
     status: str = "starting"
@@ -205,10 +271,12 @@ class TerminalSession:
     last_error: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
+        """Return to dict."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "TerminalSession":
+        """Return from dict."""
         raw_exit = data.get("exit_code")
         exit_code = int(raw_exit) if raw_exit is not None else None
         raw_pid = data.get("pid")
@@ -241,6 +309,7 @@ class TerminalSession:
 
 @dataclass
 class AgentRecord:
+    """Represents AgentRecord."""
     id: str = field(default_factory=lambda: _id("agent"))
     role: str = "general"
     status: str = "running"
@@ -249,10 +318,12 @@ class AgentRecord:
     last_seen_at: str = field(default_factory=now_iso)
 
     def to_dict(self) -> dict[str, Any]:
+        """Return to dict."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AgentRecord":
+        """Return from dict."""
         return cls(
             id=str(data.get("id") or _id("agent")),
             role=str(data.get("role") or "general"),
@@ -265,6 +336,7 @@ class AgentRecord:
 
 @dataclass
 class PlanRevision:
+    """Represents PlanRevision."""
     id: str = field(default_factory=lambda: _id("pr"))
     task_id: str = ""
     created_at: str = field(default_factory=now_iso)
@@ -279,24 +351,26 @@ class PlanRevision:
     status: PlanRevisionStatus = "draft"
 
     def to_dict(self) -> dict[str, Any]:
+        """Return to dict."""
         data = asdict(self)
         data["content_hash"] = self.content_hash or content_sha256(self.content)
         return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PlanRevision":
+        """Return from dict."""
         source = str(data.get("source") or "human_edit")
-        if source not in {"worker_plan", "worker_refine", "human_edit", "import"}:
+        if source not in _VALID_PLAN_REVISION_SOURCES:
             source = "human_edit"
         status = str(data.get("status") or "draft")
-        if status not in {"draft", "committed"}:
+        if status not in _VALID_PLAN_REVISION_STATUSES:
             status = "draft"
         content = str(data.get("content") or "")
         return cls(
             id=str(data.get("id") or _id("pr")),
             task_id=str(data.get("task_id") or ""),
             created_at=str(data.get("created_at") or now_iso()),
-            source=source,
+            source=cast(PlanRevisionSource, source),
             parent_revision_id=(str(data.get("parent_revision_id")).strip() if data.get("parent_revision_id") else None),
             step=(str(data.get("step")).strip() if data.get("step") else None),
             feedback_note=(str(data.get("feedback_note")).strip() if data.get("feedback_note") else None),
@@ -304,12 +378,13 @@ class PlanRevision:
             model=(str(data.get("model")).strip() if data.get("model") else None),
             content=content,
             content_hash=str(data.get("content_hash") or content_sha256(content)),
-            status=status,
+            status=cast(PlanRevisionStatus, status),
         )
 
 
 @dataclass
 class PlanRefineJob:
+    """Represents PlanRefineJob."""
     id: str = field(default_factory=lambda: _id("prj"))
     task_id: str = ""
     base_revision_id: str = ""
@@ -324,12 +399,14 @@ class PlanRefineJob:
     error: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
+        """Return to dict."""
         return asdict(self)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PlanRefineJob":
+        """Return from dict."""
         status = str(data.get("status") or "queued")
-        if status not in {"queued", "running", "completed", "failed", "cancelled"}:
+        if status not in _VALID_PLAN_REFINE_JOB_STATUSES:
             status = "queued"
         priority = str(data.get("priority") or "normal").lower()
         if priority not in {"normal", "high"}:
@@ -338,7 +415,7 @@ class PlanRefineJob:
             id=str(data.get("id") or _id("prj")),
             task_id=str(data.get("task_id") or ""),
             base_revision_id=str(data.get("base_revision_id") or ""),
-            status=status,
+            status=cast(PlanRefineJobStatus, status),
             created_at=str(data.get("created_at") or now_iso()),
             started_at=(str(data.get("started_at")) if data.get("started_at") else None),
             finished_at=(str(data.get("finished_at")) if data.get("finished_at") else None),

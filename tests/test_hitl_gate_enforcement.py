@@ -5,8 +5,6 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
-import pytest
-
 from agent_orchestrator.runtime.domain.models import Task
 from agent_orchestrator.runtime.events import EventBus
 from agent_orchestrator.runtime.orchestrator import OrchestratorService
@@ -295,6 +293,12 @@ def test_explicit_hitl_mode_preserved() -> None:
     data = {"title": "Explicit", "hitl_mode": "supervised", "approval_mode": "auto_approve"}
     task = Task.from_dict(data)
     assert task.hitl_mode == "supervised"
+
+
+def test_retry_count_from_dict_invalid_value_falls_back_to_zero() -> None:
+    """Invalid persisted retry_count values are normalized to zero."""
+    task = Task.from_dict({"title": "Retry parse", "retry_count": "not-a-number"})
+    assert task.retry_count == 0
 
 
 # ---------------------------------------------------------------------------

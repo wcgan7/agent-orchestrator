@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, AsyncIterator, Optional, cast
 
 from fastapi import FastAPI, Query, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from ..runtime.api import create_router
 from ..runtime.events import EventBus
 from ..runtime.events import hub
-from ..runtime.orchestrator import WorkerAdapter, create_orchestrator
+from ..runtime.orchestrator import OrchestratorService, WorkerAdapter, create_orchestrator
 from ..runtime.storage import Container
 
 
@@ -22,8 +22,9 @@ def create_app(
     enable_cors: bool = True,
     worker_adapter: Optional[WorkerAdapter] = None,
 ) -> FastAPI:
+    """Create and configure the FastAPI application."""
     @asynccontextmanager
-    async def _lifespan(app: FastAPI):
+    async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         hub.attach_loop(asyncio.get_running_loop())
         try:
             yield
@@ -69,18 +70,19 @@ def create_app(
     def _resolve_container(project_dir_param: Optional[str] = None) -> Container:
         resolved = _resolve_project_dir(project_dir_param)
         key = str(resolved)
-        cache = app.state.containers
+        cache = cast(dict[str, Container], app.state.containers)
         if key not in cache:
             cache[key] = Container(resolved)
         return cache[key]
 
-    def _resolve_orchestrator(project_dir_param: Optional[str] = None):
+    def _resolve_orchestrator(project_dir_param: Optional[str] = None) -> OrchestratorService:
         resolved = _resolve_project_dir(project_dir_param)
         key = str(resolved)
-        cache = app.state.orchestrators
+        cache = cast(dict[str, OrchestratorService], app.state.orchestrators)
         if key not in cache:
             container = _resolve_container(project_dir_param)
-            cache[key] = create_orchestrator(container, bus=app.state.bus_factory(container), worker_adapter=worker_adapter)
+            bus_factory = cast(Any, app.state.bus_factory)
+            cache[key] = create_orchestrator(container, bus=bus_factory(container), worker_adapter=worker_adapter)
         return cache[key]
 
     app.state.bus_factory = lambda container: EventBus(container.events, container.project_id)

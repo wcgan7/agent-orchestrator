@@ -568,7 +568,7 @@ def build_step_prompt(
                 parts.append(f"  Type: {ct.get('task_type', 'feature')}")
                 labels = ct.get("labels")
                 if isinstance(labels, list) and labels:
-                    parts.append(f"  Labels: {', '.join(str(l) for l in labels)}")
+                    parts.append(f"  Labels: {', '.join(str(label) for label in labels)}")
                 parts.append("")
 
         existing_tasks = task.metadata.get("existing_tasks")
@@ -680,18 +680,10 @@ def build_step_prompt(
         and task.metadata.get("verify_reason_code", "").strip()
     )
     retry_guidance = task.metadata.get("retry_guidance") if isinstance(task.metadata, dict) else None
-    requested_changes = task.metadata.get("requested_changes") if isinstance(task.metadata, dict) else None
     has_previous_error = False
-    has_feedback = False
-    has_requested = False
     if isinstance(retry_guidance, dict):
         prev_error = str(retry_guidance.get("previous_error") or "").strip()
-        guidance_text = str(retry_guidance.get("guidance") or "").strip()
         has_previous_error = bool(prev_error)
-        has_feedback = bool(guidance_text)
-    if isinstance(requested_changes, dict):
-        requested_text = str(requested_changes.get("guidance") or "").strip()
-        has_requested = bool(requested_text)
 
     if is_fix_step and (
         has_review_findings or has_verify_failure or has_verify_output or has_verify_reason_code or has_previous_error
@@ -940,9 +932,10 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     if start == -1 or end == -1 or end <= start:
         return None
     try:
-        return json.loads(text[start : end + 1])
+        payload = json.loads(text[start : end + 1])
     except json.JSONDecodeError:
         return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _extract_json_value(text: str) -> Any | None:
@@ -1021,8 +1014,8 @@ def _normalize_review_findings(raw_findings: Any) -> list[dict[str, Any]]:
         line_raw = item.get("line")
         line_num: int | None
         try:
-            line_num = int(line_raw)
-            if line_num <= 0:
+            line_num = int(line_raw) if line_raw is not None else None
+            if line_num is not None and line_num <= 0:
                 line_num = None
         except (TypeError, ValueError):
             line_num = None
@@ -1124,6 +1117,7 @@ class LiveWorkerAdapter:
         return f"Human intervention required ({count} {suffix}): {first}"
 
     def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+        """Return run step."""
         return self._execute_step(task=task, step=step, attempt=attempt, persist=True)
 
     def run_step_ephemeral(self, *, task: Task, step: str, attempt: int) -> StepResult:
@@ -1499,17 +1493,17 @@ class LiveWorkerAdapter:
                 if status_val not in _VERIFY_ALLOWED_STATUSES:
                     return StepResult(status="error", summary="Verification output JSON has invalid status")
                 reason_code = _normalize_verify_reason_code(parsed.get("reason_code"))
-                summary = _format_verify_summary(parsed.get("summary"), reason_code)
+                verify_summary = _format_verify_summary(parsed.get("summary"), reason_code)
                 if isinstance(task.metadata, dict):
                     task.metadata["verify_reason_code"] = reason_code
                 if status_val == "fail":
-                    return StepResult(status="error", summary=str(summary) if summary else "Verification failed")
+                    return StepResult(status="error", summary=str(verify_summary) if verify_summary else "Verification failed")
                 if status_val == "environment":
-                    note = str(summary) if summary else "Verification blocked by environment constraints"
+                    note = str(verify_summary) if verify_summary else "Verification blocked by environment constraints"
                     if isinstance(task.metadata, dict):
                         task.metadata["verify_environment_note"] = note
                     return StepResult(status="ok", summary=note)
-                return StepResult(status="ok", summary=str(summary) if summary else "")
+                return StepResult(status="ok", summary=str(verify_summary) if verify_summary else "")
 
         if category == "review" and result.response_text:
             parsed = _extract_json(result.response_text)
@@ -1528,19 +1522,21 @@ class LiveWorkerAdapter:
         if category == "planning" and result.response_text:
             parsed = _extract_json(result.response_text)
             if isinstance(parsed, dict):
-                summary = parsed.get("analysis") if step == "analyze" else None
-                summary = summary or (parsed.get("initiative_plan") if step in {"initiative_plan", "initiative_plan_refine"} else None)
-                summary = summary or parsed.get("plan") or parsed.get("summary")
-                if summary:
-                    return StepResult(status="ok", summary=_normalize_planning_text(str(summary))[:20000])
+                planning_summary: Any | None = parsed.get("analysis") if step == "analyze" else None
+                planning_summary = planning_summary or (
+                    parsed.get("initiative_plan") if step in {"initiative_plan", "initiative_plan_refine"} else None
+                )
+                planning_summary = planning_summary or parsed.get("plan") or parsed.get("summary")
+                if planning_summary:
+                    return StepResult(status="ok", summary=_normalize_planning_text(str(planning_summary))[:20000])
             return StepResult(status="ok", summary=_normalize_planning_text(result.response_text)[:20000])
 
         if category == "diagnosis" and result.response_text:
             parsed = _extract_json(result.response_text)
             if isinstance(parsed, dict):
-                summary = parsed.get("diagnosis") or parsed.get("summary")
-                if summary:
-                    return StepResult(status="ok", summary=str(summary).strip()[:20000])
+                diagnosis_summary = parsed.get("diagnosis") or parsed.get("summary")
+                if diagnosis_summary:
+                    return StepResult(status="ok", summary=str(diagnosis_summary).strip()[:20000])
             return StepResult(status="ok", summary=result.response_text.strip()[:20000])
 
         if category == "task_generation" and result.response_text:

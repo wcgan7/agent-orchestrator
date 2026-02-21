@@ -1,3 +1,5 @@
+"""Websocket pub/sub hub for streaming runtime events to clients."""
+
 from __future__ import annotations
 
 import asyncio
@@ -31,6 +33,7 @@ class _WsClient:
 
 
 class WebSocketHub:
+    """Represents WebSocketHub."""
     def __init__(self) -> None:
         self._clients: dict[int, _WsClient] = {}
         self._counter = 0
@@ -38,10 +41,12 @@ class WebSocketHub:
         self._lock = threading.Lock()
 
     def attach_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Return attach loop."""
         with self._lock:
             self._loop = loop
 
     async def handle_connection(self, websocket: WebSocket) -> None:
+        """Return handle connection."""
         # Remember the active event loop so background threads can publish safely.
         self.attach_loop(asyncio.get_running_loop())
         await websocket.accept()
@@ -101,6 +106,7 @@ class WebSocketHub:
             self._clients.pop(cid, None)
 
     async def publish(self, event: dict[str, Any]) -> None:
+        """Return publish."""
         self._counter += 1
         payload = json.dumps({**event, "seq": self._counter})
         stale: list[int] = []
@@ -119,6 +125,7 @@ class WebSocketHub:
             self._clients.pop(cid, None)
 
     def publish_sync(self, event: dict[str, Any]) -> None:
+        """Return publish sync."""
         with self._lock:
             loop = self._loop
         if loop and loop.is_running():

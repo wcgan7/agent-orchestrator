@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from .io_utils import _heartbeat_from_progress, _read_log_tail
+from .io_utils import _heartbeat_from_progress
 from .utils import _now_iso
 
 

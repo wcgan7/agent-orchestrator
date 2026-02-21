@@ -1,3 +1,5 @@
+"""Event bus wrapper that persists and broadcasts runtime events."""
+
 from __future__ import annotations
 
 from typing import Any
@@ -7,11 +9,13 @@ from .ws import hub
 
 
 class EventBus:
+    """Represents EventBus."""
     def __init__(self, repo: EventRepository, project_id: str) -> None:
         self._repo = repo
         self._project_id = project_id
 
     def emit(self, *, channel: str, event_type: str, entity_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        """Return emit."""
         event = self._repo.append(
             channel=channel,
             event_type=event_type,

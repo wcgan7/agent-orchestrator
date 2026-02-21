@@ -1,1 +1,1 @@
-# Human-AI collaboration layer.
+"""Human-AI collaboration mode definitions."""

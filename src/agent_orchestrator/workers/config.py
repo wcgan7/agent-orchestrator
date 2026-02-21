@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 
 WorkerProviderType = Literal["codex", "ollama", "claude"]
 
 
 @dataclass(frozen=True)
 class WorkerProviderSpec:
+    """Represents WorkerProviderSpec."""
     name: str
     type: WorkerProviderType
     # codex / claude
@@ -47,6 +48,7 @@ def get_workers_runtime_config(
     codex_command_fallback: str,
     cli_worker: Optional[str] = None,
 ) -> WorkersRuntimeConfig:
+    """Resolve worker providers, routing, and defaults from runtime config."""
     workers_cfg = _as_dict(config.get("workers"))
     routing = _as_dict(workers_cfg.get("routing"))
     providers_cfg = _as_dict(workers_cfg.get("providers"))
@@ -81,6 +83,7 @@ def get_workers_runtime_config(
         if typ not in {"codex", "ollama", "claude"}:
             continue
         if typ in {"codex", "claude"}:
+            provider_type = cast(WorkerProviderType, typ)
             command_fallback = codex_command_fallback if typ == "codex" else "claude -p"
             cmd = str(item.get("command") or command_fallback).strip()
             model = str(item.get("model") or "").strip() or None
@@ -89,7 +92,7 @@ def get_workers_runtime_config(
                 reasoning_effort = None
             providers[name] = WorkerProviderSpec(
                 name=name,
-                type=typ,
+                type=provider_type,
                 command=cmd,
                 model=model,
                 reasoning_effort=reasoning_effort,

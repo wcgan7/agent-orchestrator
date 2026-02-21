@@ -53,6 +53,7 @@ class PipelineTemplate:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def step_names(self) -> list[str]:
+        """Return step names."""
         return [s.name for s in self.steps]
 
 
@@ -304,12 +305,14 @@ class PipelineRegistry:
     # -- query ---------------------------------------------------------------
 
     def get(self, template_id: str) -> PipelineTemplate:
+        """Return get."""
         if template_id not in self._templates:
             available = ", ".join(sorted(self._templates.keys()))
             raise KeyError(f"Unknown pipeline '{template_id}' (available: {available})")
         return self._templates[template_id]
 
     def list_templates(self) -> list[PipelineTemplate]:
+        """Return list templates."""
         return list(self._templates.values())
 
     def resolve_for_task_type(self, task_type: str) -> PipelineTemplate:
@@ -323,10 +326,12 @@ class PipelineRegistry:
     # -- mutation ------------------------------------------------------------
 
     def register(self, template: PipelineTemplate) -> None:
+        """Return register."""
         self._templates[template.id] = template
         self._rebuild_type_mapping()
 
     def unregister(self, template_id: str) -> None:
+        """Return unregister."""
         self._templates.pop(template_id, None)
         self._rebuild_type_mapping()
 

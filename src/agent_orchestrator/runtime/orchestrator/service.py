@@ -1,3 +1,5 @@
+"""Core orchestration service for task lifecycle execution."""
+
 from __future__ import annotations
 
 import logging
@@ -8,12 +10,22 @@ import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any, Literal, Optional
+from typing import Any, Literal, Optional, cast
 
 from ...collaboration.modes import should_gate
 from ...pipelines.registry import PipelineRegistry
 from ...workers.config import get_workers_runtime_config, resolve_worker_for_step
-from ..domain.models import PlanRefineJob, PlanRevision, ReviewCycle, ReviewFinding, RunRecord, Task, now_iso
+from ..domain.models import (
+    PlanRefineJob,
+    PlanRevision,
+    PlanRevisionStatus,
+    Priority,
+    ReviewCycle,
+    ReviewFinding,
+    RunRecord,
+    Task,
+    now_iso,
+)
 from ..events.bus import EventBus
 from ..storage.container import Container
 from ...worker import WorkerCancelledError
@@ -42,6 +54,7 @@ def _has_cycle(adj: dict[str, list[str]], from_id: str, to_id: str) -> bool:
 
 
 class OrchestratorService:
+    """Represents OrchestratorService."""
     _GATE_MAPPING: dict[str, str] = {
         "plan": "before_plan",
         "implement": "before_implement",
@@ -66,7 +79,7 @@ class OrchestratorService:
         self._drain = False
         self._run_branch: Optional[str] = None
         self._pool: ThreadPoolExecutor | None = None
-        self._futures: dict[str, Future] = {}
+        self._futures: dict[str, Future[Any]] = {}
         self._futures_lock = threading.Lock()
         self._merge_lock = threading.Lock()
         self._branch_lock = threading.Lock()
@@ -79,6 +92,7 @@ class OrchestratorService:
         return self._pool
 
     def status(self) -> dict[str, Any]:
+        """Return status."""
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         tasks = self.container.tasks.list()
@@ -96,6 +110,7 @@ class OrchestratorService:
         }
 
     def control(self, action: str) -> dict[str, Any]:
+        """Return control."""
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         if action == "pause":
@@ -116,6 +131,7 @@ class OrchestratorService:
         return self.status()
 
     def ensure_worker(self) -> None:
+        """Return ensure worker."""
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
@@ -126,6 +142,7 @@ class OrchestratorService:
             self._thread.start()
 
     def shutdown(self, *, timeout: float = 10.0) -> None:
+        """Return shutdown."""
         with self._lock:
             self._stop.set()
             thread = self._thread
@@ -187,6 +204,7 @@ class OrchestratorService:
                     logger.error("Task %s raised unexpected error: %s", tid, exc, exc_info=exc)
 
     def tick_once(self) -> bool:
+        """Return tick once."""
         self._sweep_futures()
 
         cfg = self.container.config.load()
@@ -208,6 +226,7 @@ class OrchestratorService:
         return True
 
     def run_task(self, task_id: str) -> Task:
+        """Return run task."""
         wait_existing = False
         with self._lock:
             task = self.container.tasks.get(task_id)
@@ -272,6 +291,7 @@ class OrchestratorService:
         return None
 
     def get_plan_document(self, task_id: str) -> dict[str, Any]:
+        """Return get plan document."""
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -313,6 +333,7 @@ class OrchestratorService:
         status: Literal["draft", "committed"] = "draft",
         created_at: str | None = None,
     ) -> PlanRevision:
+        """Create and persist a plan revision for a task."""
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -363,6 +384,7 @@ class OrchestratorService:
         base_revision_id: str | None = None,
         priority: str = "normal",
     ) -> PlanRefineJob:
+        """Queue a plan refinement job and schedule background processing."""
         with self._lock:
             task = self.container.tasks.get(task_id)
             if not task:
@@ -408,6 +430,7 @@ class OrchestratorService:
         return job
 
     def process_plan_refine_job(self, job_id: str) -> PlanRefineJob | None:
+        """Return process plan refine job."""
         job = self.container.plan_refine_jobs.get(job_id)
         if not job:
             return None
@@ -526,12 +549,14 @@ class OrchestratorService:
                 self.container.tasks.upsert(cleanup_task)
 
     def list_plan_refine_jobs(self, task_id: str) -> list[PlanRefineJob]:
+        """Return list plan refine jobs."""
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
         return self.container.plan_refine_jobs.for_task(task_id)
 
     def get_plan_refine_job(self, task_id: str, job_id: str) -> PlanRefineJob:
+        """Return get plan refine job."""
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -541,6 +566,7 @@ class OrchestratorService:
         return job
 
     def commit_plan_revision(self, task_id: str, revision_id: str) -> str:
+        """Return commit plan revision."""
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -550,7 +576,7 @@ class OrchestratorService:
         for revision in self.container.plan_revisions.for_task(task_id):
             next_status = "committed" if revision.id == revision_id else "draft"
             if revision.status != next_status:
-                revision.status = next_status
+                revision.status = cast(PlanRevisionStatus, next_status)
                 self.container.plan_revisions.upsert(revision)
         task.metadata["latest_plan_revision_id"] = revision_id
         task.metadata["committed_plan_revision_id"] = revision_id
@@ -608,6 +634,7 @@ class OrchestratorService:
         revision_id: str | None = None,
         plan_override: str | None = None,
     ) -> tuple[str, str | None]:
+        """Resolve plan text and optional revision id for task generation."""
         task = self.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
@@ -714,7 +741,7 @@ class OrchestratorService:
 
     # Maps step names to (heading, placeholder_step) pairs.
     # placeholder_step is the step name used in the template placeholder text.
-    _WORKDOC_SECTION_MAP: dict[str, tuple[str, str]] = {
+    _WORKDOC_SECTION_MAP: dict[str, tuple[str, str | None]] = {
         "plan": ("## Plan", "plan"),
         "initiative_plan": ("## Plan", "plan"),
         "analyze": ("## Analysis", "analyze"),
@@ -1289,14 +1316,14 @@ _Pending: will be populated by the report step._
         }
         return template_by_pipeline.get(pipeline_id, self._GENERIC_WORKDOC_TEMPLATE)
 
-    def _workdoc_section_for_step(self, task: Task, step: str) -> tuple[str, str] | None:
+    def _workdoc_section_for_step(self, task: Task, step: str) -> tuple[str, str | None] | None:
         """Resolve section heading/placeholder mapping for a step and task pipeline."""
         section = self._WORKDOC_SECTION_MAP.get(step)
         if not section:
             return None
         heading, placeholder_step = section
         pipeline_id = self._pipeline_id_for_task(task)
-        section_overrides: dict[str, dict[str, tuple[str, str]]] = {
+        section_overrides: dict[str, dict[str, tuple[str, str | None]]] = {
             "security_audit": {
                 "report": ("## Security Report", "report"),
                 "generate_tasks": ("## Generated Remediation Tasks", "generate_tasks"),
@@ -2020,11 +2047,14 @@ _Pending: will be populated by the report step._
         for item in task_defs:
             if not isinstance(item, dict):
                 continue
+            priority = str(item.get("priority") or parent.priority)
+            if priority not in {"P0", "P1", "P2", "P3"}:
+                priority = parent.priority
             child = Task(
                 title=str(item.get("title") or "Generated task"),
                 description=str(item.get("description") or ""),
                 task_type=str(item.get("task_type") or "feature"),
-                priority=str(item.get("priority") or parent.priority),
+                priority=cast(Priority, priority),
                 parent_id=parent.id,
                 source="generated",
                 labels=list(item.get("labels") or []),
@@ -2820,6 +2850,7 @@ def create_orchestrator(
     *,
     worker_adapter: WorkerAdapter | None = None,
 ) -> OrchestratorService:
+    """Build, start, and return an orchestrator instance for a container."""
     if worker_adapter is None:
         from .live_worker_adapter import LiveWorkerAdapter
 

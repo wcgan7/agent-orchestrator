@@ -900,7 +900,7 @@ def test_review_findings_passed_to_implement_fix(tmp_path: Path) -> None:
     task.metadata['review_findings'] before implement_fix runs."""
     from unittest.mock import MagicMock
 
-    from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter
 
     captured_metadata: list[dict] = []
     real_adapter = DefaultWorkerAdapter()

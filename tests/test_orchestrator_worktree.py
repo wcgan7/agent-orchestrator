@@ -650,9 +650,9 @@ def test_resolve_merge_worker_exception_handled(tmp_path: Path) -> None:
         cwd=tmp_path, capture_output=True, text=True,
     ).stdout.strip()
     # Filter out the .prd-runner state files
-    git_lines = [l for l in status.split("\n") if l and not ".prd-runner" in l]
+    git_lines = [line for line in status.split("\n") if line and ".prd-runner" not in line]
     # No unmerged files should remain
-    unmerged = [l for l in git_lines if l.startswith("U") or l.startswith("AA")]
+    unmerged = [line for line in git_lines if line.startswith("U") or line.startswith("AA")]
     assert unmerged == [], f"Git repo has unresolved merge state: {unmerged}"
 
 
