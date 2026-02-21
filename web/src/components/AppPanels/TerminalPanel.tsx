@@ -38,7 +38,6 @@ export function TerminalPanel({ projectDir, visible, onMinimize }: TerminalPanel
   const logsOffsetRef = useRef<number>(0)
   const resizeTimerRef = useRef<number | null>(null)
   const [session, setSession] = useState<TerminalSessionRecord | null>(null)
-  const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
   const wsUrl = useMemo(() => {
@@ -100,6 +99,9 @@ export function TerminalPanel({ projectDir, visible, onMinimize }: TerminalPanel
     const id = requestAnimationFrame(() => {
       fitRef.current?.fit()
       terminalRef.current?.focus()
+      if (!sessionRef.current || sessionRef.current.status !== 'running') {
+        void startOrAttach()
+      }
     })
     return () => cancelAnimationFrame(id)
   }, [visible])
@@ -142,7 +144,6 @@ export function TerminalPanel({ projectDir, visible, onMinimize }: TerminalPanel
   }
 
   async function startOrAttach(): Promise<void> {
-    setLoading(true)
     setError('')
     try {
       fitRef.current?.fit()
@@ -169,20 +170,7 @@ export function TerminalPanel({ projectDir, visible, onMinimize }: TerminalPanel
     } catch (err) {
       const detail = err instanceof Error ? err.message : 'unknown error'
       setError(`Failed to start terminal session (${detail})`)
-    } finally {
-      setLoading(false)
     }
-  }
-
-  async function stopSession(): Promise<void> {
-    const current = sessionRef.current
-    if (!current) return
-    await fetch(buildApiUrl(`/api/terminal/session/${current.id}/stop`, projectDir), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ signal: 'TERM' }),
-    }).catch(() => undefined)
-    await refreshActive()
   }
 
   useEffect(() => {
@@ -283,11 +271,6 @@ export function TerminalPanel({ projectDir, visible, onMinimize }: TerminalPanel
       <div className="terminal-float-header">
         <span className="terminal-float-title">Terminal</span>
         <div className="terminal-float-actions">
-          {session && session.status === 'running' ? (
-            <button className="terminal-float-btn terminal-float-btn-danger" onClick={() => void stopSession()} disabled={loading} aria-label="Stop" title="Stop">&#x25A0;</button>
-          ) : (
-            <button className="terminal-float-btn terminal-float-btn-primary" onClick={() => void startOrAttach()} disabled={loading} aria-label="Start" title="Start">&#x25B6;</button>
-          )}
           <button className="terminal-float-btn" onClick={() => terminalRef.current?.clear()} aria-label="Clear" title="Clear">&#x232B;</button>
           {onMinimize ? <button className="terminal-float-btn" onClick={onMinimize} aria-label="Minimize terminal" title="Minimize">&minus;</button> : null}
         </div>

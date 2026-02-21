@@ -2447,20 +2447,6 @@ textarea {
 .terminal-float-btn:hover {
   background: var(--color-bg-tertiary);
 }
-.terminal-float-btn-primary {
-  color: var(--color-primary-600);
-  border-color: var(--color-primary-600);
-}
-.terminal-float-btn-primary:hover {
-  background: rgba(31, 122, 79, 0.08);
-}
-.terminal-float-btn-danger {
-  color: var(--color-error-700);
-  border-color: var(--color-error-700);
-}
-.terminal-float-btn-danger:hover {
-  background: #fff4f4;
-}
 .terminal-float-body {
   flex: 1;
   min-height: 0;
