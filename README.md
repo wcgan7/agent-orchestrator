@@ -12,6 +12,8 @@ Execution runs under enforced coding standards and a continuous review-and-fix c
 ## What You Can Do
 
 - Manage a full task lifecycle on a kanban board (`backlog` → `queued` → `in_progress` → `in_review` → `done`, plus `blocked` and `cancelled`).
+- Delete terminal tasks (`done`/`cancelled`) directly from task detail.
+- Clear the entire board while archiving prior runtime state to `.agent_orchestrator_archive/` instead of destructive wipe.
 - Import PRDs into executable task graphs with dependency edges.
 - Draft, refine, and commit task plans with full revision lineage before execution.
 - Use an embedded interactive terminal directly in the project directory.

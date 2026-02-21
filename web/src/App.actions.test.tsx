@@ -57,6 +57,19 @@ function installFetchMock() {
     approval_mode: 'human_review',
     hitl_mode: 'autopilot',
   }
+  let terminalTask = {
+    id: 'task-d1',
+    title: 'Terminal task',
+    description: 'Ready to delete',
+    priority: 'P2',
+    status: 'done',
+    task_type: 'feature',
+    labels: [],
+    blocked_by: [],
+    blocks: [],
+  }
+  let boardCleared = false
+  let terminalDeleted = false
 
   const taskR1 = {
     id: 'task-r1',
@@ -122,6 +135,18 @@ function installFetchMock() {
         human_blocking_issues: [],
       }
       return jsonResponse({ task })
+    }
+    if (u.includes('/api/tasks/task-d1') && method === 'DELETE') {
+      terminalDeleted = true
+      return jsonResponse({ deleted: true, task_id: 'task-d1' })
+    }
+    if (u.includes('/api/tasks/clear') && method === 'POST') {
+      boardCleared = true
+      return jsonResponse({
+        cleared: true,
+        archived_to: '/tmp/repo-alpha/.agent_orchestrator_archive/state_20260221T120000Z',
+        message: 'Cleared all tasks. Archived previous runtime state to /tmp/repo-alpha/.agent_orchestrator_archive/state_20260221T120000Z.',
+      })
     }
     if (u.includes('/api/tasks/task-1') && method === 'PATCH') return jsonResponse({ task })
     if (u.includes('/api/tasks') && !u.includes('/api/tasks/') && method === 'POST') return jsonResponse({ task })
@@ -201,12 +226,13 @@ function installFetchMock() {
     if (u.includes('/api/tasks/board')) {
       return jsonResponse({
         columns: {
-          backlog: [task],
+          backlog: boardCleared ? [] : [task],
           queued: [],
           in_progress: [],
-          in_review: [taskR1],
+          in_review: boardCleared ? [] : [taskR1],
           blocked: [],
-          done: [],
+          done: boardCleared || terminalDeleted ? [] : [terminalTask],
+          cancelled: [],
         },
       })
     }
@@ -255,6 +281,7 @@ function installFetchMock() {
     if (u.includes('/api/collaboration/comments/task-1')) return jsonResponse({ comments: [] })
 
     if (u.includes('/api/tasks/task-r1') && method === 'GET') return jsonResponse({ task: taskR1 })
+    if (u.includes('/api/tasks/task-d1') && method === 'GET') return jsonResponse({ task: terminalTask })
     if (u.includes('/api/collaboration/timeline/task-r1')) return jsonResponse({ events: [] })
     if (u.includes('/api/collaboration/feedback/task-r1')) return jsonResponse({ feedback: [] })
     if (u.includes('/api/collaboration/comments/task-r1')) return jsonResponse({ comments: [] })
@@ -271,6 +298,7 @@ describe('App action coverage', () => {
     vi.clearAllMocks()
     localStorage.clear()
     window.location.hash = ''
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
     MockWebSocket.instances = []
     ;(globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = MockWebSocket as unknown as typeof WebSocket
   })
@@ -370,6 +398,41 @@ describe('App action coverage', () => {
       expect(body.labels).toEqual(['ui', 'frontend'])
     })
   }, 30000)
+
+  it('deletes terminal tasks and clears board with archive notice', async () => {
+    const mockedFetch = installFetchMock()
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Terminal task')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('Terminal task'))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Delete$/i })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Delete$/i }))
+
+    await waitFor(() => {
+      expect(
+        mockedFetch.mock.calls.some(([url, init]) =>
+          String(url).includes('/api/tasks/task-d1') && (init as RequestInit | undefined)?.method === 'DELETE'
+        )
+      ).toBe(true)
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Clear All Tasks$/i }))
+    await waitFor(() => {
+      expect(
+        mockedFetch.mock.calls.some(([url, init]) =>
+          String(url).includes('/api/tasks/clear') && (init as RequestInit | undefined)?.method === 'POST'
+        )
+      ).toBe(true)
+    })
+    await waitFor(() => {
+      expect(screen.getByText(/Archived previous runtime state to/i)).toBeInTheDocument()
+    })
+  })
 
   it('executes execution, review, and worker dashboard actions', async () => {
     const mockedFetch = installFetchMock()

@@ -5,12 +5,15 @@ from pathlib import Path
 
 from fastapi.routing import APIRoute
 
+from agent_orchestrator.runtime.orchestrator import DefaultWorkerAdapter
 from agent_orchestrator.runtime.api.router import create_router
+from agent_orchestrator.server.api import create_app
 
 
 EXPECTED_API_ROUTE_TABLE: set[tuple[str, str]] = {
     ("DELETE", "/api/agents/{agent_id}"),
     ("DELETE", "/api/projects/pinned/{project_id}"),
+    ("DELETE", "/api/tasks/{task_id}"),
     ("DELETE", "/api/tasks/{task_id}/dependencies/{dep_id}"),
     ("GET", "/api/agents"),
     ("GET", "/api/agents/types"),
@@ -62,6 +65,7 @@ EXPECTED_API_ROUTE_TABLE: set[tuple[str, str]] = {
     ("POST", "/api/tasks"),
     ("POST", "/api/tasks/analyze-dependencies"),
     ("POST", "/api/tasks/classify-pipeline"),
+    ("POST", "/api/tasks/clear"),
     ("POST", "/api/tasks/{task_id}/approve-gate"),
     ("POST", "/api/tasks/{task_id}/cancel"),
     ("POST", "/api/tasks/{task_id}/dependencies"),
@@ -99,3 +103,16 @@ def test_api_reference_matches_runtime_routes() -> None:
     docs = Path("docs/API_REFERENCE.md").read_text(encoding="utf-8")
     documented = set(re.findall(r"### `([A-Z]+) (/api[^`]+)`", docs))
     assert documented == EXPECTED_API_ROUTE_TABLE
+
+
+def test_create_app_exposes_task_clear_and_delete_routes(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    route_table = {
+        (method, route.path)
+        for route in app.routes
+        if isinstance(route, APIRoute)
+        for method in route.methods
+        if method not in {"HEAD", "OPTIONS"}
+    }
+    assert ("POST", "/api/tasks/clear") in route_table
+    assert ("DELETE", "/api/tasks/{task_id}") in route_table
