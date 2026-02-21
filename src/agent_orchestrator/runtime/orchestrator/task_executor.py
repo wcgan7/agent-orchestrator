@@ -20,14 +20,18 @@ logger = logging.getLogger(__name__)
 
 
 class TaskExecutor:
-    """Execute task pipelines while keeping service as orchestration facade."""
+    """Drive end-to-end task execution while service remains the public facade."""
 
     def __init__(self, service: OrchestratorService) -> None:
-        """Initialize the task executor with orchestrator dependencies."""
+        """Store orchestrator service dependencies used across execution phases."""
         self._service = service
 
     def execute_task(self, task: Task) -> None:
-        """Execute one task and handle cancellation/internal-failure outcomes."""
+        """Execute one task and normalize top-level cancellation/error outcomes.
+
+        This wrapper ensures task/run status persistence and event emission are
+        consistent even when the inner execution loop raises.
+        """
         svc = self._service
         try:
             self.execute_task_inner(task)
@@ -59,7 +63,11 @@ class TaskExecutor:
             svc.container.tasks.upsert(task)
 
     def execute_task_inner(self, task: Task) -> None:
-        """Run the full task pipeline from initialization through cleanup."""
+        """Run the full pipeline, including retries, gates, review, and merge.
+
+        Coordinates worktree lifecycle, run-record updates, verify-fix loops,
+        human-gate checks, review cycles, and final commit/merge behavior.
+        """
         svc = self._service
         worktree_dir: Optional[Path] = None
         try:

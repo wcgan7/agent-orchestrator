@@ -34,7 +34,12 @@ from ..terminal.service import TerminalService
 
 
 class CreateTaskRequest(BaseModel):
-    """Payload for creating a new task."""
+    """Request body for task creation, including optional pipeline overrides.
+
+    Supports classifier metadata fields used when the client requests
+    ``task_type="auto"`` and wants the server to persist provenance for the
+    selected pipeline.
+    """
     title: str
     description: str = ""
     task_type: str = "feature"
@@ -91,29 +96,29 @@ class UpdateTaskRequest(BaseModel):
 
 
 class TransitionRequest(BaseModel):
-    """Payload for transitioning a task status."""
+    """Request body for explicit task status transitions."""
     status: str
 
 
 class AddDependencyRequest(BaseModel):
-    """Payload for adding a task dependency edge."""
+    """Request body for a single ``depends_on`` relationship."""
     depends_on: str
 
 
 class PrdPreviewRequest(BaseModel):
-    """Payload for PRD preview ingestion."""
+    """Request body for parsing PRD text before any task records are written."""
     title: Optional[str] = None
     content: str
     default_priority: str = "P2"
 
 
 class PrdCommitRequest(BaseModel):
-    """Payload for committing a previously previewed PRD import job."""
+    """Request body selecting a staged PRD preview job to persist as tasks."""
     job_id: str
 
 
 class StartTerminalSessionRequest(BaseModel):
-    """Payload for starting an interactive terminal session."""
+    """Request body for opening a terminal session with bounded PTY dimensions."""
     cols: Optional[int] = Field(default=120, ge=2, le=500)
     rows: Optional[int] = Field(default=36, ge=2, le=300)
     shell: Optional[str] = None
@@ -125,18 +130,21 @@ class TerminalInputRequest(BaseModel):
 
 
 class TerminalResizeRequest(BaseModel):
-    """Payload for resizing a terminal PTY window."""
+    """Request body for updating a terminal PTY size within safety bounds."""
     cols: int = Field(ge=2, le=500)
     rows: int = Field(ge=2, le=300)
 
 
 class StopTerminalSessionRequest(BaseModel):
-    """Payload for stopping a terminal session."""
+    """Request body for graceful or forceful terminal session shutdown."""
     signal: Literal["TERM", "KILL"] = "TERM"
 
 
 class PlanRefineRequest(BaseModel):
-    """Payload for queueing an asynchronous plan-refine job."""
+    """Request body for scheduling a plan refinement pass.
+
+    ``feedback`` is required so refinement jobs always include reviewer intent.
+    """
     base_revision_id: Optional[str] = None
     feedback: str
     instructions: Optional[str] = None
@@ -144,19 +152,19 @@ class PlanRefineRequest(BaseModel):
 
 
 class CommitPlanRequest(BaseModel):
-    """Payload for committing a specific plan revision."""
+    """Request body that promotes one plan revision to committed state."""
     revision_id: str
 
 
 class CreatePlanRevisionRequest(BaseModel):
-    """Payload for creating a manual plan revision."""
+    """Request body for a user-authored plan revision draft."""
     content: str
     parent_revision_id: Optional[str] = None
     feedback_note: Optional[str] = None
 
 
 class GenerateTasksRequest(BaseModel):
-    """Payload for generating child tasks from plan content."""
+    """Request body for deriving child tasks from committed or ad hoc plan text."""
     source: Optional[Literal["committed", "revision", "override", "latest"]] = None
     revision_id: Optional[str] = None
     plan_override: Optional[str] = None
@@ -164,31 +172,31 @@ class GenerateTasksRequest(BaseModel):
 
 
 class ApproveGateRequest(BaseModel):
-    """Payload for approving a pending human gate."""
+    """Request body for clearing a pending human gate on the active task."""
     gate: Optional[str] = None
 
 
 class OrchestratorControlRequest(BaseModel):
-    """Payload for orchestrator control actions."""
+    """Request body for runtime control actions such as pause/resume/stop."""
     action: str
 
 
 class OrchestratorSettingsRequest(BaseModel):
-    """Settings payload for orchestrator concurrency and policies."""
+    """Patch payload for orchestrator execution limits and automation policy."""
     concurrency: int = Field(2, ge=1, le=128)
     auto_deps: bool = True
     max_review_attempts: int = Field(10, ge=1, le=50)
 
 
 class AgentRoutingSettingsRequest(BaseModel):
-    """Settings payload for role-based agent routing."""
+    """Patch payload for mapping task roles to worker roles/providers."""
     default_role: str = "general"
     task_type_roles: dict[str, str] = Field(default_factory=dict)
     role_provider_overrides: dict[str, str] = Field(default_factory=dict)
 
 
 class WorkerProviderSettingsRequest(BaseModel):
-    """Settings payload for one worker provider definition."""
+    """Patch payload for one named worker provider backend definition."""
     type: str = "codex"
     command: Optional[str] = None
     reasoning_effort: Optional[str] = None
@@ -199,7 +207,7 @@ class WorkerProviderSettingsRequest(BaseModel):
 
 
 class WorkersSettingsRequest(BaseModel):
-    """Settings payload for worker defaults, health checks, and routing."""
+    """Patch payload for global worker defaults, routing, and heartbeat checks."""
     default: str = "codex"
     default_model: Optional[str] = None
     heartbeat_seconds: Optional[int] = Field(None, ge=1, le=3600)
@@ -236,7 +244,7 @@ class LanguageCommandsRequest(BaseModel):
 
 
 class ProjectSettingsRequest(BaseModel):
-    """Settings payload for project-specific command configuration."""
+    """Patch payload for project-level lint/test/typecheck command overrides."""
     commands: Optional[dict[str, LanguageCommandsRequest]] = None
 
 
@@ -250,25 +258,25 @@ class UpdateSettingsRequest(BaseModel):
 
 
 class SpawnAgentRequest(BaseModel):
-    """Payload for creating a new runtime agent record."""
+    """Request body for adding a runtime agent with optional provider override."""
     role: str = "general"
     capacity: int = 1
     override_provider: Optional[str] = None
 
 
 class ReviewActionRequest(BaseModel):
-    """Payload for human review approval/request-changes actions."""
+    """Request body for human review decisions, with optional guidance text."""
     guidance: Optional[str] = None
 
 
 class RetryTaskRequest(BaseModel):
-    """Payload for retrying a task from a chosen step."""
+    """Request body for retrying execution from an optional pipeline step."""
     guidance: Optional[str] = None
     start_from_step: Optional[str] = None
 
 
 class AddFeedbackRequest(BaseModel):
-    """Payload for posting reviewer feedback on a task."""
+    """Request body for storing structured reviewer feedback on a task."""
     task_id: str
     feedback_type: str = "general"
     priority: str = "should"
@@ -278,7 +286,7 @@ class AddFeedbackRequest(BaseModel):
 
 
 class AddCommentRequest(BaseModel):
-    """Payload for adding a threaded code comment."""
+    """Request body for creating a task-scoped threaded code discussion comment."""
     task_id: str
     file_path: str
     line_number: int = 0
@@ -451,7 +459,11 @@ def _reconcile_summary_run_status(task: Task, run: Any) -> str:
 
 
 def _build_execution_summary(task: Task, container: "Container") -> Optional[dict[str, Any]]:
-    """Build execution summary from the latest RunRecord's step data."""
+    """Build API-safe execution summary for terminal or in-review tasks.
+
+    The summary collapses run step logs into stable fields consumed by the UI,
+    skipping internal-only entries such as skipped steps.
+    """
     if task.status not in ("in_review", "blocked", "done"):
         return None
     if not task.run_ids:

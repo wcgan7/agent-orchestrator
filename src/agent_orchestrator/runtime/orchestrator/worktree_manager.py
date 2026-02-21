@@ -15,14 +15,18 @@ logger = logging.getLogger(__name__)
 
 
 class WorktreeManager:
-    """Manage worktree lifecycle and merge flows for tasks."""
+    """Coordinate task branch/worktree lifecycle and merge conflict handling."""
 
     def __init__(self, service: OrchestratorService) -> None:
-        """Initialize the manager with orchestrator dependencies."""
+        """Bind the manager to the owning orchestrator service state."""
         self._service = service
 
     def create_worktree(self, task: Any) -> Optional[Path]:
-        """Create and return a dedicated git worktree for a task when possible."""
+        """Create a task-specific worktree and branch when git metadata exists.
+
+        Returns ``None`` for non-git projects so callers can fall back to
+        in-place execution in the primary repository directory.
+        """
         svc = self._service
         git_dir = svc.container.project_dir / ".git"
         if not git_dir.exists():
@@ -41,7 +45,11 @@ class WorktreeManager:
         return worktree_dir
 
     def merge_and_cleanup(self, task: Any, worktree_dir: Path) -> None:
-        """Merge the task branch and clean up the worktree."""
+        """Merge task work into the run branch, then remove transient worktree.
+
+        On merge conflicts the method attempts automated resolution and marks
+        ``task.metadata["merge_conflict"]`` when conflict handling fails.
+        """
         svc = self._service
         branch = f"task-{task.id}"
         merge_failed = False
@@ -80,7 +88,11 @@ class WorktreeManager:
             )
 
     def approve_and_merge(self, task: Any) -> dict[str, Any]:
-        """Merge a preserved branch to the run branch on user approval."""
+        """Merge a preserved task branch after manual review approval.
+
+        Returns a status payload for API handlers and persists metadata cleanup
+        when the branch no longer exists or merges successfully.
+        """
         svc = self._service
         branch = task.metadata.get("preserved_branch")
         if not branch:
@@ -140,7 +152,11 @@ class WorktreeManager:
         return {"status": "ok", "commit_sha": sha}
 
     def resolve_merge_conflict(self, task: Any, branch: str) -> bool:
-        """Attempt automated merge conflict resolution via worker."""
+        """Try worker-assisted conflict resolution for the currently running merge.
+
+        The method snapshots conflict context into task metadata so the worker
+        prompt includes file-level conflict text and related task objectives.
+        """
         svc = self._service
         saved_worktree_dir = task.metadata.get("worktree_dir")
         try:
@@ -206,7 +222,7 @@ class WorktreeManager:
                 task.metadata["worktree_dir"] = saved_worktree_dir
 
     def cleanup_orphaned_worktrees(self) -> None:
-        """Remove stale worktree directories and non-preserved branches."""
+        """Remove leftover task worktrees and delete unneeded task branches."""
         svc = self._service
         worktrees_dir = svc.container.state_root / "worktrees"
         if not worktrees_dir.exists():
@@ -236,7 +252,7 @@ class WorktreeManager:
                     )
 
     def ensure_branch(self) -> Optional[str]:
-        """Ensure and return the active run branch name."""
+        """Create or reuse the shared orchestrator run branch in a thread-safe way."""
         svc = self._service
         if svc._run_branch:
             return svc._run_branch
@@ -261,7 +277,11 @@ class WorktreeManager:
                 return None
 
     def commit_for_task(self, task: Any, working_dir: Optional[Path] = None) -> Optional[str]:
-        """Commit task changes and return commit SHA when successful."""
+        """Stage and commit task changes, returning the commit SHA on success.
+
+        Returns ``None`` when there is no git repository or commit creation
+        fails (for example when there are no staged changes).
+        """
         svc = self._service
         cwd = working_dir or svc.container.project_dir
         if not (cwd / ".git").exists() and not (svc.container.project_dir / ".git").exists():
@@ -289,7 +309,7 @@ class WorktreeManager:
             return None
 
     def has_uncommitted_changes(self, cwd: Path) -> bool:
-        """Check whether the working tree has staged or unstaged changes."""
+        """Return whether git reports staged or unstaged changes for ``cwd``."""
         try:
             result = subprocess.run(
                 ["git", "status", "--porcelain"],
@@ -303,7 +323,11 @@ class WorktreeManager:
             return True
 
     def preserve_worktree_work(self, task: Any, worktree_dir: Path) -> bool:
-        """Commit worktree edits, remove the worktree, and preserve the branch."""
+        """Persist task edits by keeping branch history but removing worktree dir.
+
+        This is used when human review is required before final merge into the
+        orchestrator run branch.
+        """
         svc = self._service
         branch = f"task-{task.id}"
         try:
@@ -338,7 +362,7 @@ class WorktreeManager:
             return False
 
     def resolve_task_plan_excerpt(self, task: Any, *, max_chars: int = 800) -> str:
-        """Extract a bounded plan snippet for prompts and conflict resolution context."""
+        """Extract bounded plan text used in merge-conflict prompt context."""
         svc = self._service
         if not isinstance(task.metadata, dict):
             return ""
@@ -359,7 +383,7 @@ class WorktreeManager:
         return ""
 
     def format_task_objective_summary(self, task: Any, *, max_chars: int = 1600) -> str:
-        """Build concise objective context for merge-conflict resolution."""
+        """Compose a compact objective summary for conflict-resolution prompts."""
         lines = [f"- Task: {task.title}"]
         if task.description:
             lines.append(f"  Description: {task.description}")
