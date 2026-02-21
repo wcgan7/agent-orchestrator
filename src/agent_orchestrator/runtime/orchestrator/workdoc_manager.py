@@ -719,8 +719,13 @@ _Pending: will be populated by the report step._
         if not worktree_copy.exists():
             return
 
-        canonical_text = canonical.read_text(encoding="utf-8")
-        worktree_text = worktree_copy.read_text(encoding="utf-8")
+        try:
+            canonical_text = canonical.read_text(encoding="utf-8")
+            worktree_text = worktree_copy.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            # Parallel task cleanup can remove the worktree-local workdoc between
+            # existence checks and read operations. Treat that as a benign no-op.
+            return
 
         changed = False
         orchestrator_managed_steps = {"verify", "benchmark", "reproduce", "implement_fix", "report", "profile"}

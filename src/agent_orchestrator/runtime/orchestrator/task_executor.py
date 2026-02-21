@@ -478,9 +478,9 @@ class TaskExecutor:
             task.error = None
             task.metadata.pop("step_outputs", None)
             task.metadata.pop("worktree_dir", None)
-            svc.container.tasks.upsert(task)
             run.finished_at = now_iso()
             svc.container.runs.upsert(run)
+            svc.container.tasks.upsert(task)
         finally:
             if worktree_dir and worktree_dir.exists():
                 preserved = task.metadata.get("preserved_branch")

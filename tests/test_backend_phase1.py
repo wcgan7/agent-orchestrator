@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from agent_orchestrator.server.api import create_app
 from agent_orchestrator.runtime.orchestrator import DefaultWorkerAdapter
-from agent_orchestrator.runtime.domain.models import Task
+from agent_orchestrator.runtime.domain.models import RunRecord, Task, now_iso
 from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 from agent_orchestrator.runtime.storage.bootstrap import ensure_state_root
 from agent_orchestrator.runtime.storage.container import Container
@@ -817,10 +817,94 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
         approved = client.post(f"/api/review/{task['id']}/approve", json={})
         assert approved.status_code == 200
         assert approved.json()["task"]["status"] == "done"
+        execution_summary = approved.json()["task"].get("execution_summary") or {}
+        assert execution_summary.get("run_status") == "done"
         actions_after_approve = approved.json()["task"]["human_review_actions"]
         assert len(actions_after_approve) == 2
         assert actions_after_approve[0]["action"] == "request_changes"
         assert actions_after_approve[1]["action"] == "approve"
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        latest_run = None
+        task_after = container.tasks.get(task["id"])
+        assert task_after is not None
+        for run_id in reversed(task_after.run_ids):
+            latest_run = container.runs.get(run_id)
+            if latest_run:
+                break
+        assert latest_run is not None
+        assert latest_run.status == "done"
+        assert latest_run.finished_at is not None
+
+
+def test_task_execution_summary_prefers_terminal_run_for_done_task(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={"title": "Summary run selection", "status": "backlog", "approval_mode": "auto_approve"},
+        ).json()["task"]
+        run_resp = client.post(f"/api/tasks/{created['id']}/run")
+        assert run_resp.status_code == 200
+        assert run_resp.json()["task"]["status"] == "done"
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+        assert task.run_ids
+        completed_run = container.runs.get(task.run_ids[-1])
+        assert completed_run is not None
+        assert completed_run.status == "done"
+
+        stale_run = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at=now_iso(),
+            finished_at=None,
+            summary="Stale in-progress run",
+            steps=[{"step": "implement", "status": "ok", "summary": "stale step", "started_at": now_iso(), "ts": now_iso()}],
+        )
+        container.runs.upsert(stale_run)
+        task.run_ids.append(stale_run.id)
+        container.tasks.upsert(task)
+
+        task_detail = client.get(f"/api/tasks/{task.id}")
+        assert task_detail.status_code == 200
+        execution_summary = task_detail.json()["task"].get("execution_summary") or {}
+        assert execution_summary.get("run_id") == completed_run.id
+        assert execution_summary.get("run_status") == "done"
+
+
+def test_task_execution_summary_reconciles_single_stale_run_for_done_task(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={"title": "Single stale run", "status": "done", "approval_mode": "auto_approve"},
+        ).json()["task"]
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        stale_run = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at=now_iso(),
+            finished_at=None,
+            summary="Stale in-progress run",
+            steps=[{"step": "implement", "status": "ok", "summary": "stale step", "started_at": now_iso(), "ts": now_iso()}],
+        )
+        container.runs.upsert(stale_run)
+        task.status = "done"
+        task.run_ids = [stale_run.id]
+        container.tasks.upsert(task)
+
+        task_detail = client.get(f"/api/tasks/{task.id}")
+        assert task_detail.status_code == 200
+        execution_summary = task_detail.json()["task"].get("execution_summary") or {}
+        assert execution_summary.get("run_id") == stale_run.id
+        assert execution_summary.get("run_status") == "done"
 
 
 def test_get_task_plan(tmp_path: Path) -> None:

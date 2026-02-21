@@ -168,6 +168,19 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.metadata["last_review_approval"] = {"ts": ts, "guidance": body.guidance}
         history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
         history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
+
+        latest_run = None
+        for run_id in reversed(task.run_ids):
+            latest_run = container.runs.get(run_id)
+            if latest_run:
+                break
+        if latest_run and (latest_run.status != "done" or not latest_run.finished_at):
+            latest_run.status = "done"
+            latest_run.finished_at = latest_run.finished_at or ts
+            if not latest_run.summary:
+                latest_run.summary = "Completed after human approval"
+            container.runs.upsert(latest_run)
+
         container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={"guidance": body.guidance or ""})
         return {"task": _task_payload(task, container)}
@@ -369,4 +382,3 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             payload={"sections": touched_sections},
         )
         return _settings_payload(cfg)
-

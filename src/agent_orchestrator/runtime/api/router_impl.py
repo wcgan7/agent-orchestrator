@@ -417,20 +417,49 @@ def _iso_delta_seconds(start: str, end: str) -> Optional[float]:
         return None
 
 
+def _select_summary_run(task: Task, container: "Container") -> Any:
+    """Select the run record that best matches task terminal state."""
+    runs: list[Any] = []
+    for run_id in reversed(task.run_ids):
+        run = container.runs.get(run_id)
+        if run:
+            runs.append(run)
+    if not runs:
+        return None
+
+    latest = runs[0]
+    preferred_statuses = {
+        "done": {"done"},
+        "blocked": {"blocked", "interrupted", "cancelled", "error"},
+        "in_review": {"in_review"},
+    }.get(task.status, set())
+    for run in runs:
+        if run.status in preferred_statuses or run.finished_at:
+            return run
+    return latest
+
+
+def _reconcile_summary_run_status(task: Task, run: Any) -> str:
+    """Derive summary run status when run/task state are temporarily inconsistent."""
+    terminal_task_status = {"done", "blocked", "in_review"}
+    stale_run_status = {"in_progress", "running"}
+    run_status = str(getattr(run, "status", "") or "")
+    run_finished_at = getattr(run, "finished_at", None)
+    if task.status in terminal_task_status and run_status in stale_run_status and not run_finished_at:
+        return task.status
+    return run_status
+
+
 def _build_execution_summary(task: Task, container: "Container") -> Optional[dict[str, Any]]:
     """Build execution summary from the latest RunRecord's step data."""
     if task.status not in ("in_review", "blocked", "done"):
         return None
     if not task.run_ids:
         return None
-    # Find the latest run
-    run = None
-    for run_id in reversed(task.run_ids):
-        run = container.runs.get(run_id)
-        if run:
-            break
+    run = _select_summary_run(task, container)
     if not run or not run.steps:
         return None
+    run_status = _reconcile_summary_run_status(task, run)
     steps: list[dict[str, Any]] = []
     for step_data in run.steps:
         if not isinstance(step_data, dict):
@@ -460,13 +489,15 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
         "blocked": "Blocked",
         "done": "Completed",
         "error": "Failed",
+        "interrupted": "Interrupted",
+        "cancelled": "Cancelled",
         "running": "Running",
     }
-    run_summary = status_labels.get(run.status) or status_labels.get(task.status) or run.status
+    run_summary = status_labels.get(run_status) or status_labels.get(task.status) or run_status
     run_duration = _iso_delta_seconds(run.started_at, run.finished_at) if run.started_at and run.finished_at else None
     return {
         "run_id": run.id,
-        "run_status": run.status,
+        "run_status": run_status,
         "run_summary": run_summary,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
