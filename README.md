@@ -6,20 +6,31 @@ It gives you a task board, execution controls, review gates, and worker manageme
 Orchestrator autonomously plans and executes work across repositories — parallelizing independent changes, sequencing dependencies, and resolving conflicts as delivery progresses.
 Execution runs under enforced coding standards and a continuous review-and-fix cycle, producing resilient, merge-ready results instead of fragile one-pass output.
 
+Built-in prompts, pipeline templates, and quality controls let teams submit tasks directly without maintaining custom prompt packs or authoring a local `AGENTS.md` strategy file.
+
 <!-- Screenshot may not reflect the latest UI. Regenerate with: npm --prefix web run screenshot:homepage -->
 ![Agent Orchestrator Dashboard](web/public/homepage-screenshot.png)
 
 ## What You Can Do
 
-- Manage a full task lifecycle on a kanban board (`backlog` → `queued` → `in_progress` → `in_review` → `done`, plus `blocked` and `cancelled`).
-- Import PRDs into executable task graphs with dependency edges.
+- Run a full task lifecycle on a kanban board (`backlog` → `queued` → `in_progress` → `in_review` → `done`, plus `blocked` and `cancelled`).
+- Submit tasks with explicit types or use `task_type="auto"` to classify to the best pipeline first.
+- Execute task-specific pipelines that enforce multi-step quality (plan/analyze, implement, verify, review, commit) instead of single-pass coding.
+- Delete terminal tasks (`done`/`cancelled`) directly from task detail.
+- Clear the entire board while archiving prior runtime state to `.agent_orchestrator_archive/` instead of destructive wipe.
+- Import PRDs into executable task graphs, then execute in dependency-aware batches.
+- Parallelize safely with git worktree isolation for same-repo tasks.
+- Auto-handle merge integration and run conflict-resolution flows when branches collide.
+- Configure review strictness with severity-based quality gates (`critical`, `high`, `medium`, `low`) per defaults or task.
+- Choose a Human-in-the-Loop (HITL) mode per task: **Autopilot**, **Supervised**, **Collaborative**, or **Review Only**.
+- Add approval gates where needed, or fully automate execution when governance allows.
 - Draft, refine, and commit task plans with full revision lineage before execution.
 - Use an embedded interactive terminal directly in the project directory.
 - Control orchestrator execution (`pause`, `resume`, `drain`, `stop`).
-- Choose a Human-in-the-Loop (HITL) mode per task: **Autopilot**, **Supervised**, **Collaborative**, or **Review Only**.
-- View execution summaries with per-step status, review findings, and commit SHAs in the task detail modal.
 - Manage worker providers (Codex, Claude, Ollama) and configure step-to-provider routing.
 - Observe real-time updates across board, execution, and task detail via WebSocket.
+- Audit execution from persisted events, step logs (`stdout.log` / `stderr.log` / `progress.json`), and per-task workdocs.
+- View total time taken and execution summaries with per-step status, review findings, and commit SHAs in the task detail modal.
 
 ## Quick Start
 
@@ -56,7 +67,7 @@ Frontend runs at `http://localhost:3000` by default (proxies `/api` to the backe
 ### Create and run a task
 
 1. Open **Create Work** → **Create Task**.
-2. Fill task fields (title, type, priority, description).
+2. Fill task fields (title, type, priority, description). Use `auto` type when you want the orchestrator to select the best pipeline.
 3. Transition to `queued` or run from task detail.
 4. Track progress in **Execution**.
 5. Review from the task detail modal when it reaches `in_review`.
@@ -83,11 +94,11 @@ backlog → queued → in_progress → in_review → done
                      blocked       (request changes → queued)
 ```
 
-Tasks support dependency graphs (validated for cycles), parallel execution with configurable concurrency, and review cycles with severity-based findings.
+Tasks support dependency graphs (validated for cycles), automatic dependency inference, parallel execution with configurable concurrency, merge-aware completion for worktree runs, and review cycles with severity-based findings.
 
 ## Pipeline Templates
 
-Tasks execute through pipeline templates matched to their type:
+Tasks execute through pipeline templates matched to their type. These templates are designed for code quality and delivery reliability, with specialized step flows by task intent:
 
 | Pipeline | Use case / intent | Steps / flow |
 |---|---|---|
@@ -149,6 +160,9 @@ Runtime state is stored in the selected project directory:
 - `.agent_orchestrator/plan_refine_jobs.yaml`
 - `.agent_orchestrator/events.jsonl`
 - `.agent_orchestrator/config.yaml`
+- `.agent_orchestrator/workdocs/<task_id>.md` (canonical task workdocs synced with per-worktree `.workdoc.md`)
+
+Execution metadata also records per-step log artifact locations (for example `stdout.log`, `stderr.log`, and `progress.json`) in task run details.
 
 Primary configurable areas:
 - `orchestrator` (concurrency, auto deps, review attempts)

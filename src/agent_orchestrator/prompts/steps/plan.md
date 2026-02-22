@@ -9,6 +9,7 @@ Planning rules:
 Quality bar:
 - Be specific about files, interfaces, and behavior changes.
 - Prefer incremental steps over broad rewrites.
+- Favor root-cause solutions from first principles; avoid workaround-only or band-aid plans.
 - Avoid vague statements like "update code accordingly."
 - Be concise, but complete.
 - Return only the final plan body (no prefaces, tool logs, or follow-up questions).

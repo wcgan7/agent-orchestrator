@@ -13,6 +13,10 @@ Primary surfaces in the web app:
 - `Settings`
 - `Create Work` drawer (`Create Task`, `Import PRD`, `Terminal`)
 
+Board ordering defaults:
+- Active columns prioritize urgency (`P0` first) with status-specific recency signals.
+- `Done` shows newest completions first (based on most recent `updated_at`).
+
 ## Quick Start
 
 Start backend:
@@ -66,6 +70,16 @@ Constraint:
 - A task cannot move to `queued` while any blocker is unresolved.
 
 Blockers are resolved when dependent tasks are `done` or `cancelled`.
+
+Terminal-task cleanup:
+- Tasks in `done` or `cancelled` can be permanently deleted from task detail.
+- Non-terminal tasks cannot be deleted.
+
+Board clear-all behavior:
+- `Clear All Tasks` archives the existing `.agent_orchestrator/` directory to
+  `.agent_orchestrator_archive/state_<timestamp>/`, then initializes a fresh
+  empty `.agent_orchestrator/`.
+- The UI shows the archive destination path after a successful clear.
 
 ## Typical Workflows
 

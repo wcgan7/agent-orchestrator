@@ -24,6 +24,7 @@ STATE_FILES = {
     "events": "events.jsonl",
     "config": "config.yaml",
 }
+ARCHIVE_DIR_NAME = ".agent_orchestrator_archive"
 
 
 def _utc_stamp() -> str:
@@ -56,7 +57,7 @@ def _needs_archive(base: Path) -> bool:
 def _ensure_gitignored(project_dir: Path) -> None:
     """Add .agent_orchestrator/ and .workdoc.md to the project's .gitignore if not already present."""
     gitignore = project_dir / ".gitignore"
-    entries = [".agent_orchestrator/", ".workdoc.md"]
+    entries = [".agent_orchestrator/", f"{ARCHIVE_DIR_NAME}/", ".workdoc.md"]
     if gitignore.exists():
         content = gitignore.read_text(encoding="utf-8")
         existing_stripped = {line.strip() for line in content.splitlines()}
@@ -117,3 +118,29 @@ def ensure_state_root(project_dir: Path) -> Path:
     config_repo.save(config)
 
     return state_root
+
+
+def archive_state_root(project_dir: Path) -> Path | None:
+    """Archive the current runtime state root under a timestamped folder.
+
+    Args:
+        project_dir (Path): Project dir for this call.
+
+    Returns:
+        Path | None: Archive directory path when state existed, otherwise `None`.
+    """
+    state_root = project_dir / ".agent_orchestrator"
+    if not state_root.exists():
+        return None
+
+    archive_root = project_dir / ARCHIVE_DIR_NAME
+    archive_root.mkdir(parents=True, exist_ok=True)
+
+    stamp = _utc_stamp()
+    candidate = archive_root / f"state_{stamp}"
+    suffix = 1
+    while candidate.exists():
+        suffix += 1
+        candidate = archive_root / f"state_{stamp}_{suffix}"
+    state_root.rename(candidate)
+    return candidate

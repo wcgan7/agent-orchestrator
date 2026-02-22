@@ -9,8 +9,8 @@ import './styles/orchestrator.css'
 
 type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
 type CreateTab = 'task' | 'import'
-type TaskDetailTab = 'overview' | 'plan' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
-type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition'
+type TaskDetailTab = 'overview' | 'plan' | 'workdoc' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
+type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear'
 
 type TaskRecord = {
   id: string
@@ -39,6 +39,7 @@ type TaskRecord = {
   human_blocking_issues?: HumanBlockingIssue[]
   human_review_actions?: ReviewAction[]
   error?: string | null
+  timing_summary?: TaskTimingSummary | null
   execution_summary?: ExecutionSummary | null
   project_commands?: Record<string, Record<string, string>> | null
 }
@@ -67,6 +68,14 @@ type ExecutionSummary = {
   finished_at: string | null
   duration_seconds?: number | null
   steps: ExecutionStepSummary[]
+}
+
+type TaskTimingSummary = {
+  total_completed_seconds?: number | null
+  active_run_started_at?: string | null
+  is_running?: boolean
+  first_started_at?: string | null
+  last_finished_at?: string | null
 }
 
 type BoardResponse = {
@@ -337,6 +346,12 @@ type TaskPlanDocument = {
   committed_revision_id?: string | null
   revisions: PlanRevisionRecord[]
   active_refine_job?: PlanRefineJobRecord | null
+}
+
+type TaskWorkdocDocument = {
+  task_id: string
+  content: string
+  exists: boolean
 }
 
 const STORAGE_PROJECT = 'agent-orchestrator-project'
@@ -1061,6 +1076,22 @@ function formatDuration(seconds: number | null | undefined): string {
   return rm > 0 ? `${h}h ${rm}m` : `${h}h`
 }
 
+function taskTotalDurationSeconds(summary: TaskTimingSummary | null | undefined, nowMs: number): number | null {
+  if (!summary) return null
+  const totalCompleted = typeof summary.total_completed_seconds === 'number' && Number.isFinite(summary.total_completed_seconds)
+    ? Math.max(summary.total_completed_seconds, 0)
+    : 0
+  if (!summary.is_running || !summary.active_run_started_at) {
+    return totalCompleted
+  }
+  const started = new Date(summary.active_run_started_at).getTime()
+  if (Number.isNaN(started)) {
+    return totalCompleted
+  }
+  const activeSeconds = Math.max((nowMs - started) / 1000, 0)
+  return totalCompleted + activeSeconds
+}
+
 function inferProjectId(projectDir: string): string {
   const normalized = projectDir.trim().replace(/[\\/]+$/, '')
   if (!normalized) return ''
@@ -1389,8 +1420,12 @@ export default function App() {
   const [planningTaskId, setPlanningTaskId] = useState('')
   const [selectedTaskDetail, setSelectedTaskDetail] = useState<TaskRecord | null>(null)
   const [selectedTaskDetailLoading, setSelectedTaskDetailLoading] = useState(false)
+  const [taskDetailNowMs, setTaskDetailNowMs] = useState<number>(() => Date.now())
   const [selectedTaskPlan, setSelectedTaskPlan] = useState<TaskPlanDocument | null>(null)
   const [selectedTaskPlanJobs, setSelectedTaskPlanJobs] = useState<PlanRefineJobRecord[]>([])
+  const [selectedTaskWorkdoc, setSelectedTaskWorkdoc] = useState<TaskWorkdocDocument | null>(null)
+  const [selectedTaskWorkdocLoading, setSelectedTaskWorkdocLoading] = useState(false)
+  const [selectedTaskWorkdocError, setSelectedTaskWorkdocError] = useState('')
   const [selectedPlanRevisionId, setSelectedPlanRevisionId] = useState('')
   const [planManualContent, setPlanManualContent] = useState('')
   const [planManualFeedbackNote, setPlanManualFeedbackNote] = useState('')
@@ -1559,6 +1594,8 @@ export default function App() {
   const [settingsGateMedium, setSettingsGateMedium] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.medium))
   const [settingsGateLow, setSettingsGateLow] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.low))
   const [settingsDependencyPolicy, setSettingsDependencyPolicy] = useState(DEFAULT_SETTINGS.defaults.dependency_policy)
+  const settingsLoadedRef = useRef(false)
+  const shouldPrefillTaskProjectCommandsRef = useRef(false)
 
   const selectedTaskIdRef = useRef(selectedTaskId)
   const selectedImportJobIdRef = useRef(selectedImportJobId)
@@ -1607,6 +1644,9 @@ export default function App() {
     setRetryFromStep('')
     setShowAllActivity(false)
     setPlanTabMode('view')
+    setSelectedTaskWorkdoc(null)
+    setSelectedTaskWorkdocLoading(false)
+    setSelectedTaskWorkdocError('')
   }, [selectedTaskId])
 
   useEffect(() => {
@@ -1666,6 +1706,8 @@ export default function App() {
     } else {
       localStorage.removeItem(STORAGE_PROJECT)
     }
+    settingsLoadedRef.current = false
+    setSettingsProjectCommands('')
     void loadProjectIdentity()
   }, [projectDir])
 
@@ -1820,6 +1862,7 @@ export default function App() {
       setSettingsError(`Failed to load settings (${detail})`)
       applySettings(DEFAULT_SETTINGS)
     } finally {
+      settingsLoadedRef.current = true
       setSettingsLoading(false)
     }
   }
@@ -1828,6 +1871,19 @@ export default function App() {
     if (route !== 'settings' && route !== 'agents') return
     void loadSettings()
   }, [route, projectDir])
+
+  useEffect(() => {
+    if (!workOpen || createTab !== 'task') return
+    if (!shouldPrefillTaskProjectCommandsRef.current) return
+    if (newTaskProjectCommands.trim()) {
+      shouldPrefillTaskProjectCommandsRef.current = false
+      return
+    }
+    if (!settingsLoadedRef.current) return
+    shouldPrefillTaskProjectCommandsRef.current = false
+    if (!settingsProjectCommands.trim()) return
+    setNewTaskProjectCommands(settingsProjectCommands)
+  }, [workOpen, createTab, newTaskProjectCommands, settingsProjectCommands])
 
   useEffect(() => {
     const fetchModes = async () => {
@@ -1864,6 +1920,7 @@ export default function App() {
       const task = detail.task
       setSelectedTaskDetail(task)
       void loadTaskPlan(taskId)
+      void loadTaskWorkdoc(taskId)
       setEditTaskTitle(task.title || '')
       setEditTaskDescription(task.description || '')
       setEditTaskType(task.task_type || 'feature')
@@ -1882,9 +1939,48 @@ export default function App() {
       }
       setSelectedTaskDetail(null)
       setSelectedTaskPlan(null)
+      setSelectedTaskWorkdoc(null)
     } finally {
       if (requestSeq === taskDetailRequestSeqRef.current) {
         setSelectedTaskDetailLoading(false)
+      }
+    }
+  }
+
+  async function loadTaskWorkdoc(taskId: string): Promise<void> {
+    if (!taskId) {
+      setSelectedTaskWorkdoc(null)
+      setSelectedTaskWorkdocError('')
+      return
+    }
+    setSelectedTaskWorkdocLoading(true)
+    setSelectedTaskWorkdocError('')
+    try {
+      const payload = await requestJson<unknown>(buildApiUrl(`/api/tasks/${taskId}/workdoc`, projectDir))
+      if (selectedTaskIdRef.current !== taskId) {
+        return
+      }
+      const root = (payload && typeof payload === 'object') ? payload as Record<string, unknown> : {}
+      const content = typeof root.content === 'string' ? root.content : ''
+      setSelectedTaskWorkdoc({
+        task_id: String(root.task_id || taskId),
+        content,
+        exists: !!root.exists,
+      })
+    } catch (err) {
+      if (selectedTaskIdRef.current !== taskId) {
+        return
+      }
+      setSelectedTaskWorkdoc(null)
+      const detail = err instanceof Error ? err.message : ''
+      if (detail.includes('409 ')) {
+        setSelectedTaskWorkdocError('Workdoc is missing for this task.')
+      } else {
+        setSelectedTaskWorkdocError(toErrorMessage('Failed to load workdoc', err))
+      }
+    } finally {
+      if (selectedTaskIdRef.current === taskId) {
+        setSelectedTaskWorkdocLoading(false)
       }
     }
   }
@@ -1954,6 +2050,9 @@ export default function App() {
     if (!selectedTaskId) {
       setSelectedTaskPlan(null)
       setSelectedTaskPlanJobs([])
+      setSelectedTaskWorkdoc(null)
+      setSelectedTaskWorkdocLoading(false)
+      setSelectedTaskWorkdocError('')
       setSelectedPlanRevisionId('')
       setPlanActionMessage('')
       setPlanActionError('')
@@ -3038,6 +3137,58 @@ export default function App() {
     )
   }
 
+  async function deleteTask(taskId: string): Promise<void> {
+    if (!window.confirm('Delete this terminal task permanently?')) {
+      return
+    }
+    await runTaskMutation(
+      'delete',
+      async () => {
+        await requestJson<{ deleted: boolean; task_id: string }>(buildApiUrl(`/api/tasks/${taskId}`, projectDir), {
+          method: 'DELETE',
+        })
+        await reloadAll()
+        if (selectedTaskIdRef.current === taskId) {
+          modalDismissedRef.current = true
+          modalExplicitRef.current = false
+          setSelectedTaskId('')
+          setSelectedTaskDetail(null)
+          setSelectedTaskPlan(null)
+        }
+      },
+      {
+        successMessage: 'Task deleted.',
+        errorPrefix: 'Failed to delete task',
+      },
+    )
+  }
+
+  async function clearAllTasks(): Promise<void> {
+    if (!window.confirm('Clear all tasks? Existing runtime state will be archived to disk.')) {
+      return
+    }
+    await runTaskMutation(
+      'clear',
+      async () => {
+        const result = await requestJson<{ cleared: boolean; archived_to?: string; message?: string }>(
+          buildApiUrl('/api/tasks/clear', projectDir),
+          { method: 'POST' },
+        )
+        await reloadAll()
+        modalDismissedRef.current = true
+        modalExplicitRef.current = false
+        setSelectedTaskId('')
+        setSelectedTaskDetail(null)
+        setSelectedTaskPlan(null)
+        setTaskActionMessage(String(result.message || 'Cleared all tasks.'))
+      },
+      {
+        startMessage: 'Clearing all tasks...',
+        errorPrefix: 'Failed to clear tasks',
+      },
+    )
+  }
+
   function switchLogStep(step: string): void {
     const effective = step || ''
     setLogViewStep(effective)
@@ -3721,11 +3872,26 @@ export default function App() {
   )
   // Guard: if the Plan tab is selected but no longer visible, fall back to overview.
   const effectiveTaskDetailTab = (taskDetailTab === 'plan' && !showPlanTab) ? 'overview' : taskDetailTab
+  const selectedTaskTotalSeconds = taskTotalDurationSeconds(selectedTaskView?.timing_summary, taskDetailNowMs)
+
+  useEffect(() => {
+    const timingSummary = selectedTaskView?.timing_summary
+    if (!selectedTaskId || !timingSummary?.is_running || !timingSummary.active_run_started_at) return
+    setTaskDetailNowMs(Date.now())
+    const timer = window.setInterval(() => setTaskDetailNowMs(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [selectedTaskId, selectedTaskView?.id, selectedTaskView?.timing_summary?.is_running, selectedTaskView?.timing_summary?.active_run_started_at])
 
   const taskDetailContent = selectedTaskView ? (
       <div className="detail-card">
         {selectedTaskDetailLoading ? <p className="field-label">Loading full task detail...</p> : null}
         <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}</p>
+        {selectedTaskTotalSeconds != null ? (
+          <p className="task-meta">
+            Total time taken: {formatDuration(selectedTaskTotalSeconds) || '0s'}
+            {selectedTaskView.timing_summary?.is_running ? ' · running' : ''}
+          </p>
+        ) : null}
         <div className="detail-tabs" role="tablist" aria-label="Task detail sections">
           <button
             className={`detail-tab ${effectiveTaskDetailTab === 'overview' ? 'is-active' : ''}`}
@@ -3743,6 +3909,13 @@ export default function App() {
               Plan
             </button>
           ) : null}
+          <button
+            className={`detail-tab ${taskDetailTab === 'workdoc' ? 'is-active' : ''}`}
+            aria-pressed={taskDetailTab === 'workdoc'}
+            onClick={() => setTaskDetailTab('workdoc')}
+          >
+            Workdoc
+          </button>
           <button
             className={`detail-tab ${taskDetailTab === 'logs' ? 'is-active' : ''}`}
             aria-pressed={taskDetailTab === 'logs'}
@@ -4124,6 +4297,20 @@ export default function App() {
             </div>
           )
         })() : null}
+        {taskDetailTab === 'workdoc' ? (
+          <div className="task-detail-section-body">
+            {selectedTaskWorkdocLoading ? <p className="field-label">Loading workdoc...</p> : null}
+            {selectedTaskWorkdocError ? <p className="field-label" style={{ color: 'var(--color-danger, #d9534f)' }}>{selectedTaskWorkdocError}</p> : null}
+            {!selectedTaskWorkdocLoading && !selectedTaskWorkdocError && selectedTaskWorkdoc?.content ? (
+              <div className="preview-box">
+                <RenderedMarkdown content={selectedTaskWorkdoc.content} className="plan-content-field" />
+              </div>
+            ) : null}
+            {!selectedTaskWorkdocLoading && !selectedTaskWorkdocError && !selectedTaskWorkdoc?.content ? (
+              <p className="empty">No workdoc content available.</p>
+            ) : null}
+          </div>
+        ) : null}
         {taskDetailTab === 'configuration' ? (
           <div className="task-detail-section-body">
               <div className="form-stack">
@@ -4512,8 +4699,15 @@ export default function App() {
       <section className="panel">
         <header className="panel-head">
           <h2>Board</h2>
-          <label className="switch-label"><input type="checkbox" role="switch" checked={boardCompact} onChange={() => setBoardCompact((v) => !v)} /> Compact</label>
+          <div className="inline-actions">
+            <label className="switch-label"><input type="checkbox" role="switch" checked={boardCompact} onChange={() => setBoardCompact((v) => !v)} /> Compact</label>
+            <button className="button button-danger" onClick={() => void clearAllTasks()} disabled={taskActionPending === 'clear'}>
+              {taskActionPending === 'clear' ? 'Clearing...' : 'Clear All Tasks'}
+            </button>
+          </div>
         </header>
+        {taskActionMessage ? <p className="field-label">{taskActionMessage}</p> : null}
+        {taskActionError ? <p className="error-banner">{taskActionError}</p> : null}
         <div className="board-grid">
           {boardColumns.map((column) => (
             <article className="board-col" key={column}>
@@ -5275,6 +5469,24 @@ export default function App() {
     )
   }
 
+  function openCreateWorkModal(tab: CreateTab = 'task', taskTypeOverride?: string): void {
+    setCreateTab(tab)
+    if (tab === 'task') {
+      shouldPrefillTaskProjectCommandsRef.current = true
+      if (taskTypeOverride) {
+        setNewTaskType(taskTypeOverride)
+      }
+      if (!newTaskProjectCommands.trim() && settingsProjectCommands.trim()) {
+        setNewTaskProjectCommands(settingsProjectCommands)
+        shouldPrefillTaskProjectCommandsRef.current = false
+      }
+      if (!settingsLoadedRef.current && !settingsLoading) {
+        void loadSettings()
+      }
+    }
+    setWorkOpen(true)
+  }
+
   function renderPlanning(): JSX.Element {
     const allTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => isPlanningTaskType(t.task_type))
     const planningTask = allTasks.find((t) => t.id === planningTaskId) || null
@@ -5307,9 +5519,7 @@ export default function App() {
     }
 
     function openCreatePlanTaskModal(): void {
-      setCreateTab('task')
-      setNewTaskType('initiative_plan')
-      setWorkOpen(true)
+      openCreateWorkModal('task', 'initiative_plan')
     }
 
     return (
@@ -5581,7 +5791,7 @@ export default function App() {
             <option value={ADD_REPO_VALUE}>Add repo...</option>
           </select>
           <button className="button" onClick={() => void reloadAll()} disabled={loading}>Refresh</button>
-          <button className="button button-primary" onClick={() => setWorkOpen(true)}>Create Work</button>
+          <button className="button button-primary" onClick={() => openCreateWorkModal()}>Create Work</button>
         </div>
       </header>
 
@@ -5723,10 +5933,16 @@ export default function App() {
                   </>
                 ) : null}
                 {taskStatus === 'cancelled' ? (
-                  <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'backlog')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'backlog' ? 'Moving...' : 'Move to Backlog'}</button>
+                  <>
+                    <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'backlog')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'backlog' ? 'Moving...' : 'Move to Backlog'}</button>
+                    <button className="button button-danger" onClick={() => void deleteTask(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'delete' ? 'Deleting...' : 'Delete'}</button>
+                  </>
                 ) : null}
                 {taskStatus === 'done' && showViewPlan ? (
                   <button className="button button-primary" onClick={() => { setPlanningTaskId(selectedTaskView.id); handleRouteChange('planning'); modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') }}>View Plan</button>
+                ) : null}
+                {taskStatus === 'done' ? (
+                  <button className="button button-danger" onClick={() => void deleteTask(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'delete' ? 'Deleting...' : 'Delete'}</button>
                 ) : null}
                 <span className="foot-spacer" />
                 <button className="button" onClick={() => { modalDismissedRef.current = true; modalExplicitRef.current = false; setSelectedTaskId('') }}>Close</button>
@@ -5779,23 +5995,35 @@ export default function App() {
                       </option>
                     ))}
                   </select>
-                  <label className="field-label">Priority</label>
-                  <div className="toggle-group" role="group" aria-label="Task priority">
-                    {['P0', 'P1', 'P2', 'P3'].map((priority) => (
-                      <button
-                        key={priority}
-                        type="button"
-                        className={`toggle-button ${newTaskPriority === priority ? 'is-active' : ''}`}
-                        aria-pressed={newTaskPriority === priority}
-                        onClick={() => setNewTaskPriority(priority)}
-                      >
-                        {priority}
-                      </button>
-                    ))}
-                  </div>
+                  <label className="field-label" htmlFor="task-project-commands">Project commands override (optional)</label>
+                  <textarea
+                    id="task-project-commands"
+                    className="json-editor-textarea"
+                    rows={4}
+                    value={newTaskProjectCommands}
+                    onChange={(event) => {
+                      shouldPrefillTaskProjectCommandsRef.current = false
+                      setNewTaskProjectCommands(event.target.value)
+                    }}
+                    placeholder={PROJECT_COMMANDS_EXAMPLE}
+                  />
                   <details className="advanced-fields">
                     <summary>Advanced</summary>
                     <div className="form-stack advanced-fields-body">
+                      <label className="field-label">Priority</label>
+                      <div className="toggle-group" role="group" aria-label="Task priority">
+                        {['P0', 'P1', 'P2', 'P3'].map((priority) => (
+                          <button
+                            key={priority}
+                            type="button"
+                            className={`toggle-button ${newTaskPriority === priority ? 'is-active' : ''}`}
+                            aria-pressed={newTaskPriority === priority}
+                            onClick={() => setNewTaskPriority(priority)}
+                          >
+                            {priority}
+                          </button>
+                        ))}
+                      </div>
                       <label className="field-label">Approval mode</label>
                       <div className="toggle-group" role="group" aria-label="Task approval mode">
                         <button
@@ -5880,15 +6108,6 @@ export default function App() {
                         value={newTaskWorkerModel}
                         onChange={(event) => setNewTaskWorkerModel(event.target.value)}
                         placeholder="gpt-5-codex"
-                      />
-                      <label className="field-label" htmlFor="task-project-commands">Project commands override (optional)</label>
-                      <textarea
-                        id="task-project-commands"
-                        className="json-editor-textarea"
-                        rows={4}
-                        value={newTaskProjectCommands}
-                        onChange={(event) => setNewTaskProjectCommands(event.target.value)}
-                        placeholder={PROJECT_COMMANDS_EXAMPLE}
                       />
                       <label className="field-label" htmlFor="task-metadata">Metadata JSON object (optional)</label>
                       <textarea

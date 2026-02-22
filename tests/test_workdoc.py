@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from agent_orchestrator.runtime.domain.models import ReviewCycle, ReviewFinding, Task
+from agent_orchestrator.runtime.domain.models import ReviewCycle, ReviewFinding, RunRecord, Task, now_iso
 from agent_orchestrator.runtime.events.bus import EventBus
 from agent_orchestrator.runtime.orchestrator.service import OrchestratorService
 from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter
@@ -809,8 +809,27 @@ def test_get_workdoc_returns_content(service: OrchestratorService, task: Task, p
     assert task.title in result["content"]
 
 
-def test_get_workdoc_returns_not_exists(service: OrchestratorService, task: Task) -> None:
-    result = service.get_workdoc(task.id)
-    assert result["task_id"] == task.id
-    assert result["exists"] is False
-    assert result["content"] is None
+def test_get_workdoc_raises_when_missing(service: OrchestratorService, task: Task) -> None:
+    with pytest.raises(FileNotFoundError):
+        service.get_workdoc(task.id)
+
+
+def test_run_non_review_step_blocks_when_workdoc_missing(
+    service: OrchestratorService,
+    task: Task,
+    project_dir: Path,
+) -> None:
+    service._init_workdoc(task, project_dir)
+    service._workdoc_canonical_path(task.id).unlink()
+    run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), branch=None)
+
+    ok = service._run_non_review_step(task, run, "implement", attempt=1)
+
+    assert ok is False
+    updated_task = service.container.tasks.get(task.id)
+    assert updated_task is not None
+    assert updated_task.status == "blocked"
+    assert updated_task.error and "Missing required workdoc" in updated_task.error
+    updated_run = service.container.runs.get(run.id)
+    assert updated_run is not None
+    assert updated_run.status == "blocked"

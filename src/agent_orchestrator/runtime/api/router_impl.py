@@ -34,7 +34,12 @@ from ..terminal.service import TerminalService
 
 
 class CreateTaskRequest(BaseModel):
-    """Payload for creating a new task."""
+    """Request body for task creation, including optional pipeline overrides.
+
+    Supports classifier metadata fields used when the client requests
+    ``task_type="auto"`` and wants the server to persist provenance for the
+    selected pipeline.
+    """
     title: str
     description: str = ""
     task_type: str = "feature"
@@ -91,29 +96,29 @@ class UpdateTaskRequest(BaseModel):
 
 
 class TransitionRequest(BaseModel):
-    """Payload for transitioning a task status."""
+    """Request body for explicit task status transitions."""
     status: str
 
 
 class AddDependencyRequest(BaseModel):
-    """Payload for adding a task dependency edge."""
+    """Request body for a single ``depends_on`` relationship."""
     depends_on: str
 
 
 class PrdPreviewRequest(BaseModel):
-    """Payload for PRD preview ingestion."""
+    """Request body for parsing PRD text before any task records are written."""
     title: Optional[str] = None
     content: str
     default_priority: str = "P2"
 
 
 class PrdCommitRequest(BaseModel):
-    """Payload for committing a previously previewed PRD import job."""
+    """Request body selecting a staged PRD preview job to persist as tasks."""
     job_id: str
 
 
 class StartTerminalSessionRequest(BaseModel):
-    """Payload for starting an interactive terminal session."""
+    """Request body for opening a terminal session with bounded PTY dimensions."""
     cols: Optional[int] = Field(default=120, ge=2, le=500)
     rows: Optional[int] = Field(default=36, ge=2, le=300)
     shell: Optional[str] = None
@@ -125,18 +130,21 @@ class TerminalInputRequest(BaseModel):
 
 
 class TerminalResizeRequest(BaseModel):
-    """Payload for resizing a terminal PTY window."""
+    """Request body for updating a terminal PTY size within safety bounds."""
     cols: int = Field(ge=2, le=500)
     rows: int = Field(ge=2, le=300)
 
 
 class StopTerminalSessionRequest(BaseModel):
-    """Payload for stopping a terminal session."""
+    """Request body for graceful or forceful terminal session shutdown."""
     signal: Literal["TERM", "KILL"] = "TERM"
 
 
 class PlanRefineRequest(BaseModel):
-    """Payload for queueing an asynchronous plan-refine job."""
+    """Request body for scheduling a plan refinement pass.
+
+    ``feedback`` is required so refinement jobs always include reviewer intent.
+    """
     base_revision_id: Optional[str] = None
     feedback: str
     instructions: Optional[str] = None
@@ -144,19 +152,19 @@ class PlanRefineRequest(BaseModel):
 
 
 class CommitPlanRequest(BaseModel):
-    """Payload for committing a specific plan revision."""
+    """Request body that promotes one plan revision to committed state."""
     revision_id: str
 
 
 class CreatePlanRevisionRequest(BaseModel):
-    """Payload for creating a manual plan revision."""
+    """Request body for a user-authored plan revision draft."""
     content: str
     parent_revision_id: Optional[str] = None
     feedback_note: Optional[str] = None
 
 
 class GenerateTasksRequest(BaseModel):
-    """Payload for generating child tasks from plan content."""
+    """Request body for deriving child tasks from committed or ad hoc plan text."""
     source: Optional[Literal["committed", "revision", "override", "latest"]] = None
     revision_id: Optional[str] = None
     plan_override: Optional[str] = None
@@ -164,31 +172,31 @@ class GenerateTasksRequest(BaseModel):
 
 
 class ApproveGateRequest(BaseModel):
-    """Payload for approving a pending human gate."""
+    """Request body for clearing a pending human gate on the active task."""
     gate: Optional[str] = None
 
 
 class OrchestratorControlRequest(BaseModel):
-    """Payload for orchestrator control actions."""
+    """Request body for runtime control actions such as pause/resume/stop."""
     action: str
 
 
 class OrchestratorSettingsRequest(BaseModel):
-    """Settings payload for orchestrator concurrency and policies."""
+    """Patch payload for orchestrator execution limits and automation policy."""
     concurrency: int = Field(2, ge=1, le=128)
     auto_deps: bool = True
     max_review_attempts: int = Field(10, ge=1, le=50)
 
 
 class AgentRoutingSettingsRequest(BaseModel):
-    """Settings payload for role-based agent routing."""
+    """Patch payload for mapping task roles to worker roles/providers."""
     default_role: str = "general"
     task_type_roles: dict[str, str] = Field(default_factory=dict)
     role_provider_overrides: dict[str, str] = Field(default_factory=dict)
 
 
 class WorkerProviderSettingsRequest(BaseModel):
-    """Settings payload for one worker provider definition."""
+    """Patch payload for one named worker provider backend definition."""
     type: str = "codex"
     command: Optional[str] = None
     reasoning_effort: Optional[str] = None
@@ -199,7 +207,7 @@ class WorkerProviderSettingsRequest(BaseModel):
 
 
 class WorkersSettingsRequest(BaseModel):
-    """Settings payload for worker defaults, health checks, and routing."""
+    """Patch payload for global worker defaults, routing, and heartbeat checks."""
     default: str = "codex"
     default_model: Optional[str] = None
     heartbeat_seconds: Optional[int] = Field(None, ge=1, le=3600)
@@ -236,7 +244,7 @@ class LanguageCommandsRequest(BaseModel):
 
 
 class ProjectSettingsRequest(BaseModel):
-    """Settings payload for project-specific command configuration."""
+    """Patch payload for project-level lint/test/typecheck command overrides."""
     commands: Optional[dict[str, LanguageCommandsRequest]] = None
 
 
@@ -250,25 +258,25 @@ class UpdateSettingsRequest(BaseModel):
 
 
 class SpawnAgentRequest(BaseModel):
-    """Payload for creating a new runtime agent record."""
+    """Request body for adding a runtime agent with optional provider override."""
     role: str = "general"
     capacity: int = 1
     override_provider: Optional[str] = None
 
 
 class ReviewActionRequest(BaseModel):
-    """Payload for human review approval/request-changes actions."""
+    """Request body for human review decisions, with optional guidance text."""
     guidance: Optional[str] = None
 
 
 class RetryTaskRequest(BaseModel):
-    """Payload for retrying a task from a chosen step."""
+    """Request body for retrying execution from an optional pipeline step."""
     guidance: Optional[str] = None
     start_from_step: Optional[str] = None
 
 
 class AddFeedbackRequest(BaseModel):
-    """Payload for posting reviewer feedback on a task."""
+    """Request body for storing structured reviewer feedback on a task."""
     task_id: str
     feedback_type: str = "general"
     priority: str = "should"
@@ -278,7 +286,7 @@ class AddFeedbackRequest(BaseModel):
 
 
 class AddCommentRequest(BaseModel):
-    """Payload for adding a threaded code comment."""
+    """Request body for creating a task-scoped threaded code discussion comment."""
     task_id: str
     file_path: str
     line_number: int = 0
@@ -417,20 +425,111 @@ def _iso_delta_seconds(start: str, end: str) -> Optional[float]:
         return None
 
 
+def _select_summary_run(task: Task, container: "Container") -> Any:
+    """Select the run record that best matches task terminal state."""
+    runs: list[Any] = []
+    for run_id in reversed(task.run_ids):
+        run = container.runs.get(run_id)
+        if run:
+            runs.append(run)
+    if not runs:
+        return None
+
+    latest = runs[0]
+    preferred_statuses = {
+        "done": {"done"},
+        "blocked": {"blocked", "interrupted", "cancelled", "error"},
+        "in_review": {"in_review"},
+    }.get(task.status, set())
+    for run in runs:
+        if run.status in preferred_statuses or run.finished_at:
+            return run
+    return latest
+
+
+def _reconcile_summary_run_status(task: Task, run: Any) -> str:
+    """Derive summary run status when run/task state are temporarily inconsistent."""
+    terminal_task_status = {"done", "blocked", "in_review"}
+    stale_run_status = {"in_progress", "running"}
+    run_status = str(getattr(run, "status", "") or "")
+    run_finished_at = getattr(run, "finished_at", None)
+    if task.status in terminal_task_status and run_status in stale_run_status and not run_finished_at:
+        return task.status
+    return run_status
+
+
+def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 timestamp string into a datetime value."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _build_task_timing_summary(task: Task, container: "Container") -> Optional[dict[str, Any]]:
+    """Build cumulative task timing data across run history."""
+    if not task.run_ids:
+        return None
+
+    total_completed_seconds = 0.0
+    first_started_at: Optional[datetime] = None
+    last_finished_at: Optional[datetime] = None
+    active_run_started_at: Optional[datetime] = None
+    seen_run = False
+
+    for run_id in task.run_ids:
+        run = container.runs.get(run_id)
+        if run is None:
+            continue
+        seen_run = True
+
+        started = _parse_iso_timestamp(run.started_at)
+        finished = _parse_iso_timestamp(run.finished_at)
+
+        if started is not None and (first_started_at is None or started < first_started_at):
+            first_started_at = started
+
+        if finished is not None and (last_finished_at is None or finished > last_finished_at):
+            last_finished_at = finished
+
+        if run.status == "in_progress" and started is not None:
+            active_run_started_at = started
+            continue
+
+        if started is not None and finished is not None:
+            total_completed_seconds += max((finished - started).total_seconds(), 0.0)
+
+    if not seen_run:
+        return None
+
+    return {
+        "total_completed_seconds": total_completed_seconds,
+        "active_run_started_at": active_run_started_at.isoformat() if active_run_started_at else None,
+        "is_running": active_run_started_at is not None,
+        "first_started_at": first_started_at.isoformat() if first_started_at else None,
+        "last_finished_at": last_finished_at.isoformat() if last_finished_at else None,
+    }
+
+
 def _build_execution_summary(task: Task, container: "Container") -> Optional[dict[str, Any]]:
-    """Build execution summary from the latest RunRecord's step data."""
+    """Build API-safe execution summary for terminal or in-review tasks.
+
+    The summary collapses run step logs into stable fields consumed by the UI,
+    skipping internal-only entries such as skipped steps.
+    """
     if task.status not in ("in_review", "blocked", "done"):
         return None
     if not task.run_ids:
         return None
-    # Find the latest run
-    run = None
-    for run_id in reversed(task.run_ids):
-        run = container.runs.get(run_id)
-        if run:
-            break
+    run = _select_summary_run(task, container)
     if not run or not run.steps:
         return None
+    run_status = _reconcile_summary_run_status(task, run)
     steps: list[dict[str, Any]] = []
     for step_data in run.steps:
         if not isinstance(step_data, dict):
@@ -460,13 +559,15 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
         "blocked": "Blocked",
         "done": "Completed",
         "error": "Failed",
+        "interrupted": "Interrupted",
+        "cancelled": "Cancelled",
         "running": "Running",
     }
-    run_summary = status_labels.get(run.status) or status_labels.get(task.status) or run.status
+    run_summary = status_labels.get(run_status) or status_labels.get(task.status) or run_status
     run_duration = _iso_delta_seconds(run.started_at, run.finished_at) if run.started_at and run.finished_at else None
     return {
         "run_id": run.id,
-        "run_status": run.status,
+        "run_status": run_status,
         "run_summary": run_summary,
         "started_at": run.started_at,
         "finished_at": run.finished_at,
@@ -482,6 +583,9 @@ def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[s
     raw_actions = metadata.get("human_review_actions")
     payload["human_review_actions"] = list(raw_actions) if isinstance(raw_actions, list) else []
     if container is not None:
+        timing_summary = _build_task_timing_summary(task, container)
+        if timing_summary is not None:
+            payload["timing_summary"] = timing_summary
         summary = _build_execution_summary(task, container)
         if summary is not None:
             payload["execution_summary"] = summary

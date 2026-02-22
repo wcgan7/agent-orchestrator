@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import datetime
 from typing import Any, Optional, cast
 
 from fastapi import APIRouter, HTTPException, Query
@@ -17,6 +18,7 @@ from ..domain.models import (
     TaskStatus,
     now_iso,
 )
+from ..storage.bootstrap import archive_state_root, ensure_state_root
 from .deps import RouteDeps
 from . import router_impl as impl
 
@@ -44,6 +46,63 @@ _read_from_offset = impl._read_from_offset
 _read_tail = impl._read_tail
 _safe_state_path = impl._safe_state_path
 _task_payload = impl._task_payload
+
+
+def _timestamp_sort_value(value: Any, *, descending: bool) -> float:
+    """Convert ISO timestamps into sortable numeric values."""
+    raw = str(value or "").strip()
+    if not raw:
+        return float("inf")
+    normalized = raw[:-1] + "+00:00" if raw.endswith("Z") else raw
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return float("inf")
+    stamp = parsed.timestamp()
+    return -stamp if descending else stamp
+
+
+def _board_item_sort_key(status: str, item: dict[str, Any]) -> tuple[Any, ...]:
+    """Return status-aware sort keys for Kanban board columns."""
+    priority = _priority_rank(str(item.get("priority") or "P3"))
+    created_at = _timestamp_sort_value(item.get("created_at"), descending=False)
+    updated_at_asc = _timestamp_sort_value(item.get("updated_at"), descending=False)
+    updated_at_desc = _timestamp_sort_value(item.get("updated_at"), descending=True)
+    task_id = str(item.get("id") or "")
+    if status in {"backlog", "queued"}:
+        return (priority, created_at, updated_at_asc, task_id)
+    if status == "in_progress":
+        return (priority, updated_at_desc, created_at, task_id)
+    if status == "in_review":
+        return (priority, updated_at_asc, created_at, task_id)
+    if status == "blocked":
+        return (priority, updated_at_desc, created_at, task_id)
+    if status == "done":
+        return (updated_at_desc, priority, created_at, task_id)
+    if status == "cancelled":
+        return (updated_at_desc, priority, created_at, task_id)
+    return (priority, created_at, updated_at_asc, task_id)
+
+
+def _remove_task_relationship_refs(*, task_id: str, container: Any) -> None:
+    """Remove references to a deleted task from all remaining tasks."""
+    for existing in container.tasks.list():
+        changed = False
+        if task_id in existing.blocked_by:
+            existing.blocked_by = [dep_id for dep_id in existing.blocked_by if dep_id != task_id]
+            changed = True
+        if task_id in existing.blocks:
+            existing.blocks = [dep_id for dep_id in existing.blocks if dep_id != task_id]
+            changed = True
+        if existing.parent_id == task_id:
+            existing.parent_id = None
+            changed = True
+        if task_id in existing.children_ids:
+            existing.children_ids = [child_id for child_id in existing.children_ids if child_id != task_id]
+            changed = True
+        if changed:
+            existing.updated_at = now_iso()
+            container.tasks.upsert(existing)
 
 
 def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
@@ -224,9 +283,38 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         }
         for task in container.tasks.list():
             columns.setdefault(task.status, []).append(_task_payload(task))
-        for key, items in columns.items():
-            items.sort(key=lambda x: (_priority_rank(str(x.get("priority") or "P3")), str(x.get("created_at") or "")))
+        for status, items in columns.items():
+            items.sort(key=lambda item: _board_item_sort_key(status, item))
         return {"columns": columns}
+
+    @router.post("/tasks/clear")
+    async def clear_tasks(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Clear all tasks by archiving runtime state and reinitializing storage.
+
+        Args:
+            project_dir: Optional project directory used to resolve runtime state.
+
+        Returns:
+            A payload indicating clear status and archive destination path.
+        """
+        container, bus, orchestrator = deps.ctx(project_dir)
+        # Pause intake and stop scheduler/workers before mutating state files.
+        orchestrator.control("pause")
+        orchestrator.shutdown(timeout=10.0)
+
+        archived_to = archive_state_root(container.project_dir)
+        ensure_state_root(container.project_dir)
+        deps.job_store.clear()
+        archive_path = str(archived_to) if archived_to else ""
+        message = (
+            f"Cleared all tasks. Archived previous runtime state to {archive_path}."
+            if archive_path
+            else "Cleared all tasks. No existing runtime state archive was needed."
+        )
+        payload = {"archived_to": archive_path, "message": message, "cleared_at": now_iso()}
+        bus.emit(channel="tasks", event_type="tasks.cleared", entity_id=container.project_id, payload=payload)
+        bus.emit(channel="notifications", event_type="tasks.cleared", entity_id=container.project_id, payload=payload)
+        return {"cleared": True, **payload}
 
     @router.get("/tasks/execution-order")
     async def execution_order(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -268,6 +356,33 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         return {"task": _task_payload(task, container)}
+
+    @router.delete("/tasks/{task_id}")
+    async def delete_task(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Delete a terminal task and clean stale task relationship references.
+
+        Args:
+            task_id: Identifier of the task to delete.
+            project_dir: Optional project directory used to resolve runtime state.
+
+        Returns:
+            A payload indicating successful deletion.
+
+        Raises:
+            HTTPException: If the task is missing or non-terminal.
+        """
+        container, bus, _ = deps.ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+        if task.status not in {"done", "cancelled"}:
+            raise HTTPException(status_code=400, detail="Only terminal tasks (done/cancelled) can be deleted.")
+
+        _remove_task_relationship_refs(task_id=task_id, container=container)
+        if not container.tasks.delete(task_id):
+            raise HTTPException(status_code=404, detail="Task not found")
+        bus.emit(channel="tasks", event_type="task.deleted", entity_id=task_id, payload={"status": task.status})
+        return {"deleted": True, "task_id": task_id}
 
     @router.get("/tasks/{task_id}/diff")
     async def get_task_diff(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -822,7 +937,10 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         orchestrator = deps.resolve_orchestrator(project_dir)
-        return orchestrator.get_workdoc(task_id)
+        try:
+            return orchestrator.get_workdoc(task_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @router.get("/tasks/{task_id}/plan")
     async def get_task_plan(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:

@@ -138,6 +138,28 @@ Returns board columns keyed by status.
 Columns:
 - `backlog`, `queued`, `in_progress`, `in_review`, `blocked`, `done`, `cancelled`
 
+Column ordering:
+- `backlog`: priority (`P0` first), then oldest `created_at`
+- `queued`: priority (`P0` first), then oldest `created_at`
+- `in_progress`: priority (`P0` first), then most recently updated
+- `in_review`: priority (`P0` first), then oldest `updated_at`
+- `blocked`: priority (`P0` first), then most recently updated
+- `done`: most recently updated first (newest completed first), then priority, then oldest `created_at`
+- `cancelled`: most recently updated first
+
+Notes:
+- `done` recency is based on task `updated_at`.
+- Missing or malformed timestamps are sorted last with deterministic ID tie-breakers.
+
+### `POST /api/tasks/clear`
+Clear all board tasks by archiving runtime state and reinitializing empty state.
+
+Response:
+- `cleared` (`true` on success)
+- `archived_to` (absolute archive directory path; empty when no prior state existed)
+- `message` (user-facing archive/clear summary)
+- `cleared_at` (ISO timestamp)
+
 ### `GET /api/tasks/execution-order`
 Returns dependency-aware batches for non-terminal tasks.
 
@@ -147,6 +169,20 @@ Response:
 
 ### `GET /api/tasks/{task_id}`
 Fetch one task. Returns `404` if not found.
+
+Additive timing fields in task payload:
+- `timing_summary.total_completed_seconds`: Sum of completed run durations in seconds.
+- `timing_summary.active_run_started_at`: ISO timestamp of current in-progress run start, when present.
+- `timing_summary.is_running`: `true` when an active run is in progress.
+- `timing_summary.first_started_at`: Earliest valid run start timestamp in run history.
+- `timing_summary.last_finished_at`: Latest valid run finish timestamp in run history.
+
+### `DELETE /api/tasks/{task_id}`
+Delete a task only when it is terminal (`done` or `cancelled`).
+
+Behavior:
+- Returns `400` for non-terminal statuses.
+- Cleans references from remaining tasks (`blocked_by`, `blocks`, `parent_id`, `children_ids`).
 
 ### `PATCH /api/tasks/{task_id}`
 Patch mutable fields.
@@ -211,6 +247,18 @@ Remove inferred dependency metadata and inferred blocker links for a task.
 
 ### `GET /api/tasks/{task_id}/workdoc`
 Return task work document payload.
+
+Behavior:
+- Reads the canonical orchestrator workdoc for the task.
+- Returns `409 Conflict` when the canonical workdoc is missing (`Missing required workdoc for task {task_id}`).
+
+Response:
+- `task_id`
+- `content` (markdown text)
+- `exists` (`true` when returned)
+
+UI usage:
+- Task detail exposes a **Workdoc** panel that renders `content` as markdown.
 
 ### `GET /api/tasks/{task_id}/plan`
 Return iterative plan document, including revisions and active refine job.

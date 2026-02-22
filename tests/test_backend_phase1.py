@@ -5,10 +5,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+import yaml
 
 from agent_orchestrator.server.api import create_app
 from agent_orchestrator.runtime.orchestrator import DefaultWorkerAdapter
-from agent_orchestrator.runtime.domain.models import Task
+from agent_orchestrator.runtime.domain.models import RunRecord, Task, now_iso
 from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 from agent_orchestrator.runtime.storage.bootstrap import ensure_state_root
 from agent_orchestrator.runtime.storage.container import Container
@@ -258,6 +259,181 @@ def test_create_task_drops_invalid_classifier_metadata_for_manual_task(tmp_path:
         assert "classifier_reason" not in metadata
         assert "was_user_override" not in metadata
         assert metadata["final_pipeline_id"] == "feature"
+
+
+def test_tasks_board_uses_status_aware_ordering(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        seeded = {
+            "backlog_high": client.post("/api/tasks", json={"title": "Backlog high", "priority": "P1"}).json()["task"]["id"],
+            "backlog_urgent": client.post("/api/tasks", json={"title": "Backlog urgent", "priority": "P0"}).json()["task"]["id"],
+            "in_progress_old": client.post("/api/tasks", json={"title": "In progress old", "priority": "P1"}).json()["task"]["id"],
+            "in_progress_new": client.post("/api/tasks", json={"title": "In progress new", "priority": "P1"}).json()["task"]["id"],
+            "in_review_old": client.post("/api/tasks", json={"title": "In review old", "priority": "P1"}).json()["task"]["id"],
+            "in_review_new": client.post("/api/tasks", json={"title": "In review new", "priority": "P1"}).json()["task"]["id"],
+            "blocked_old": client.post("/api/tasks", json={"title": "Blocked old", "priority": "P1"}).json()["task"]["id"],
+            "blocked_new": client.post("/api/tasks", json={"title": "Blocked new", "priority": "P1"}).json()["task"]["id"],
+            "done_old": client.post("/api/tasks", json={"title": "Done old", "priority": "P2"}).json()["task"]["id"],
+            "done_new": client.post("/api/tasks", json={"title": "Done new", "priority": "P3"}).json()["task"]["id"],
+            "done_p0": client.post("/api/tasks", json={"title": "Done p0", "priority": "P0"}).json()["task"]["id"],
+            "done_p1": client.post("/api/tasks", json={"title": "Done p1", "priority": "P1"}).json()["task"]["id"],
+            "cancelled_old": client.post("/api/tasks", json={"title": "Cancelled old", "priority": "P1"}).json()["task"]["id"],
+            "cancelled_new": client.post("/api/tasks", json={"title": "Cancelled new", "priority": "P1"}).json()["task"]["id"],
+        }
+        tasks_path = tmp_path / ".agent_orchestrator" / "tasks.yaml"
+        payload = yaml.safe_load(tasks_path.read_text(encoding="utf-8")) or {}
+        records = payload.get("tasks") or []
+        by_id = {str(item.get("id")): item for item in records if isinstance(item, dict)}
+
+        for task_id, fields in {
+            seeded["backlog_high"]: {
+                "status": "backlog",
+                "created_at": "2026-01-02T00:00:00+00:00",
+                "updated_at": "2026-01-02T00:00:00+00:00",
+            },
+            seeded["backlog_urgent"]: {
+                "status": "backlog",
+                "created_at": "2026-01-10T00:00:00+00:00",
+                "updated_at": "2026-01-10T00:00:00+00:00",
+            },
+            seeded["in_progress_old"]: {
+                "status": "in_progress",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-05T00:00:00+00:00",
+            },
+            seeded["in_progress_new"]: {
+                "status": "in_progress",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-06T00:00:00+00:00",
+            },
+            seeded["in_review_old"]: {
+                "status": "in_review",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-05T00:00:00+00:00",
+            },
+            seeded["in_review_new"]: {
+                "status": "in_review",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-06T00:00:00+00:00",
+            },
+            seeded["blocked_old"]: {
+                "status": "blocked",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-03T00:00:00+00:00",
+            },
+            seeded["blocked_new"]: {
+                "status": "blocked",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-04T00:00:00+00:00",
+            },
+            seeded["done_old"]: {
+                "status": "done",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-05T00:00:00+00:00",
+            },
+            seeded["done_new"]: {
+                "status": "done",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-07T00:00:00+00:00",
+            },
+            seeded["done_p0"]: {
+                "status": "done",
+                "created_at": "2026-01-02T00:00:00+00:00",
+                "updated_at": "2026-01-06T00:00:00+00:00",
+            },
+            seeded["done_p1"]: {
+                "status": "done",
+                "created_at": "2026-01-03T00:00:00+00:00",
+                "updated_at": "2026-01-06T00:00:00+00:00",
+            },
+            seeded["cancelled_old"]: {
+                "status": "cancelled",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-02T00:00:00+00:00",
+            },
+            seeded["cancelled_new"]: {
+                "status": "cancelled",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-03T00:00:00+00:00",
+            },
+        }.items():
+            assert task_id in by_id
+            by_id[task_id].update(fields)
+
+        tasks_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+        board = client.get("/api/tasks/board")
+        assert board.status_code == 200
+        columns = board.json()["columns"]
+
+        assert [item["id"] for item in columns["backlog"]] == [seeded["backlog_urgent"], seeded["backlog_high"]]
+        assert [item["id"] for item in columns["in_progress"]] == [seeded["in_progress_new"], seeded["in_progress_old"]]
+        assert [item["id"] for item in columns["in_review"]] == [seeded["in_review_old"], seeded["in_review_new"]]
+        assert [item["id"] for item in columns["blocked"]] == [seeded["blocked_new"], seeded["blocked_old"]]
+        assert [item["id"] for item in columns["done"]] == [
+            seeded["done_new"],
+            seeded["done_p0"],
+            seeded["done_p1"],
+            seeded["done_old"],
+        ]
+        assert [item["id"] for item in columns["cancelled"]] == [seeded["cancelled_new"], seeded["cancelled_old"]]
+
+
+def test_tasks_board_sorting_is_deterministic_for_ties_and_missing_timestamps(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        done_new = client.post("/api/tasks", json={"title": "Done with timestamp", "priority": "P2"}).json()["task"]["id"]
+        done_bad_a = client.post("/api/tasks", json={"title": "Done malformed A", "priority": "P2"}).json()["task"]["id"]
+        done_bad_b = client.post("/api/tasks", json={"title": "Done malformed B", "priority": "P2"}).json()["task"]["id"]
+        backlog_tie_a = client.post("/api/tasks", json={"title": "Backlog tie A", "priority": "P2"}).json()["task"]["id"]
+        backlog_tie_b = client.post("/api/tasks", json={"title": "Backlog tie B", "priority": "P2"}).json()["task"]["id"]
+
+        done_tie_ids = sorted([done_bad_a, done_bad_b])
+        backlog_tie_ids = sorted([backlog_tie_a, backlog_tie_b])
+
+        tasks_path = tmp_path / ".agent_orchestrator" / "tasks.yaml"
+        payload = yaml.safe_load(tasks_path.read_text(encoding="utf-8")) or {}
+        records = payload.get("tasks") or []
+        by_id = {str(item.get("id")): item for item in records if isinstance(item, dict)}
+
+        for task_id, fields in {
+            done_new: {
+                "status": "done",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-04T00:00:00+00:00",
+            },
+            done_bad_a: {
+                "status": "done",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "not-a-timestamp",
+            },
+            done_bad_b: {
+                "status": "done",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "not-a-timestamp",
+            },
+            backlog_tie_a: {
+                "status": "backlog",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+            backlog_tie_b: {
+                "status": "backlog",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            },
+        }.items():
+            assert task_id in by_id
+            by_id[task_id].update(fields)
+
+        tasks_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+        board = client.get("/api/tasks/board")
+        assert board.status_code == 200
+        columns = board.json()["columns"]
+
+        assert [item["id"] for item in columns["done"]] == [done_new, *done_tie_ids]
+        assert [item["id"] for item in columns["backlog"]] == backlog_tie_ids
 
 
 def test_terminal_session_is_singleton_per_project(tmp_path: Path) -> None:
@@ -594,6 +770,153 @@ def test_create_task_worker_model_round_trip(tmp_path: Path) -> None:
         assert loaded.json()["task"]["worker_model"] == "gpt-5-codex"
 
 
+def test_get_task_includes_timing_summary_for_completed_runs(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Timing complete runs"}).json()["task"]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        run_one = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-02-21T10:00:00Z",
+            finished_at="2026-02-21T10:00:30Z",
+        )
+        run_two = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-02-21T10:02:00Z",
+            finished_at="2026-02-21T10:03:00Z",
+        )
+        container.runs.upsert(run_one)
+        container.runs.upsert(run_two)
+        task.run_ids = [run_one.id, run_two.id]
+        container.tasks.upsert(task)
+
+        loaded = client.get(f"/api/tasks/{task.id}")
+        assert loaded.status_code == 200
+        timing = loaded.json()["task"]["timing_summary"]
+        assert timing["is_running"] is False
+        assert timing["active_run_started_at"] is None
+        assert timing["total_completed_seconds"] == 90.0
+        assert timing["first_started_at"] == "2026-02-21T10:00:00+00:00"
+        assert timing["last_finished_at"] == "2026-02-21T10:03:00+00:00"
+
+
+def test_get_task_timing_summary_keeps_completed_total_while_running(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Timing running run"}).json()["task"]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        completed = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-02-21T11:00:00Z",
+            finished_at="2026-02-21T11:01:00Z",
+        )
+        active = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at="2026-02-21T11:05:00Z",
+            finished_at=None,
+        )
+        container.runs.upsert(completed)
+        container.runs.upsert(active)
+        task.run_ids = [completed.id, active.id]
+        container.tasks.upsert(task)
+
+        loaded = client.get(f"/api/tasks/{task.id}")
+        assert loaded.status_code == 200
+        timing = loaded.json()["task"]["timing_summary"]
+        assert timing["is_running"] is True
+        assert timing["active_run_started_at"] == "2026-02-21T11:05:00+00:00"
+        assert timing["total_completed_seconds"] == 60.0
+        assert timing["first_started_at"] == "2026-02-21T11:00:00+00:00"
+        assert timing["last_finished_at"] == "2026-02-21T11:01:00+00:00"
+
+
+def test_get_task_timing_summary_ignores_malformed_timestamps(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Timing malformed"}).json()["task"]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        bad_completed = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="not-a-timestamp",
+            finished_at="2026-02-21T12:01:00Z",
+        )
+        bad_running = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at="bad-start",
+            finished_at=None,
+        )
+        container.runs.upsert(bad_completed)
+        container.runs.upsert(bad_running)
+        task.run_ids = [bad_completed.id, bad_running.id]
+        container.tasks.upsert(task)
+
+        loaded = client.get(f"/api/tasks/{task.id}")
+        assert loaded.status_code == 200
+        timing = loaded.json()["task"]["timing_summary"]
+        assert timing["is_running"] is False
+        assert timing["active_run_started_at"] is None
+        assert timing["total_completed_seconds"] == 0.0
+        assert timing["first_started_at"] is None
+        assert timing["last_finished_at"] == "2026-02-21T12:01:00+00:00"
+
+
+def test_get_task_timing_summary_handles_mixed_timezone_formats(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Timing mixed timezone formats"}).json()["task"]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        aware_run = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-02-21T10:00:00Z",
+            finished_at="2026-02-21T10:00:30+00:00",
+        )
+        naive_run = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-02-21T10:01:00",
+            finished_at="2026-02-21T10:02:00",
+        )
+        active_naive = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at="2026-02-21T10:03:00",
+            finished_at=None,
+        )
+        container.runs.upsert(aware_run)
+        container.runs.upsert(naive_run)
+        container.runs.upsert(active_naive)
+        task.run_ids = [aware_run.id, naive_run.id, active_naive.id]
+        container.tasks.upsert(task)
+
+        loaded = client.get(f"/api/tasks/{task.id}")
+        assert loaded.status_code == 200
+        timing = loaded.json()["task"]["timing_summary"]
+        assert timing["is_running"] is True
+        assert timing["active_run_started_at"] == "2026-02-21T10:03:00+00:00"
+        assert timing["total_completed_seconds"] == 90.0
+        assert timing["first_started_at"] == "2026-02-21T10:00:00+00:00"
+        assert timing["last_finished_at"] == "2026-02-21T10:02:00+00:00"
+
+
 def test_project_commands_settings_round_trip(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
@@ -707,6 +1030,82 @@ def test_state_machine_allows_and_rejects_expected_transitions(tmp_path: Path) -
         assert "Invalid transition" in invalid.text
 
 
+def test_delete_terminal_task_cleans_relationship_references(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+
+    task_to_delete = Task(title="Terminal delete target", status="done")
+    child = Task(title="Child task", status="done", parent_id=task_to_delete.id)
+    predecessor = Task(title="Predecessor", status="done", blocks=[task_to_delete.id], children_ids=[task_to_delete.id])
+    dependent = Task(title="Dependent", status="done", blocked_by=[task_to_delete.id])
+    parent_ref = Task(title="Parent ref", status="done", children_ids=[task_to_delete.id])
+
+    container.tasks.upsert(task_to_delete)
+    container.tasks.upsert(child)
+    container.tasks.upsert(predecessor)
+    container.tasks.upsert(dependent)
+    container.tasks.upsert(parent_ref)
+
+    with TestClient(app) as client:
+        resp = client.delete(f"/api/tasks/{task_to_delete.id}")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["deleted"] is True
+        assert payload["task_id"] == task_to_delete.id
+
+    fresh = Container(tmp_path)
+    assert fresh.tasks.get(task_to_delete.id) is None
+    assert fresh.tasks.get(child.id) is not None
+    assert fresh.tasks.get(child.id).parent_id is None
+    assert task_to_delete.id not in (fresh.tasks.get(predecessor.id).blocks or [])
+    assert task_to_delete.id not in (fresh.tasks.get(predecessor.id).children_ids or [])
+    assert task_to_delete.id not in (fresh.tasks.get(dependent.id).blocked_by or [])
+    assert task_to_delete.id not in (fresh.tasks.get(parent_ref.id).children_ids or [])
+
+
+def test_delete_non_terminal_task_rejected(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Queued task", "status": "queued"}).json()["task"]
+        resp = client.delete(f"/api/tasks/{created['id']}")
+        assert resp.status_code == 400
+        assert "Only terminal tasks" in resp.json()["detail"]
+
+
+def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Archive me", "status": "queued"}).json()["task"]
+
+        clear_resp = client.post("/api/tasks/clear")
+        assert clear_resp.status_code == 200
+        body = clear_resp.json()
+        assert body["cleared"] is True
+        archived_to = str(body["archived_to"] or "")
+        assert archived_to
+        assert "Archived previous runtime state to" in body["message"]
+
+        archived_path = Path(archived_to)
+        assert archived_path.exists()
+        assert archived_path.parent == tmp_path / ".agent_orchestrator_archive"
+        archived_tasks = (archived_path / "tasks.yaml").read_text(encoding="utf-8")
+        assert created["id"] in archived_tasks
+
+        board = client.get("/api/tasks/board")
+        assert board.status_code == 200
+        columns = board.json()["columns"]
+        assert columns["backlog"] == []
+        assert columns["queued"] == []
+        assert columns["in_progress"] == []
+        assert columns["in_review"] == []
+        assert columns["blocked"] == []
+        assert columns["done"] == []
+        assert columns["cancelled"] == []
+
+        fresh_tasks = (tmp_path / ".agent_orchestrator" / "tasks.yaml").read_text(encoding="utf-8")
+        assert created["id"] not in fresh_tasks
+
+
 def test_api_surfaces_human_blocking_issues_on_task_and_timeline(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
@@ -817,10 +1216,94 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
         approved = client.post(f"/api/review/{task['id']}/approve", json={})
         assert approved.status_code == 200
         assert approved.json()["task"]["status"] == "done"
+        execution_summary = approved.json()["task"].get("execution_summary") or {}
+        assert execution_summary.get("run_status") == "done"
         actions_after_approve = approved.json()["task"]["human_review_actions"]
         assert len(actions_after_approve) == 2
         assert actions_after_approve[0]["action"] == "request_changes"
         assert actions_after_approve[1]["action"] == "approve"
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        latest_run = None
+        task_after = container.tasks.get(task["id"])
+        assert task_after is not None
+        for run_id in reversed(task_after.run_ids):
+            latest_run = container.runs.get(run_id)
+            if latest_run:
+                break
+        assert latest_run is not None
+        assert latest_run.status == "done"
+        assert latest_run.finished_at is not None
+
+
+def test_task_execution_summary_prefers_terminal_run_for_done_task(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={"title": "Summary run selection", "status": "backlog", "approval_mode": "auto_approve"},
+        ).json()["task"]
+        run_resp = client.post(f"/api/tasks/{created['id']}/run")
+        assert run_resp.status_code == 200
+        assert run_resp.json()["task"]["status"] == "done"
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+        assert task.run_ids
+        completed_run = container.runs.get(task.run_ids[-1])
+        assert completed_run is not None
+        assert completed_run.status == "done"
+
+        stale_run = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at=now_iso(),
+            finished_at=None,
+            summary="Stale in-progress run",
+            steps=[{"step": "implement", "status": "ok", "summary": "stale step", "started_at": now_iso(), "ts": now_iso()}],
+        )
+        container.runs.upsert(stale_run)
+        task.run_ids.append(stale_run.id)
+        container.tasks.upsert(task)
+
+        task_detail = client.get(f"/api/tasks/{task.id}")
+        assert task_detail.status_code == 200
+        execution_summary = task_detail.json()["task"].get("execution_summary") or {}
+        assert execution_summary.get("run_id") == completed_run.id
+        assert execution_summary.get("run_status") == "done"
+
+
+def test_task_execution_summary_reconciles_single_stale_run_for_done_task(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={"title": "Single stale run", "status": "done", "approval_mode": "auto_approve"},
+        ).json()["task"]
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        stale_run = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at=now_iso(),
+            finished_at=None,
+            summary="Stale in-progress run",
+            steps=[{"step": "implement", "status": "ok", "summary": "stale step", "started_at": now_iso(), "ts": now_iso()}],
+        )
+        container.runs.upsert(stale_run)
+        task.status = "done"
+        task.run_ids = [stale_run.id]
+        container.tasks.upsert(task)
+
+        task_detail = client.get(f"/api/tasks/{task.id}")
+        assert task_detail.status_code == 200
+        execution_summary = task_detail.json()["task"].get("execution_summary") or {}
+        assert execution_summary.get("run_id") == stale_run.id
+        assert execution_summary.get("run_status") == "done"
 
 
 def test_get_task_plan(tmp_path: Path) -> None:
@@ -1196,18 +1679,15 @@ def test_get_workdoc_returns_content(tmp_path: Path) -> None:
         assert "Workdoc task" in data["content"]
 
 
-def test_get_workdoc_returns_not_exists(tmp_path: Path) -> None:
+def test_get_workdoc_returns_409_when_missing(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         task = client.post("/api/tasks", json={"title": "No workdoc"}).json()["task"]
         task_id = task["id"]
 
         resp = client.get(f"/api/tasks/{task_id}/workdoc")
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["task_id"] == task_id
-        assert data["exists"] is False
-        assert data["content"] is None
+        assert resp.status_code == 409
+        assert "Missing required workdoc" in resp.json()["detail"]
 
 
 def test_get_workdoc_404_for_unknown_task(tmp_path: Path) -> None:
