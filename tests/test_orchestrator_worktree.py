@@ -1092,15 +1092,17 @@ def test_orphan_cleanup_skips_preserved_branches(tmp_path: Path) -> None:
 
 
 def test_retry_after_preserved_branch(tmp_path: Path) -> None:
-    """When a task with a preserved_branch is retried, the old branch is
-    deleted so _create_worktree can create a fresh branch."""
-    call_count = {"review": 0}
+    """When a task with a preserved_branch is retried, the worktree is created
+    from the preserved branch so prior committed work carries forward."""
+    call_count = {"review": 0, "implement": 0}
 
     class PassOnSecondRunAdapter:
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
             wt = task.metadata.get("worktree_dir")
             if wt and step == "implement":
-                (Path(wt) / "output.py").write_text("# code\n")
+                call_count["implement"] += 1
+                # Write different content on each run so there are always new changes
+                (Path(wt) / "output.py").write_text(f"# code v{call_count['implement']}\n")
             if step == "review":
                 call_count["review"] += 1
                 if call_count["review"] <= 1:
@@ -1130,7 +1132,7 @@ def test_retry_after_preserved_branch(tmp_path: Path) -> None:
     assert result.status == "blocked"
     assert result.metadata.get("preserved_branch") == f"task-{task.id}"
 
-    # Retry — should clean up old branch and run fresh
+    # Retry — should reuse preserved branch and carry forward prior work
     task = container.tasks.get(task.id)
     assert task is not None
     task.status = "queued"
@@ -1140,3 +1142,63 @@ def test_retry_after_preserved_branch(tmp_path: Path) -> None:
     result = service.run_task(task.id)
     assert result.status == "done", f"Expected done but got {result.status}: {result.error}"
     assert "preserved_branch" not in result.metadata
+
+
+def test_retry_from_preserved_branch_no_new_uncommitted_changes(tmp_path: Path) -> None:
+    """When retrying from a preserved branch and retry_from_step causes
+    implement to be skipped, the 'No file changes' check must not block —
+    the branch already carries committed work ahead of the run branch."""
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult as SR
+
+    class NoopAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> SR:
+            return SR(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=NoopAdapter())
+
+    task = Task(
+        title="Skip-impl retry",
+        task_type="feature",
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+        pipeline_template=["plan", "implement", "verify", "commit"],
+    )
+    container.tasks.upsert(task)
+
+    # Manually create a preserved branch with committed work ahead of the
+    # run branch so we don't need a complex first-run failure scenario.
+    service._ensure_branch()
+    branch = f"task-{task.id}"
+    subprocess.run(
+        ["git", "checkout", "-b", branch],
+        cwd=container.project_dir,
+        check=True, capture_output=True, text=True,
+    )
+    (container.project_dir / "impl_output.py").write_text("# prior work\n")
+    subprocess.run(["git", "add", "-A"], cwd=container.project_dir, check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "commit", "-m", "prior implementation"],
+        cwd=container.project_dir,
+        check=True, capture_output=True, text=True,
+    )
+    # Switch back to run branch
+    subprocess.run(
+        ["git", "checkout", service._run_branch],
+        cwd=container.project_dir,
+        check=True, capture_output=True, text=True,
+    )
+
+    # Set up the task as if it was blocked with a preserved branch and
+    # retry_from_step=verify (skipping plan and implement).
+    task.status = "queued"
+    task.metadata["preserved_branch"] = branch
+    task.metadata["retry_from_step"] = "verify"
+    container.tasks.upsert(task)
+
+    # The retry creates a worktree from the preserved branch, skips plan
+    # and implement, runs verify (no-op), then reaches the commit step.
+    # The has_commits_ahead check detects prior committed work on the branch
+    # even though there are no new uncommitted changes.
+    result = service.run_task(task.id)
+    assert result.status == "done", f"Expected done but got {result.status}: {result.error}"

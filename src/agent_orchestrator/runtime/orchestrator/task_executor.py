@@ -79,18 +79,39 @@ class TaskExecutor:
         svc = self._service
         worktree_dir: Optional[Path] = None
         try:
-            old_preserved = task.metadata.pop("preserved_branch", None)
+            old_preserved = task.metadata.get("preserved_branch")
             if old_preserved:
-                subprocess.run(
-                    ["git", "branch", "-D", str(old_preserved)],
-                    cwd=svc.container.project_dir,
-                    capture_output=True,
-                    text=True,
-                )
+                # Try to create worktree from the preserved branch
+                try:
+                    worktree_dir = svc._create_worktree_from_branch(task, old_preserved)
+                except subprocess.CalledProcessError:
+                    # Clean up stale worktree dir that may have caused the failure.
+                    stale_dir = svc.container.state_root / "worktrees" / str(task.id)
+                    if stale_dir.exists():
+                        subprocess.run(
+                            ["git", "worktree", "remove", str(stale_dir), "--force"],
+                            cwd=svc.container.project_dir,
+                            capture_output=True,
+                            text=True,
+                        )
+                    # Retry from-branch after cleaning stale dir
+                    try:
+                        worktree_dir = svc._create_worktree_from_branch(task, old_preserved)
+                    except subprocess.CalledProcessError:
+                        # Branch truly missing or corrupted — fall back to fresh worktree
+                        subprocess.run(
+                            ["git", "branch", "-D", str(old_preserved)],
+                            cwd=svc.container.project_dir,
+                            capture_output=True,
+                            text=True,
+                        )
+                        worktree_dir = svc._create_worktree(task)
+                # Clear preserved metadata only after successful worktree creation
+                task.metadata.pop("preserved_branch", None)
                 task.metadata.pop("merge_conflict", None)
                 svc.container.tasks.upsert(task)
-
-            worktree_dir = svc._create_worktree(task)
+            else:
+                worktree_dir = svc._create_worktree(task)
             if worktree_dir:
                 task.metadata["worktree_dir"] = str(worktree_dir)
                 svc.container.tasks.upsert(task)
@@ -202,7 +223,7 @@ class TaskExecutor:
             if has_commit:
                 impl_dir = worktree_dir or svc.container.project_dir
                 svc._cleanup_workdoc_for_commit(impl_dir)
-                if not svc._has_uncommitted_changes(impl_dir):
+                if not svc._has_uncommitted_changes(impl_dir) and not svc._has_commits_ahead(impl_dir):
                     task.status = "blocked"
                     task.error = "No file changes detected after implementation"
                     task.current_step = last_phase1_step or "implement"
@@ -410,20 +431,33 @@ class TaskExecutor:
                 svc._cleanup_workdoc_for_commit(worktree_dir or svc.container.project_dir)
                 commit_sha = svc._commit_for_task(task, worktree_dir)
                 if not commit_sha:
+                    # No new commit was created — check if the branch already
+                    # carries prior committed work (e.g. from a preserved branch
+                    # retry).  If so, use the branch HEAD as the commit ref so
+                    # merge_and_cleanup can still merge it into the run branch.
                     commit_cwd = worktree_dir or svc.container.project_dir
-                    git_present = (commit_cwd / ".git").exists() or (svc.container.project_dir / ".git").exists()
-                    if git_present:
-                        task.status = "blocked"
-                        task.error = "Commit failed (no changes to commit)"
-                        svc.container.tasks.upsert(task)
-                        svc._finalize_run(task, run, status="blocked", summary="Blocked: commit produced no changes")
-                        svc.bus.emit(
-                            channel="tasks",
-                            event_type="task.blocked",
-                            entity_id=task.id,
-                            payload={"error": task.error},
+                    if svc._has_commits_ahead(commit_cwd):
+                        head_result = subprocess.run(
+                            ["git", "rev-parse", "HEAD"],
+                            cwd=commit_cwd,
+                            capture_output=True,
+                            text=True,
                         )
-                        return
+                        commit_sha = head_result.stdout.strip() if head_result.returncode == 0 else None
+                    if not commit_sha:
+                        git_present = (commit_cwd / ".git").exists() or (svc.container.project_dir / ".git").exists()
+                        if git_present:
+                            task.status = "blocked"
+                            task.error = "Commit failed (no changes to commit)"
+                            svc.container.tasks.upsert(task)
+                            svc._finalize_run(task, run, status="blocked", summary="Blocked: commit produced no changes")
+                            svc.bus.emit(
+                                channel="tasks",
+                                event_type="task.blocked",
+                                entity_id=task.id,
+                                payload={"error": task.error},
+                            )
+                            return
                 run.steps.append(
                     {
                         "step": "commit",
@@ -513,7 +547,7 @@ class TaskExecutor:
                 preserved = task.metadata.get("preserved_branch")
                 if not preserved:
                     try:
-                        if svc._has_uncommitted_changes(worktree_dir):
+                        if svc._has_uncommitted_changes(worktree_dir) or svc._has_commits_ahead(worktree_dir):
                             svc._preserve_worktree_work(task, worktree_dir)
                             preserved = task.metadata.get("preserved_branch")
                     except Exception:

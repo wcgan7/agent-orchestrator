@@ -737,6 +737,16 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         start_from = (body.start_from_step if body else None) or ""
         if start_from.strip():
             task.metadata["retry_from_step"] = start_from.strip()
+        elif task.current_step:
+            # Only auto-default to steps that exist in the pipeline or
+            # the special review/commit phases.  Synthetic steps like
+            # "implement_fix" are not in the template and would cause
+            # the retry-from logic to silently skip all phase-1 steps.
+            valid_restart = set(task.pipeline_template or []) | {"review", "commit"}
+            if task.current_step in valid_restart:
+                task.metadata["retry_from_step"] = task.current_step
+            else:
+                task.metadata.pop("retry_from_step", None)
         else:
             task.metadata.pop("retry_from_step", None)
         task.updated_at = now_iso()
