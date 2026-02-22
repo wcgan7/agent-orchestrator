@@ -522,6 +522,9 @@ class OrchestratorService:
     def _create_worktree(self, task: Task) -> Optional[Path]:
         return self._worktree_manager.create_worktree(task)
 
+    def _create_worktree_from_branch(self, task: Task, branch: str) -> Optional[Path]:
+        return self._worktree_manager.create_worktree_from_branch(task, branch)
+
     # ------------------------------------------------------------------
 
     def _pipeline_id_for_task(self, task: Task) -> str:
@@ -678,6 +681,10 @@ class OrchestratorService:
         Returns True on git failure (no repo, etc.) to avoid false blocking.
         """
         return self._worktree_manager.has_uncommitted_changes(cwd)
+
+    def _has_commits_ahead(self, cwd: Path) -> bool:
+        """Check whether cwd's HEAD has commits beyond the run branch."""
+        return self._worktree_manager.has_commits_ahead(cwd)
 
     def _preserve_worktree_work(self, task: Task, worktree_dir: Path) -> bool:
         """Commit agent edits in the worktree, remove the worktree but keep the branch.

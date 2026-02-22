@@ -44,6 +44,28 @@ class WorktreeManager:
         )
         return worktree_dir
 
+    def create_worktree_from_branch(self, task: Any, branch: str) -> Optional[Path]:
+        """Create a worktree by checking out an existing branch (no ``-b`` flag).
+
+        Used when retrying a task that has a preserved branch so that prior
+        committed work is carried forward into the new worktree.
+        """
+        svc = self._service
+        git_dir = svc.container.project_dir / ".git"
+        if not git_dir.exists():
+            return None
+        self.ensure_branch()
+        task_id = str(task.id)
+        worktree_dir = svc.container.state_root / "worktrees" / task_id
+        subprocess.run(
+            ["git", "worktree", "add", str(worktree_dir), branch],
+            cwd=svc.container.project_dir,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return worktree_dir
+
     def merge_and_cleanup(self, task: Any, worktree_dir: Path) -> None:
         """Merge task work into the run branch, then remove transient worktree.
 
@@ -322,6 +344,28 @@ class WorktreeManager:
             )
             return bool(result.stdout.strip())
         except subprocess.CalledProcessError:
+            return True
+
+    def has_commits_ahead(self, cwd: Path) -> bool:
+        """Return whether ``cwd``'s HEAD has commits beyond the run branch.
+
+        Used to detect prior committed work on a task branch (e.g. from a
+        preserved branch) even when there are no uncommitted changes.
+        """
+        svc = self._service
+        base_ref = svc._run_branch or "HEAD"
+        try:
+            result = subprocess.run(
+                ["git", "log", f"{base_ref}..HEAD", "--oneline"],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return bool(result.stdout.strip())
+        except subprocess.CalledProcessError:
+            # Err on the side of preserving work — matches has_uncommitted_changes
+            # which also returns the conservative default (True) on git errors.
             return True
 
     def preserve_worktree_work(self, task: Any, worktree_dir: Path) -> bool:
