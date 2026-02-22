@@ -212,6 +212,18 @@ class TaskExecutor:
                         if fixed:
                             last_phase1_step = step
                             continue
+                        # All verify-fix attempts exhausted — ensure task is blocked.
+                        task.status = "blocked"
+                        task.error = task.error or f"Could not fix {step} after {max_verify_fix_attempts} attempts"
+                        task.current_step = step
+                        svc.container.tasks.upsert(task)
+                        svc._finalize_run(task, run, status="blocked", summary=f"Blocked: {step} failed after {max_verify_fix_attempts} fix attempts")
+                        svc.bus.emit(
+                            channel="tasks",
+                            event_type="task.blocked",
+                            entity_id=task.id,
+                            payload={"error": task.error},
+                        )
                     return
                 last_phase1_step = step
 
@@ -389,6 +401,17 @@ class TaskExecutor:
                                     validation_fixed = True
                                     break
                             if not validation_fixed:
+                                task.status = "blocked"
+                                task.error = task.error or f"Could not fix {post_fix_validation_step} after {max_verify_fix_attempts} attempts"
+                                task.current_step = post_fix_validation_step
+                                svc.container.tasks.upsert(task)
+                                svc._finalize_run(task, run, status="blocked", summary=f"Blocked: {post_fix_validation_step} failed after {max_verify_fix_attempts} fix attempts")
+                                svc.bus.emit(
+                                    channel="tasks",
+                                    event_type="task.blocked",
+                                    entity_id=task.id,
+                                    payload={"error": task.error},
+                                )
                                 return
 
                     task.metadata.pop("review_findings", None)
