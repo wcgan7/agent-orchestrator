@@ -1682,7 +1682,7 @@ def test_get_workdoc_returns_content(tmp_path: Path) -> None:
 def test_get_workdoc_returns_409_when_missing(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        task = client.post("/api/tasks", json={"title": "No workdoc"}).json()["task"]
+        task = client.post("/api/tasks", json={"title": "No workdoc", "status": "backlog"}).json()["task"]
         task_id = task["id"]
 
         resp = client.get(f"/api/tasks/{task_id}/workdoc")
