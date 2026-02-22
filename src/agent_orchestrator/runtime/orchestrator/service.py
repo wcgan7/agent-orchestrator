@@ -75,6 +75,7 @@ class OrchestratorService:
         self._drain = False
         self._run_branch: Optional[str] = None
         self._pool: ThreadPoolExecutor | None = None
+        self._pool_size: int = 0
         self._futures: dict[str, Future[Any]] = {}
         self._futures_lock = threading.Lock()
         self._merge_lock = threading.Lock()
@@ -93,11 +94,18 @@ class OrchestratorService:
         self._worktree_manager = WorktreeManager(self)
         self._task_executor = TaskExecutor(self)
 
-    def _get_pool(self) -> ThreadPoolExecutor:
-        if self._pool is None:
+    def _get_pool(self, desired_workers: int | None = None) -> ThreadPoolExecutor:
+        if desired_workers is None:
             cfg = self.container.config.load()
-            max_workers = int(dict(cfg.get("orchestrator") or {}).get("concurrency", 2) or 2)
-            self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="orchestrator-task")
+            desired_workers = int(dict(cfg.get("orchestrator") or {}).get("concurrency", 2) or 2)
+        if self._pool is not None and self._pool_size == desired_workers:
+            return self._pool
+        if self._pool is not None and self._pool_size != desired_workers:
+            # Let existing tasks finish; shutdown(wait=False) won't cancel them.
+            self._pool.shutdown(wait=False, cancel_futures=False)
+            logger.info("Resizing thread pool from %d to %d workers", self._pool_size, desired_workers)
+        self._pool = ThreadPoolExecutor(max_workers=desired_workers, thread_name_prefix="orchestrator-task")
+        self._pool_size = desired_workers
         return self._pool
 
     def status(self) -> dict[str, Any]:
@@ -183,6 +191,7 @@ class OrchestratorService:
         if pool is not None:
             pool.shutdown(wait=False, cancel_futures=False)
             self._pool = None
+            self._pool_size = 0
 
         with self._futures_lock:
             self._futures.clear()
@@ -250,7 +259,7 @@ class OrchestratorService:
             return False
 
         self.bus.emit(channel="queue", event_type="task.claimed", entity_id=claimed.id, payload={"status": claimed.status})
-        future = self._get_pool().submit(self._execute_task, claimed)
+        future = self._get_pool(desired_workers=max_in_progress).submit(self._execute_task, claimed)
         with self._futures_lock:
             self._futures[claimed.id] = future
         return True
