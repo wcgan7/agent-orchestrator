@@ -494,6 +494,13 @@ Top-level sections:
 - `workers`
 - `project`
 
+Project section fields:
+- `project.commands`: language command overrides.
+- `project.prompt_overrides`: per-step prompt text overrides.
+- `project.prompt_injections`: per-step additive prompt snippets.
+- `project.prompt_defaults`: server-provided default prompt text by step
+  (read-only, for Settings UI review).
+
 ### `PATCH /api/settings`
 Patch one or more settings sections.
 
@@ -501,6 +508,8 @@ Merge semantics:
 - Omitted section: unchanged.
 - Included section: shallow-merged by section rules.
 - In `project.commands`, empty string removes a command.
+- In `project.prompt_overrides`, empty string removes that step override.
+- In `project.prompt_injections`, empty string removes that step injection.
 
 Workers settings notes:
 - Provider types: `codex`, `claude`, `ollama`.

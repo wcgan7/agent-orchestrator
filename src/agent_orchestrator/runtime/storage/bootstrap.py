@@ -114,7 +114,13 @@ def ensure_state_root(project_dir: Path) -> Path:
     config.setdefault("pinned_projects", [])
     config.setdefault("orchestrator", {"status": "running", "concurrency": 2, "max_review_attempts": 10, "max_verify_fix_attempts": 3})
     config.setdefault("defaults", {"approval_mode": "human_review", "quality_gate": {"critical": 0, "high": 0, "medium": 0, "low": 0}, "dependency_policy": "prudent"})
-    config.setdefault("project", {"commands": {}})
+    project_cfg = config.get("project")
+    if not isinstance(project_cfg, dict):
+        project_cfg = {}
+        config["project"] = project_cfg
+    project_cfg.setdefault("commands", {})
+    project_cfg.setdefault("prompt_overrides", {})
+    project_cfg.setdefault("prompt_injections", {})
     config_repo.save(config)
 
     return state_root

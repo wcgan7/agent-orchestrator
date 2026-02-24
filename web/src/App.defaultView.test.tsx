@@ -106,6 +106,10 @@ describe('App default route', () => {
                   test: '/Users/gan/Documents/agent-orchestrator-dogfood/.venv/bin/pytest -n auto',
                 },
               },
+              prompt_overrides: {},
+              prompt_defaults: {
+                implement: 'Implement the task completely and safely.',
+              },
             },
           }),
         })
@@ -168,6 +172,10 @@ describe('App default route', () => {
                 python: {
                   test: '/Users/gan/Documents/agent-orchestrator-dogfood/.venv/bin/pytest -n auto',
                 },
+              },
+              prompt_overrides: {},
+              prompt_defaults: {
+                implement: 'Implement the task completely and safely.',
               },
             },
           }),
@@ -1009,6 +1017,110 @@ describe('App default route', () => {
     await waitFor(() => {
       expect(screen.getByText('Task created')).toBeInTheDocument()
     })
+  })
+
+  it('supports bounded font size controls in task detail plan view', async () => {
+    const task = {
+      id: 'task-1',
+      title: 'Task 1',
+      description: 'Plan and execute',
+      priority: 'P2',
+      status: 'in_review',
+      task_type: 'feature',
+      blocked_by: [],
+      blocks: [],
+      pending_gate: 'before_implement',
+    }
+    const planDoc = {
+      task_id: 'task-1',
+      latest_revision_id: 'pr-1',
+      committed_revision_id: 'pr-1',
+      revisions: [
+        {
+          id: 'pr-1',
+          task_id: 'task-1',
+          created_at: '2026-02-14T00:00:00Z',
+          source: 'worker_plan',
+          parent_revision_id: null,
+          step: 'plan',
+          content: 'Plan heading\n\n- one\n- two',
+          content_hash: 'x',
+          status: 'committed',
+        },
+      ],
+      active_refine_job: null,
+      plans: [],
+      latest: null,
+    }
+    const mockedFetch = vi.fn().mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({ columns: { backlog: [task], queued: [], in_progress: [], in_review: [], blocked: [], done: [] } }),
+        })
+      }
+      if (u.includes('/api/tasks/task-1/plan') && method === 'GET') {
+        return Promise.resolve({ ok: true, json: async () => planDoc })
+      }
+      if (u.includes('/api/tasks/task-1') && method === 'GET') {
+        return Promise.resolve({ ok: true, json: async () => ({ task }) })
+      }
+      if (u.includes('/api/collaboration/timeline/task-1')) return Promise.resolve({ ok: true, json: async () => ({ events: [] }) })
+      if (u.includes('/api/collaboration/feedback/task-1')) return Promise.resolve({ ok: true, json: async () => ({ feedback: [] }) })
+      if (u.includes('/api/collaboration/comments/task-1')) return Promise.resolve({ ok: true, json: async () => ({ comments: [] }) })
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [task] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      if (u.includes('/api/agents')) return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      if (u.includes('/api/projects')) return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+    global.fetch = mockedFetch as unknown as typeof fetch
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Task 1')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Task 1'))
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Plan$/i })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Plan$/i }))
+
+    const increaseButton = await screen.findByRole('button', { name: /Increase plan font size/i })
+    const decreaseButton = await screen.findByRole('button', { name: /Decrease plan font size/i })
+    await waitFor(() => {
+      expect(screen.getByText('Plan heading')).toBeInTheDocument()
+    })
+
+    const planContent = document.querySelector('.plan-content-field.rendered-markdown') as HTMLDivElement
+    expect(planContent).toBeTruthy()
+    expect(planContent.style.fontSize).toBe('0.84rem')
+
+    for (let i = 0; i < 10; i += 1) {
+      fireEvent.click(increaseButton)
+    }
+    await waitFor(() => {
+      expect(increaseButton).toBeDisabled()
+    })
+    expect(planContent.style.fontSize).toBe('1.08rem')
+
+    for (let i = 0; i < 10; i += 1) {
+      fireEvent.click(decreaseButton)
+    }
+    await waitFor(() => {
+      expect(decreaseButton).toBeDisabled()
+    })
+    expect(planContent.style.fontSize).toBe('0.72rem')
+    expect(screen.getByText('Plan heading')).toBeInTheDocument()
   })
 
   it('refreshes surfaces when websocket events arrive', async () => {

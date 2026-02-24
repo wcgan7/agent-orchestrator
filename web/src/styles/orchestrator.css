@@ -734,6 +734,13 @@ a:focus-visible {
   border-bottom-right-radius: 0;
 }
 
+.settings-prompt-textarea {
+  min-height: 10rem;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
 .provider-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -2377,6 +2384,17 @@ textarea {
 .plan-tab-mode-switcher .button.is-active {
   background: var(--color-primary-600);
   color: var(--color-text-inverse);
+}
+
+.plan-font-size-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.5rem;
+}
+
+.plan-font-size-controls .field-label {
+  margin: 0;
 }
 
 .plan-tab-commit-bar {

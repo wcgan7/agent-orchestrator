@@ -382,6 +382,8 @@ def test_tasks_board_uses_status_aware_ordering(tmp_path: Path) -> None:
 def test_tasks_board_sorting_is_deterministic_for_ties_and_missing_timestamps(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
+        pause = client.post("/api/orchestrator/control", json={"action": "pause"})
+        assert pause.status_code == 200
         done_new = client.post("/api/tasks", json={"title": "Done with timestamp", "priority": "P2"}).json()["task"]["id"]
         done_bad_a = client.post("/api/tasks", json={"title": "Done malformed A", "priority": "P2"}).json()["task"]["id"]
         done_bad_b = client.post("/api/tasks", json={"title": "Done malformed B", "priority": "P2"}).json()["task"]["id"]
@@ -917,6 +919,114 @@ def test_get_task_timing_summary_handles_mixed_timezone_formats(tmp_path: Path) 
         assert timing["last_finished_at"] == "2026-02-21T10:02:00+00:00"
 
 
+def test_task_logs_step_query_does_not_fallback_to_other_step_logs(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Step-scoped logs"}).json()["task"]
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        logs_dir = container.state_root / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        plan_stdout = logs_dir / "plan.stdout.log"
+        plan_stdout.write_text("plan output\n", encoding="utf-8")
+
+        run = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at=now_iso(),
+            steps=[
+                {
+                    "step": "plan",
+                    "status": "ok",
+                    "stdout_path": str(plan_stdout),
+                    "started_at": now_iso(),
+                    "ts": now_iso(),
+                }
+            ],
+        )
+        container.runs.upsert(run)
+        task.run_ids = [run.id]
+        task.status = "in_progress"
+        task.current_step = "implement"
+        task.pending_gate = "before_implement"
+        task.metadata["last_logs"] = {"step": "plan", "stdout_path": str(plan_stdout)}
+        container.tasks.upsert(task)
+
+        scoped = client.get(f"/api/tasks/{task.id}/logs?step=implement")
+        assert scoped.status_code == 200
+        body = scoped.json()
+        assert body["mode"] == "none"
+        assert body["step"] == "implement"
+        assert body["stdout"] == ""
+        assert body["available_steps"] == ["plan"]
+
+
+def test_task_logs_step_query_reads_active_logs_for_requested_step(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Active step logs"}).json()["task"]
+
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        logs_dir = container.state_root / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        implement_stdout = logs_dir / "implement.stdout.log"
+        implement_stdout.write_text("implement output\n", encoding="utf-8")
+
+        task.status = "in_progress"
+        task.current_step = "implement"
+        task.metadata["active_logs"] = {"step": "implement", "stdout_path": str(implement_stdout)}
+        container.tasks.upsert(task)
+
+        scoped = client.get(f"/api/tasks/{task.id}/logs?step=implement")
+        assert scoped.status_code == 200
+        body = scoped.json()
+        assert body["mode"] == "active"
+        assert body["step"] == "implement"
+        assert body["stdout"] == "implement output\n"
+        assert body["available_steps"] == ["implement"]
+
+
+def test_get_task_timing_summary_prefers_earliest_active_run(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Timing active run selection"}).json()["task"]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        early_active = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at="2026-02-21T10:03:00Z",
+            finished_at=None,
+        )
+        late_active = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at="2026-02-24T06:00:40.282283Z",
+            finished_at=None,
+        )
+        container.runs.upsert(early_active)
+        container.runs.upsert(late_active)
+        task.run_ids = [late_active.id, early_active.id]
+        container.tasks.upsert(task)
+
+        loaded = client.get(f"/api/tasks/{task.id}")
+        assert loaded.status_code == 200
+        timing = loaded.json()["task"]["timing_summary"]
+        assert timing["is_running"] is True
+        assert timing["active_run_started_at"] == "2026-02-21T10:03:00+00:00"
+        assert timing["total_completed_seconds"] == 0.0
+        assert timing["first_started_at"] == "2026-02-21T10:03:00+00:00"
+        assert timing["last_finished_at"] is None
+
+
 def test_project_commands_settings_round_trip(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
@@ -998,6 +1108,84 @@ def test_project_commands_empty_language_key_ignored(tmp_path: Path) -> None:
         cmds = resp.json()["project"]["commands"]
         assert "" not in cmds
         assert cmds["python"]["lint"] == "ruff check ."
+
+
+def test_project_prompt_overrides_round_trip(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        baseline = client.get("/api/settings")
+        assert baseline.status_code == 200
+        project = baseline.json()["project"]
+        assert project["prompt_overrides"] == {}
+        assert project["prompt_injections"] == {}
+        assert "implement" in project["prompt_defaults"]
+
+        updated = client.patch(
+            "/api/settings",
+            json={
+                "project": {
+                    "prompt_overrides": {
+                        "IMPLEMENT": "Custom implement injection",
+                        "verify": "Custom verify injection",
+                    }
+                }
+            },
+        )
+        assert updated.status_code == 200
+        overrides = updated.json()["project"]["prompt_overrides"]
+        assert overrides["implement"] == "Custom implement injection"
+        assert overrides["verify"] == "Custom verify injection"
+
+        removed = client.patch(
+            "/api/settings",
+            json={"project": {"prompt_overrides": {"verify": ""}}},
+        )
+        assert removed.status_code == 200
+        overrides_after_remove = removed.json()["project"]["prompt_overrides"]
+        assert "verify" not in overrides_after_remove
+        assert overrides_after_remove["implement"] == "Custom implement injection"
+
+        reloaded = client.get("/api/settings")
+        assert reloaded.status_code == 200
+        assert reloaded.json()["project"]["prompt_overrides"] == overrides_after_remove
+
+
+def test_project_prompt_injections_round_trip(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        baseline = client.get("/api/settings")
+        assert baseline.status_code == 200
+        project = baseline.json()["project"]
+        assert project["prompt_injections"] == {}
+
+        updated = client.patch(
+            "/api/settings",
+            json={
+                "project": {
+                    "prompt_injections": {
+                        "IMPLEMENT": "Preserve public API compatibility.",
+                        "verify": "Run smoke tests first.",
+                    }
+                }
+            },
+        )
+        assert updated.status_code == 200
+        injections = updated.json()["project"]["prompt_injections"]
+        assert injections["implement"] == "Preserve public API compatibility."
+        assert injections["verify"] == "Run smoke tests first."
+
+        removed = client.patch(
+            "/api/settings",
+            json={"project": {"prompt_injections": {"verify": ""}}},
+        )
+        assert removed.status_code == 200
+        injections_after_remove = removed.json()["project"]["prompt_injections"]
+        assert "verify" not in injections_after_remove
+        assert injections_after_remove["implement"] == "Preserve public API compatibility."
+
+        reloaded = client.get("/api/settings")
+        assert reloaded.status_code == 200
+        assert reloaded.json()["project"]["prompt_injections"] == injections_after_remove
 
 
 def test_claim_lock_prevents_double_claim(tmp_path: Path) -> None:

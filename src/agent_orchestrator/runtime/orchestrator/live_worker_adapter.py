@@ -75,6 +75,32 @@ _STEP_PROMPT_FILES: dict[str, str] = {
     "general": "steps/general.md",
 }
 
+
+_SETTINGS_PROMPT_STEPS: tuple[str, ...] = (
+    "analyze",
+    "analyze_deps",
+    "benchmark",
+    "diagnose",
+    "generate_tasks",
+    "implement",
+    "implement_fix",
+    "initiative_plan",
+    "initiative_plan_refine",
+    "pipeline_classify",
+    "plan",
+    "plan_refine",
+    "profile",
+    "prototype",
+    "report",
+    "reproduce",
+    "resolve_merge",
+    "review",
+    "scan_code",
+    "scan_deps",
+    "summarize",
+    "verify",
+)
+
 _LANGUAGE_DEFAULTS: dict[str, str] = {
     "python": (
         "### Python defaults\n"
@@ -139,6 +165,61 @@ _DEFAULT_PROJECT_COMMANDS: dict[str, dict[str, str]] = {
         "lint": "cargo clippy -- -D warnings 2>/dev/null || true",
     },
 }
+
+
+def _instruction_prompt_name(step: str, task_type: str) -> str:
+    """Resolve the markdown prompt template path for a pipeline step."""
+    category = _step_category(step)
+    pipeline_id = PipelineRegistry().resolve_for_task_type(task_type).id
+    if step == "plan_refine":
+        return "steps/plan_refine.md"
+    if step == "initiative_plan_refine":
+        return "steps/initiative_plan_refine.md"
+    if step == "implement" and pipeline_id == "docs":
+        return "steps/implement_docs.md"
+    if step == "analyze":
+        return "steps/analyze.md"
+    if step == "initiative_plan":
+        return "steps/initiative_plan.md"
+    if step == "diagnose":
+        return "steps/diagnose.md"
+    if step == "prototype":
+        return "steps/prototype.md"
+    if step == "profile":
+        return "steps/profile.md"
+    if step == "scan_deps":
+        return "steps/scan_deps.md"
+    if step == "scan_code":
+        return "steps/scan_code.md"
+    if step == "summarize":
+        return "steps/summarize.md"
+    return _STEP_PROMPT_FILES[category]
+
+
+def _normalize_prompt_overrides(value: Any) -> dict[str, str]:
+    """Normalize per-step prompt override map from runtime config."""
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for raw_step, raw_prompt in value.items():
+        step = str(raw_step or "").strip().lower()
+        if not step:
+            continue
+        prompt = raw_prompt if isinstance(raw_prompt, str) else str(raw_prompt)
+        if not prompt.strip():
+            continue
+        out[step] = prompt
+    return out
+
+
+def _normalize_prompt_injections(value: Any) -> dict[str, str]:
+    """Normalize per-step additive prompt injections from runtime config."""
+    return _normalize_prompt_overrides(value)
+
+
+def get_configurable_step_prompt_defaults() -> dict[str, str]:
+    """Return default prompt text for settings-managed pipeline steps."""
+    return {step: load_prompt(_instruction_prompt_name(step, "feature")) for step in _SETTINGS_PROMPT_STEPS}
 
 
 def _resolve_command_paths(
@@ -524,6 +605,8 @@ def build_step_prompt(
     attempt: int,
     project_languages: list[str] | None = None,
     project_commands: dict[str, dict[str, str]] | None = None,
+    prompt_overrides: dict[str, str] | None = None,
+    prompt_injections: dict[str, str] | None = None,
 ) -> str:
     """Build a prompt from Task fields with step-specific instructions.
 
@@ -537,37 +620,20 @@ def build_step_prompt(
             to populate language-specific guidance in the prompt.
         project_commands (dict[str, dict[str, str]] | None): Optional
             language-to-command mapping surfaced to workers as execution hints.
+        prompt_overrides (dict[str, str] | None): Optional per-step prompt text
+            overrides loaded from project settings.
+        prompt_injections (dict[str, str] | None): Optional per-step prompt text
+            snippets appended after the base task metadata block.
 
     Returns:
         str: Fully rendered prompt text sent to the worker process.
     """
     category = _step_category(step)
-    pipeline_id = PipelineRegistry().resolve_for_task_type(task.task_type).id
-    if step == "plan_refine":
-        instruction_name = "steps/plan_refine.md"
-    elif step == "initiative_plan_refine":
-        instruction_name = "steps/initiative_plan_refine.md"
-    elif step == "implement" and pipeline_id == "docs":
-        instruction_name = "steps/implement_docs.md"
-    elif step == "analyze":
-        instruction_name = "steps/analyze.md"
-    elif step == "initiative_plan":
-        instruction_name = "steps/initiative_plan.md"
-    elif step == "diagnose":
-        instruction_name = "steps/diagnose.md"
-    elif step == "prototype":
-        instruction_name = "steps/prototype.md"
-    elif step == "profile":
-        instruction_name = "steps/profile.md"
-    elif step == "scan_deps":
-        instruction_name = "steps/scan_deps.md"
-    elif step == "scan_code":
-        instruction_name = "steps/scan_code.md"
-    elif step == "summarize":
-        instruction_name = "steps/summarize.md"
-    else:
-        instruction_name = _STEP_PROMPT_FILES[category]
-    instruction = load_prompt(instruction_name)
+    normalized_overrides = _normalize_prompt_overrides(prompt_overrides)
+    normalized_injections = _normalize_prompt_injections(prompt_injections)
+    instruction = normalized_overrides.get(step.strip().lower()) or load_prompt(
+        _instruction_prompt_name(step, task.task_type)
+    )
     preamble = load_prompt("preamble.md")
     guardrails = load_prompt("guardrails.md")
 
@@ -644,6 +710,11 @@ def build_step_prompt(
     parts.append(f"Type: {task.task_type}")
     if attempt > 1 and step != "implement":
         parts.append(f"Attempt: {attempt}")
+    step_injection = normalized_injections.get(step.strip().lower())
+    if step_injection:
+        parts.append("")
+        parts.append("## Project-configured step injection")
+        parts.append(step_injection)
 
     # Inject workdoc instructions for steps that use the working document.
     workdoc_block = _workdoc_prompt_section(step)
@@ -1199,6 +1270,10 @@ class LiveWorkerAdapter:
         project_dir = Path(worktree_path) if worktree_path else self._container.project_dir
         langs = detect_project_languages(project_dir)
         raw_commands = (cfg.get("project") or {}).get("commands") or {}
+        raw_prompt_overrides = (cfg.get("project") or {}).get("prompt_overrides")
+        raw_prompt_injections = (cfg.get("project") or {}).get("prompt_injections")
+        prompt_overrides = _normalize_prompt_overrides(raw_prompt_overrides)
+        prompt_injections = _normalize_prompt_injections(raw_prompt_injections)
         project_commands = {
             lang: cmds for lang, cmds in raw_commands.items()
             if isinstance(cmds, dict)
@@ -1232,6 +1307,8 @@ class LiveWorkerAdapter:
             task=task, step=step, attempt=attempt,
             project_languages=langs or None,
             project_commands=project_commands,
+            prompt_overrides=prompt_overrides or None,
+            prompt_injections=prompt_injections or None,
         )
 
         # 3. Execute
