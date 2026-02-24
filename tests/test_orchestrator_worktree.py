@@ -1144,6 +1144,108 @@ def test_retry_after_preserved_branch(tmp_path: Path) -> None:
     assert "preserved_branch" not in result.metadata
 
 
+def test_retry_from_step_preserves_prior_workdoc_context(tmp_path: Path) -> None:
+    """Retry from a later step should keep prior workdoc sections from earlier attempts."""
+
+    class RetryFromStepAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            if step == "plan":
+                return StepResult(status="ok", summary="Attempt 1 plan context")
+            if step == "implement":
+                return StepResult(status="error", summary="Stop after planning")
+            if step == "verify":
+                return StepResult(status="ok", summary="Verify after retry")
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=RetryFromStepAdapter())
+    task = Task(
+        title="Retry from verify keeps plan",
+        task_type="feature",
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+        pipeline_template=["plan", "implement", "verify"],
+    )
+    container.tasks.upsert(task)
+
+    first = service.run_task(task.id)
+    assert first.status == "blocked"
+    canonical = container.state_root / "workdocs" / f"{task.id}.md"
+    before_retry = canonical.read_text(encoding="utf-8")
+    assert "Attempt 1 plan context" in before_retry
+
+    task = container.tasks.get(task.id)
+    assert task is not None
+    task.status = "queued"
+    task.error = None
+    task.metadata["retry_from_step"] = "verify"
+    container.tasks.upsert(task)
+
+    second = service.run_task(task.id)
+    assert second.status == "done"
+    after_retry = canonical.read_text(encoding="utf-8")
+    assert "Attempt 1 plan context" in after_retry
+    assert "Verify after retry" in after_retry
+
+
+def test_retry_after_preserved_branch_keeps_prior_workdoc_context(tmp_path: Path) -> None:
+    """Retry on preserved branch should append to workdoc instead of resetting it."""
+    call_count = {"review": 0, "plan": 0, "implement": 0}
+
+    class PreservedBranchContextAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if step == "plan":
+                call_count["plan"] += 1
+                return StepResult(status="ok", summary=f"Plan context run {call_count['plan']}")
+            if wt and step == "implement":
+                call_count["implement"] += 1
+                (Path(wt) / "output.py").write_text(f"# code v{call_count['implement']}\n")
+                return StepResult(status="ok", summary=f"Implementation run {call_count['implement']}")
+            if step == "review":
+                call_count["review"] += 1
+                if call_count["review"] <= 1:
+                    return StepResult(
+                        status="ok",
+                        findings=[{"severity": "high", "summary": "Needs follow-up", "status": "open"}],
+                    )
+                return StepResult(status="ok", findings=[])
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=PreservedBranchContextAdapter())
+    cfg = container.config.load()
+    cfg["orchestrator"]["max_review_attempts"] = 1
+    container.config.save(cfg)
+
+    task = Task(
+        title="Preserved branch retry keeps workdoc",
+        task_type="feature",
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    first = service.run_task(task.id)
+    assert first.status == "blocked"
+    assert first.metadata.get("preserved_branch") == f"task-{task.id}"
+    canonical = container.state_root / "workdocs" / f"{task.id}.md"
+    before_retry = canonical.read_text(encoding="utf-8")
+    assert "Plan context run 1" in before_retry
+
+    task = container.tasks.get(task.id)
+    assert task is not None
+    task.status = "queued"
+    task.error = None
+    container.tasks.upsert(task)
+
+    second = service.run_task(task.id)
+    assert second.status == "done"
+    after_retry = canonical.read_text(encoding="utf-8")
+    assert "Plan context run 1" in after_retry
+    assert "Plan context run 2" in after_retry
+
+
 def test_retry_from_preserved_branch_no_new_uncommitted_changes(tmp_path: Path) -> None:
     """When retrying from a preserved branch and retry_from_step causes
     implement to be skipped, the 'No file changes' check must not block —

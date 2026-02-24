@@ -29,10 +29,53 @@ class TaskExecutor:
     def _ensure_workdoc_or_block(self, task: Task, run: RunRecord, *, step: str) -> bool:
         """Verify canonical workdoc exists; otherwise block task/run for this step."""
         svc = self._service
-        if svc._validate_task_workdoc(task) is not None:
+        try:
+            if svc._validate_task_workdoc(task) is not None:
+                return True
+            svc._block_for_missing_workdoc(task, run, step=step)
+            return False
+        except ValueError as exc:
+            svc._block_for_invalid_workdoc(task, run, step=step, detail=str(exc))
+            return False
+
+    def _prepare_workdoc_for_run(
+        self,
+        task: Task,
+        run: RunRecord,
+        *,
+        project_dir: Path,
+        first_step: str,
+        had_prior_runs: bool,
+        retry_from_step: str | None = None,
+    ) -> bool:
+        """Initialize on first run, refresh on retry, and block if retry lost canonical workdoc."""
+        svc = self._service
+        try:
+            canonical = svc._validate_task_workdoc(task)
+        except ValueError as exc:
+            svc._block_for_invalid_workdoc(task, run, step=first_step, detail=str(exc))
+            return False
+        svc._clear_invalid_workdoc_markers(task)
+        if canonical is not None:
+            try:
+                svc._refresh_workdoc_with_diagnostics(task, project_dir)
+            except ValueError as exc:
+                svc._block_for_invalid_workdoc(task, run, step=first_step, detail=str(exc))
+                return False
+            if had_prior_runs:
+                attempt = max(1, len(task.run_ids))
+                svc._append_retry_attempt_marker(
+                    task,
+                    project_dir=project_dir,
+                    attempt=attempt,
+                    start_from_step=retry_from_step or None,
+                )
             return True
-        svc._block_for_missing_workdoc(task, run, step=step)
-        return False
+        if had_prior_runs:
+            svc._block_for_missing_workdoc(task, run, step=first_step)
+            return False
+        svc._init_workdoc(task, project_dir)
+        return True
 
     def execute_task(self, task: Task) -> None:
         """Execute one task and normalize top-level cancellation/error outcomes.
@@ -116,31 +159,48 @@ class TaskExecutor:
                 task.metadata["worktree_dir"] = str(worktree_dir)
                 svc.container.tasks.upsert(task)
 
-            workdoc_dir = worktree_dir if worktree_dir else svc.container.project_dir
-            svc._init_workdoc(task, workdoc_dir)
-
-            task_branch = f"task-{task.id}" if worktree_dir else svc._ensure_branch()
-            run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), branch=task_branch)
-            run.steps = []
-            svc.container.runs.upsert(run)
-
-            cfg = svc.container.config.load()
-            orch_cfg = dict(cfg.get("orchestrator") or {})
-            max_review_attempts = int(orch_cfg.get("max_review_attempts", 10) or 10)
-            max_verify_fix_attempts = int(orch_cfg.get("max_verify_fix_attempts", 3) or 3)
-
             registry = PipelineRegistry()
             template = registry.resolve_for_task_type(task.task_type)
             steps = task.pipeline_template if task.pipeline_template else template.step_names()
             task.pipeline_template = steps
             has_review = "review" in steps
             has_commit = "commit" in steps
+            first_step = steps[0] if steps else "plan"
 
+            workdoc_dir = worktree_dir if worktree_dir else svc.container.project_dir
+            task_branch = f"task-{task.id}" if worktree_dir else svc._ensure_branch()
+            run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), branch=task_branch)
+            run.steps = []
+            svc.container.runs.upsert(run)
+
+            had_prior_runs = bool(task.run_ids)
             retry_from = ""
+            has_retry_guidance = False
+            if isinstance(task.metadata, dict):
+                retry_from = str(task.metadata.get("retry_from_step", "") or "").strip()
+                retry_guidance = task.metadata.get("retry_guidance")
+                if isinstance(retry_guidance, dict):
+                    has_retry_guidance = bool(str(retry_guidance.get("guidance") or "").strip())
+            task.run_ids.append(run.id)
+            run_attempt = max(1, len(task.run_ids))
+            if not self._prepare_workdoc_for_run(
+                task,
+                run,
+                project_dir=workdoc_dir,
+                first_step=first_step,
+                had_prior_runs=had_prior_runs,
+                retry_from_step=retry_from,
+            ):
+                return
+
+            cfg = svc.container.config.load()
+            orch_cfg = dict(cfg.get("orchestrator") or {})
+            max_review_attempts = int(orch_cfg.get("max_review_attempts", 10) or 10)
+            max_verify_fix_attempts = int(orch_cfg.get("max_verify_fix_attempts", 3) or 3)
+
             if isinstance(task.metadata, dict):
                 retry_from = str(task.metadata.pop("retry_from_step", "") or "").strip()
 
-            task.run_ids.append(run.id)
             task.current_step = steps[0] if steps else None
             task.metadata["pipeline_phase"] = steps[0] if steps else None
             task.status = "in_progress"
@@ -150,7 +210,15 @@ class TaskExecutor:
                 channel="tasks",
                 event_type="task.started",
                 entity_id=task.id,
-                payload={"run_id": run.id, "agent_id": task.current_agent_id},
+                payload={
+                    "run_id": run.id,
+                    "agent_id": task.current_agent_id,
+                    "run_attempt": run_attempt,
+                    "is_retry": had_prior_runs,
+                    "start_from_step": retry_from or None,
+                    "has_retry_guidance": has_retry_guidance,
+                    "retry_count": int(task.retry_count),
+                },
             )
 
             mode = getattr(task, "hitl_mode", "autopilot") or "autopilot"
@@ -178,7 +246,7 @@ class TaskExecutor:
                     if not svc._wait_for_gate(task, gate_name):
                         svc._abort_for_gate(task, run, gate_name)
                         return
-                if not svc._run_non_review_step(task, run, step, attempt=1):
+                if not svc._run_non_review_step(task, run, step, attempt=1, workdoc_attempt=run_attempt):
                     if step in _VERIFY_STEPS:
                         if svc._consume_verify_non_actionable_flag(task):
                             last_phase1_step = step
@@ -275,7 +343,11 @@ class TaskExecutor:
                     if not self._ensure_workdoc_or_block(task, run, step="review"):
                         return
                     review_project_dir = worktree_dir or svc.container.project_dir
-                    svc._refresh_workdoc(task, review_project_dir)
+                    try:
+                        svc._refresh_workdoc_with_diagnostics(task, review_project_dir)
+                    except ValueError as exc:
+                        svc._block_for_invalid_workdoc(task, run, step="review", detail=str(exc))
+                        return
                     review_started = now_iso()
                     findings, review_result = svc._findings_from_result(task, review_attempt)
                     review_step_log: dict[str, object] = {

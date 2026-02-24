@@ -581,12 +581,116 @@ class OrchestratorService:
         """Append review cycle findings to the workdoc."""
         self._workdoc_manager.sync_workdoc_review(task, cycle, project_dir)
 
+    def _append_retry_attempt_marker(
+        self,
+        task: Task,
+        *,
+        project_dir: Path,
+        attempt: int,
+        start_from_step: str | None = None,
+    ) -> None:
+        """Append retry attempt context into the canonical workdoc."""
+        self._workdoc_manager.append_retry_attempt_marker(
+            task,
+            project_dir=project_dir,
+            attempt=attempt,
+            start_from_step=start_from_step,
+        )
+
     def _validate_task_workdoc(self, task: Task) -> Path | None:
-        """Return canonical workdoc path when present, else ``None``."""
+        """Return canonical workdoc path when present and UTF-8 readable, else ``None``."""
         canonical = self._workdoc_canonical_path(task.id)
-        if canonical.exists():
-            return canonical
-        return None
+        if not canonical.exists():
+            return None
+        try:
+            canonical.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Invalid workdoc encoding (expected UTF-8): {canonical}") from exc
+        except OSError as exc:
+            raise ValueError(f"Unreadable workdoc: {canonical} ({exc})") from exc
+        return canonical
+
+    def _block_for_invalid_workdoc(self, task: Task, run: RunRecord, *, step: str, detail: str) -> None:
+        """Fail fast when a task has an unreadable or invalid canonical workdoc."""
+        canonical = self._workdoc_canonical_path(task.id)
+        task.status = "blocked"
+        task.error = detail
+        task.pending_gate = None
+        task.current_step = step
+        task.metadata["pipeline_phase"] = step
+        task.metadata["invalid_workdoc_path"] = str(canonical)
+        task.metadata["invalid_workdoc_error"] = detail
+        self.container.tasks.upsert(task)
+        self._finalize_run(task, run, status="blocked", summary=f"Blocked during {step}: invalid workdoc")
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.blocked",
+            entity_id=task.id,
+            payload={"error": task.error},
+        )
+
+    def _read_canonical_workdoc(self, canonical: Path, *, task_id: str) -> str:
+        """Read canonical workdoc text with consistent diagnostics."""
+        try:
+            return canonical.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Invalid workdoc encoding for task {task_id} (expected UTF-8)") from exc
+        except OSError as exc:
+            raise ValueError(f"Unreadable workdoc for task {task_id}: {exc}") from exc
+
+    def _read_worktree_workdoc(self, worktree: Path, *, task_id: str) -> str:
+        """Read worktree workdoc text with consistent diagnostics."""
+        try:
+            return worktree.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Invalid workdoc encoding in worktree for task {task_id} (expected UTF-8)") from exc
+        except OSError as exc:
+            raise ValueError(f"Unreadable worktree workdoc for task {task_id}: {exc}") from exc
+
+    def _read_workdoc_pair(self, task: Task, project_dir: Path) -> tuple[str, str] | None:
+        """Read canonical/worktree workdoc texts, returning None when either file is missing."""
+        canonical = self._workdoc_canonical_path(task.id)
+        if not canonical.exists():
+            return None
+        worktree = self._workdoc_worktree_path(project_dir)
+        if not worktree.exists():
+            raise ValueError(f"Missing worktree workdoc during sync for task {task.id}: {worktree}")
+        canonical_text = self._read_canonical_workdoc(canonical, task_id=task.id)
+        worktree_text = self._read_worktree_workdoc(worktree, task_id=task.id)
+        return canonical_text, worktree_text
+
+    @staticmethod
+    def _clear_invalid_workdoc_markers(task: Task) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        task.metadata.pop("invalid_workdoc_path", None)
+        task.metadata.pop("invalid_workdoc_error", None)
+        WorkdocManager.clear_sync_diagnostics(task)
+
+    def _sync_workdoc_with_diagnostics(
+        self, task: Task, step: str, project_dir: Path, summary: str | None, attempt: int | None = None
+    ) -> None:
+        """Sync workdoc and surface invalid/unreadable file diagnostics as ValueError."""
+        self._workdoc_manager.sync_workdoc(
+            task,
+            step,
+            project_dir,
+            summary,
+            attempt,
+            read_workdoc_pair=lambda: self._read_workdoc_pair(task, project_dir),
+        )
+
+    def _refresh_workdoc_with_diagnostics(self, task: Task, project_dir: Path) -> None:
+        """Refresh workdoc and surface invalid/unreadable file diagnostics as ValueError.
+
+        Always recreates the worktree copy from canonical when canonical exists.
+        """
+        canonical = self._workdoc_canonical_path(task.id)
+        if not canonical.exists():
+            return
+        canonical_text = self._read_canonical_workdoc(canonical, task_id=task.id)
+        worktree = self._workdoc_worktree_path(project_dir)
+        worktree.write_text(canonical_text, encoding="utf-8")
 
     def _block_for_missing_workdoc(self, task: Task, run: RunRecord, *, step: str) -> None:
         """Fail fast when a task loses its required canonical workdoc."""
@@ -623,7 +727,8 @@ class OrchestratorService:
         canonical = self._workdoc_canonical_path(task_id)
         if not canonical.exists():
             raise FileNotFoundError(f"Missing required workdoc for task {task_id}")
-        return {"task_id": task_id, "content": canonical.read_text(encoding="utf-8"), "exists": True}
+        content = self._read_canonical_workdoc(canonical, task_id=task_id)
+        return {"task_id": task_id, "content": content, "exists": True}
 
     def _merge_and_cleanup(self, task: Task, worktree_dir: Path) -> None:
         self._worktree_manager.merge_and_cleanup(task, worktree_dir)
@@ -869,13 +974,28 @@ class OrchestratorService:
             return "benchmark"
         return None
 
-    def _run_non_review_step(self, task: Task, run: RunRecord, step: str, attempt: int = 1) -> bool:
-        if self._validate_task_workdoc(task) is None:
-            self._block_for_missing_workdoc(task, run, step=step)
+    def _run_non_review_step(
+        self,
+        task: Task,
+        run: RunRecord,
+        step: str,
+        attempt: int = 1,
+        workdoc_attempt: int | None = None,
+    ) -> bool:
+        try:
+            if self._validate_task_workdoc(task) is None:
+                self._block_for_missing_workdoc(task, run, step=step)
+                return False
+        except ValueError as exc:
+            self._block_for_invalid_workdoc(task, run, step=step, detail=str(exc))
             return False
         # Refresh workdoc before each step so the worker sees the latest version.
         step_project_dir = self._step_project_dir(task)
-        self._refresh_workdoc(task, step_project_dir)
+        try:
+            self._refresh_workdoc_with_diagnostics(task, step_project_dir)
+        except ValueError as exc:
+            self._block_for_invalid_workdoc(task, run, step=step, detail=str(exc))
+            return False
 
         step_started = now_iso()
         try:
@@ -884,7 +1004,12 @@ class OrchestratorService:
             raise self._Cancelled()
 
         # Post-step workdoc sync (before other bookkeeping that may upsert task).
-        self._sync_workdoc(task, step, step_project_dir, result.summary, attempt=attempt)
+        sync_attempt = int(workdoc_attempt) if workdoc_attempt is not None else attempt
+        try:
+            self._sync_workdoc_with_diagnostics(task, step, step_project_dir, result.summary, attempt=sync_attempt)
+        except ValueError as exc:
+            self._block_for_invalid_workdoc(task, run, step=step, detail=str(exc))
+            return False
 
         step_log: dict[str, Any] = {"step": step, "status": result.status, "ts": now_iso(), "started_at": step_started, "summary": result.summary}
         if result.human_blocking_issues:

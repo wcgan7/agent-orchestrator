@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -9,7 +10,7 @@ import pytest
 from agent_orchestrator.runtime.domain.models import ReviewCycle, ReviewFinding, RunRecord, Task, now_iso
 from agent_orchestrator.runtime.events.bus import EventBus
 from agent_orchestrator.runtime.orchestrator.service import OrchestratorService
-from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter
+from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
 from agent_orchestrator.runtime.storage.bootstrap import ensure_state_root
 from agent_orchestrator.runtime.storage.container import Container
 from agent_orchestrator.pipelines.registry import BUILTIN_TEMPLATES
@@ -68,9 +69,35 @@ def test_init_creates_canonical_and_worktree_copy(service: OrchestratorService, 
     assert "## Analysis" not in content
     assert "## Profiling Baseline" not in content
     assert "## Final Report" not in content
+    assert "<!-- WORKDOC:SCHEMA v1 -->" in content
+    assert "<!-- WORKDOC:SECTION plan START -->" in content
+    assert "<!-- WORKDOC:SECTION implementation_log START -->" in content
+    assert "<!-- WORKDOC:SECTION verification_results START -->" in content
+    assert "<!-- WORKDOC:SECTION review_findings START -->" in content
+    assert "<!-- WORKDOC:SECTION fix_log START -->" in content
 
     # Metadata should be set
     assert task.metadata["workdoc_path"] == str(canonical)
+
+
+def test_init_sentinelization_does_not_wrap_headings_inside_task_description(
+    service: OrchestratorService, project_dir: Path
+) -> None:
+    task = Task(
+        title="Description headings",
+        description="Context line\n## Plan\nThis heading is part of description.",
+        task_type="feature",
+        priority="P2",
+    )
+    canonical = service._init_workdoc(task, project_dir)
+    content = canonical.read_text(encoding="utf-8")
+
+    # Exactly one managed plan sentinel pair (the real section), even though description contains "## Plan".
+    assert content.count("<!-- WORKDOC:SECTION plan START -->") == 1
+    assert content.count("<!-- WORKDOC:SECTION plan END -->") == 1
+
+    # Description text remains intact.
+    assert "This heading is part of description." in content
 
 
 def test_init_verify_only_uses_minimal_template(service: OrchestratorService, project_dir: Path) -> None:
@@ -89,6 +116,51 @@ def test_init_verify_only_uses_minimal_template(service: OrchestratorService, pr
     assert "## Implementation Log" not in content
     assert "## Review Findings" not in content
     assert "## Fix Log" not in content
+
+
+def test_retry_does_not_reinitialize_existing_workdoc(service: OrchestratorService) -> None:
+    """Retry should reuse existing canonical workdoc instead of re-rendering template."""
+    init_calls = {"count": 0}
+    original_init = service._workdoc_manager.init_workdoc
+
+    def counting_init(task: Task, proj_dir: Path) -> Path:
+        init_calls["count"] += 1
+        return original_init(task, proj_dir)
+
+    service._workdoc_manager.init_workdoc = counting_init  # type: ignore[assignment]
+    try:
+        retry_task = Task(
+            title="Retry init behavior",
+            description="Lock expected retry semantics",
+            task_type="feature",
+            status="queued",
+            approval_mode="auto_approve",
+            hitl_mode="autopilot",
+            pipeline_template=["plan", "implement"],
+            metadata={
+                "scripted_steps": {
+                    "plan": {"status": "ok", "summary": "Attempt 1 plan details"},
+                    "implement": {"status": "error", "summary": "Fail to trigger retry"},
+                }
+            },
+        )
+        service.container.tasks.upsert(retry_task)
+
+        first = service.run_task(retry_task.id)
+        assert first.status == "blocked"
+
+        refreshed = service.container.tasks.get(retry_task.id)
+        assert refreshed is not None
+        refreshed.status = "queued"
+        refreshed.error = None
+        service.container.tasks.upsert(refreshed)
+
+        second = service.run_task(retry_task.id)
+        assert second.status == "blocked"
+    finally:
+        service._workdoc_manager.init_workdoc = original_init  # type: ignore[assignment]
+
+    assert init_calls["count"] == 1
 
 
 def test_init_plan_only_uses_planning_template(service: OrchestratorService, project_dir: Path) -> None:
@@ -126,6 +198,11 @@ def test_init_security_audit_uses_scan_template(service: OrchestratorService, pr
     assert "## Implementation Log" not in content
     assert "## Review Findings" not in content
     assert "## Fix Log" not in content
+    assert "<!-- WORKDOC:SCHEMA v1 -->" in content
+    assert "<!-- WORKDOC:SECTION dependency_scan_findings START -->" in content
+    assert "<!-- WORKDOC:SECTION code_scan_findings START -->" in content
+    assert "<!-- WORKDOC:SECTION final_report START -->" in content
+    assert "<!-- WORKDOC:SECTION generated_tasks START -->" in content
 
 
 def test_init_repo_review_uses_review_template(service: OrchestratorService, project_dir: Path) -> None:
@@ -504,6 +581,307 @@ def test_sync_fallback_appends_under_existing_content(service: OrchestratorServi
     assert "Lint clean." in content
 
 
+def test_sync_fallback_writes_attempt_scoped_entries(service: OrchestratorService, task: Task, project_dir: Path) -> None:
+    """Repeated syncs should append attempt-scoped blocks without deleting prior attempts."""
+    service._init_workdoc(task, project_dir)
+
+    service._sync_workdoc(task, "verify", project_dir, "Attempt one verification", attempt=1)
+    service._sync_workdoc(task, "verify", project_dir, "Attempt two verification", attempt=2)
+
+    canonical = service._workdoc_canonical_path(task.id)
+    content = canonical.read_text()
+    assert "### Attempt 1" in content
+    assert "Attempt one verification" in content
+    assert "### Attempt 2" in content
+    assert "Attempt two verification" in content
+
+
+def test_sync_worker_changes_preserve_retry_history_sections(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Worker edits should update the active section without deleting retry history markers."""
+    service._init_workdoc(task, project_dir)
+    service._append_retry_attempt_marker(task, project_dir=project_dir, attempt=2, start_from_step="plan")
+    canonical = service._workdoc_canonical_path(task.id)
+    worktree = service._workdoc_worktree_path(project_dir)
+
+    worker_text = worktree.read_text().replace(
+        "_Pending: will be populated by the plan step._",
+        "Worker-authored plan content",
+    )
+    worker_text = worker_text.replace("## Retry Attempt 2", "## REMOVED BY WORKER")
+    worktree.write_text(worker_text, encoding="utf-8")
+
+    service._sync_workdoc(task, "plan", project_dir, "fallback plan summary")
+
+    content = canonical.read_text()
+    assert "Worker-authored plan content" in content
+    assert "## Retry Attempt 2" in content
+    assert "## REMOVED BY WORKER" not in content
+
+
+def test_sync_worker_changes_fallback_when_legacy_bounds_missing(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """When target sentinel markers are missing, sync must fallback-append instead of no-op."""
+    service._init_workdoc(task, project_dir)
+    worktree = service._workdoc_worktree_path(project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+
+    worker_text = (
+        worktree.read_text(encoding="utf-8")
+        .replace("<!-- WORKDOC:SECTION plan START -->", "")
+        .replace("<!-- WORKDOC:SECTION plan END -->", "")
+    )
+    worktree.write_text(worker_text, encoding="utf-8")
+
+    service._sync_workdoc(task, "plan", project_dir, "fallback from missing bounds", attempt=2)
+
+    updated = canonical.read_text(encoding="utf-8")
+    assert "### Attempt 2" in updated
+    assert "fallback from missing bounds" in updated
+
+
+def test_sync_worker_changes_without_summary_raises_for_missing_bounds(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Worker changes with no summary and missing target sentinels should raise diagnostics."""
+    service._init_workdoc(task, project_dir)
+    worktree = service._workdoc_worktree_path(project_dir)
+
+    worker_text = (
+        worktree.read_text(encoding="utf-8")
+        .replace("<!-- WORKDOC:SECTION plan START -->", "")
+        .replace("<!-- WORKDOC:SECTION plan END -->", "")
+    )
+    worktree.write_text(worker_text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="section_id_mismatch"):
+        service._sync_workdoc(task, "plan", project_dir, "", attempt=1)
+
+
+def test_sync_sentinel_merge_preserves_internal_h2_content(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Sentinel-based merge must preserve worker content containing internal h2 headings."""
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+    worktree = service._workdoc_worktree_path(project_dir)
+
+    base = canonical.read_text(encoding="utf-8")
+    base = base.replace(
+        "## Plan\n\n_Pending: will be populated by the plan step._\n",
+        "## Plan\n<!-- WORKDOC:SECTION plan START -->\n_Pending: will be populated by the plan step._\n<!-- WORKDOC:SECTION plan END -->\n",
+    )
+    canonical.write_text(base, encoding="utf-8")
+    worktree.write_text(base, encoding="utf-8")
+
+    worker_text = worktree.read_text(encoding="utf-8").replace(
+        "_Pending: will be populated by the plan step._",
+        "Primary plan line\n## Worker Internal Heading\nTrailing details after internal heading",
+    )
+    worktree.write_text(worker_text, encoding="utf-8")
+
+    service._sync_workdoc(task, "plan", project_dir, "fallback not expected", attempt=1)
+
+    updated = canonical.read_text(encoding="utf-8")
+    assert "Primary plan line" in updated
+    assert "## Worker Internal Heading" in updated
+    assert "Trailing details after internal heading" in updated
+
+
+def test_sync_sentinel_id_mismatch_fallbacks_with_summary(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """When sentinel markers exist but target section ID is missing, fallback summary should be used."""
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+    worktree = service._workdoc_worktree_path(project_dir)
+
+    canonical_text = canonical.read_text(encoding="utf-8").replace(
+        "## Plan\n\n_Pending: will be populated by the plan step._\n",
+        "## Plan\n<!-- WORKDOC:SECTION plan START -->\n_Pending: will be populated by the plan step._\n<!-- WORKDOC:SECTION plan END -->\n",
+    )
+    worker_text = canonical_text.replace(
+        "WORKDOC:SECTION plan START",
+        "WORKDOC:SECTION implementation_log START",
+    ).replace(
+        "WORKDOC:SECTION plan END",
+        "WORKDOC:SECTION implementation_log END",
+    )
+    canonical.write_text(canonical_text, encoding="utf-8")
+    worktree.write_text(worker_text, encoding="utf-8")
+
+    service._sync_workdoc(task, "plan", project_dir, "fallback because section mismatch", attempt=3)
+
+    updated = canonical.read_text(encoding="utf-8")
+    assert "### Attempt 3" in updated
+    assert "fallback because section mismatch" in updated
+    assert task.metadata.get("workdoc_sync_error_type") == "section_id_mismatch"
+    assert task.metadata.get("workdoc_sync_mode") == "fallback_append"
+    assert task.metadata.get("workdoc_sync_step") == "plan"
+    assert task.metadata.get("workdoc_sync_attempt") == 3
+
+    events = service.container.events.list_recent(limit=50)
+    matching = [e for e in events if e.get("type") == "workdoc.updated" and e.get("entity_id") == task.id]
+    assert matching
+    payload = matching[-1].get("payload") or {}
+    assert payload.get("sync_mode") == "fallback_append"
+    assert payload.get("reason") == "section_id_mismatch"
+
+
+def test_sync_sentinel_id_mismatch_without_summary_raises(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Sentinel section mismatch with no summary should fail explicitly."""
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+    worktree = service._workdoc_worktree_path(project_dir)
+
+    canonical_text = canonical.read_text(encoding="utf-8").replace(
+        "## Plan\n\n_Pending: will be populated by the plan step._\n",
+        "## Plan\n<!-- WORKDOC:SECTION plan START -->\n_Pending: will be populated by the plan step._\n<!-- WORKDOC:SECTION plan END -->\n",
+    )
+    worker_text = canonical_text.replace(
+        "WORKDOC:SECTION plan START",
+        "WORKDOC:SECTION implementation_log START",
+    ).replace(
+        "WORKDOC:SECTION plan END",
+        "WORKDOC:SECTION implementation_log END",
+    )
+    canonical.write_text(canonical_text, encoding="utf-8")
+    worktree.write_text(worker_text, encoding="utf-8")
+
+    with pytest.raises(ValueError, match="section_id_mismatch"):
+        service._sync_workdoc(task, "plan", project_dir, "", attempt=1)
+    assert task.metadata.get("workdoc_sync_error_type") == "section_id_mismatch"
+    assert task.metadata.get("workdoc_sync_mode") == "blocked_invalid_structure"
+    assert task.metadata.get("workdoc_sync_step") == "plan"
+    assert task.metadata.get("workdoc_sync_attempt") == 1
+
+
+def test_sync_legacy_heading_merge_without_sentinels(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Legacy workdocs without sentinels should still merge by heading."""
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+    worktree = service._workdoc_worktree_path(project_dir)
+
+    strip_markers = lambda s: re.sub(r"\n?<!--\s*WORKDOC:[^>]+-->\n?", "\n", s)
+    canonical_text = strip_markers(canonical.read_text(encoding="utf-8"))
+    worktree_text = canonical_text.replace(
+        "_Pending: will be populated by the plan step._",
+        "Legacy worker-authored plan update",
+    )
+    canonical.write_text(canonical_text, encoding="utf-8")
+    worktree.write_text(worktree_text, encoding="utf-8")
+
+    service._sync_workdoc(task, "plan", project_dir, "unused summary", attempt=1)
+
+    updated = canonical.read_text(encoding="utf-8")
+    assert "Legacy worker-authored plan update" in updated
+    assert "<!-- WORKDOC:SECTION" not in updated
+
+
+def test_sync_blocks_on_malformed_canonical_sentinel_structure(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Malformed canonical sentinel pairs must fail explicitly."""
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+    worktree = service._workdoc_worktree_path(project_dir)
+
+    malformed = canonical.read_text(encoding="utf-8").replace("<!-- WORKDOC:SECTION plan END -->", "")
+    canonical.write_text(malformed, encoding="utf-8")
+    worktree.write_text(
+        malformed.replace("_Pending: will be populated by the plan step._", "worker changed plan text"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Malformed canonical workdoc section markers"):
+        service._sync_workdoc(task, "plan", project_dir, "", attempt=1)
+    assert task.metadata.get("workdoc_sync_error_type") == "canonical_malformed"
+    assert task.metadata.get("workdoc_sync_mode") == "blocked_invalid_structure"
+
+
+def test_sync_blocks_on_duplicate_canonical_sentinel_section_id(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Duplicate START/END blocks for same sentinel ID must be treated as malformed."""
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+    worktree = service._workdoc_worktree_path(project_dir)
+
+    text = canonical.read_text(encoding="utf-8")
+    duplicate_block = (
+        "<!-- WORKDOC:SECTION plan START -->\n"
+        "Duplicate plan section\n"
+        "<!-- WORKDOC:SECTION plan END -->\n"
+    )
+    text = text.rstrip() + "\n\n" + duplicate_block
+    canonical.write_text(text, encoding="utf-8")
+    worktree.write_text(
+        text.replace("_Pending: will be populated by the plan step._", "worker changed plan text"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Malformed canonical workdoc section markers"):
+        service._sync_workdoc(task, "plan", project_dir, "", attempt=1)
+    assert task.metadata.get("workdoc_sync_error_type") == "canonical_malformed"
+    assert task.metadata.get("workdoc_sync_mode") == "blocked_invalid_structure"
+
+
+def test_sync_blocks_on_malformed_sentinel_comment_format(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Malformed WORKDOC:SECTION comments should be treated as malformed, not missing."""
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+    worktree = service._workdoc_worktree_path(project_dir)
+
+    malformed = canonical.read_text(encoding="utf-8").replace(
+        "<!-- WORKDOC:SECTION plan START -->",
+        "<!-- WORKDOC:SECTION plan-v2 START -->",
+    )
+    canonical.write_text(malformed, encoding="utf-8")
+    worktree.write_text(
+        malformed.replace("_Pending: will be populated by the plan step._", "worker changed plan"),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Malformed canonical workdoc section markers"):
+        service._sync_workdoc(task, "plan", project_dir, "", attempt=1)
+    assert task.metadata.get("workdoc_sync_error_type") == "canonical_malformed"
+    assert task.metadata.get("workdoc_sync_mode") == "blocked_invalid_structure"
+
+
+def test_shared_verification_section_appends_attempt_numbering_across_steps(
+    service: OrchestratorService, project_dir: Path
+) -> None:
+    """verify/benchmark/reproduce should share one section with append-only attempt blocks."""
+    task = Task(
+        title="Shared verification",
+        description="Validate shared verification section behavior",
+        task_type="feature",
+        priority="P1",
+    )
+    service._init_workdoc(task, project_dir)
+
+    service._sync_workdoc(task, "verify", project_dir, "verify attempt one", attempt=1)
+    service._sync_workdoc(task, "benchmark", project_dir, "benchmark attempt two", attempt=2)
+    service._sync_workdoc(task, "reproduce", project_dir, "reproduce attempt three", attempt=3)
+
+    canonical = service._workdoc_canonical_path(task.id)
+    content = canonical.read_text(encoding="utf-8")
+    assert "### Attempt 1" in content
+    assert "verify attempt one" in content
+    assert "### Attempt 2" in content
+    assert "benchmark attempt two" in content
+    assert "### Attempt 3" in content
+    assert "reproduce attempt three" in content
+
+
 def test_sync_verify_ignores_worker_changes_and_uses_summary(
     service: OrchestratorService, task: Task, project_dir: Path
 ) -> None:
@@ -527,6 +905,24 @@ def test_sync_verify_ignores_worker_changes_and_uses_summary(
     assert "orchestrator verify summary" in content
     assert "worker-edited verification text" not in content
     assert content != before
+
+
+def test_sync_orchestrator_summary_clears_stale_sync_diagnostics(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Expected orchestrator summary writes should not leave sync error diagnostics behind."""
+    service._init_workdoc(task, project_dir)
+    task.metadata["workdoc_sync_error_type"] = "section_id_mismatch"
+    task.metadata["workdoc_sync_mode"] = "blocked_invalid_structure"
+    task.metadata["workdoc_sync_step"] = "plan"
+    task.metadata["workdoc_sync_attempt"] = 9
+
+    service._sync_workdoc(task, "verify", project_dir, "orchestrator verify summary", attempt=1)
+
+    assert task.metadata.get("workdoc_sync_error_type") is None
+    assert task.metadata.get("workdoc_sync_mode") is None
+    assert task.metadata.get("workdoc_sync_step") is None
+    assert task.metadata.get("workdoc_sync_attempt") is None
 
 
 def test_sync_implement_fix_ignores_worker_changes_and_formats_cycles(
@@ -833,3 +1229,92 @@ def test_run_non_review_step_blocks_when_workdoc_missing(
     updated_run = service.container.runs.get(run.id)
     assert updated_run is not None
     assert updated_run.status == "blocked"
+
+
+def test_run_non_review_step_blocks_when_workdoc_invalid_encoding(
+    service: OrchestratorService,
+    task: Task,
+    project_dir: Path,
+) -> None:
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+    canonical.write_bytes(b"\xff\xfe\xfa")
+    run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), branch=None)
+
+    ok = service._run_non_review_step(task, run, "implement", attempt=1)
+
+    assert ok is False
+    updated_task = service.container.tasks.get(task.id)
+    assert updated_task is not None
+    assert updated_task.status == "blocked"
+    assert updated_task.error and "Invalid workdoc encoding" in updated_task.error
+    assert updated_task.metadata.get("invalid_workdoc_path")
+    updated_run = service.container.runs.get(run.id)
+    assert updated_run is not None
+    assert updated_run.status == "blocked"
+
+
+def test_run_non_review_step_blocks_when_worktree_workdoc_missing_during_sync(
+    service: OrchestratorService,
+    task: Task,
+    project_dir: Path,
+) -> None:
+    service._init_workdoc(task, project_dir)
+    worktree = service._workdoc_worktree_path(project_dir)
+    run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), branch=None)
+
+    def run_step_and_delete(*, task: Task, step: str, attempt: int) -> StepResult:
+        worktree.unlink(missing_ok=True)
+        return StepResult(status="ok", summary="step summary")
+
+    service.worker_adapter.run_step = run_step_and_delete  # type: ignore[method-assign]
+
+    ok = service._run_non_review_step(task, run, "plan", attempt=1)
+
+    assert ok is False
+    updated_task = service.container.tasks.get(task.id)
+    assert updated_task is not None
+    assert updated_task.status == "blocked"
+    assert updated_task.error and "Missing worktree workdoc during sync" in updated_task.error
+
+
+def test_run_non_review_step_persists_sync_diagnostics_on_block(
+    service: OrchestratorService,
+    task: Task,
+    project_dir: Path,
+) -> None:
+    service._init_workdoc(task, project_dir)
+    canonical = service._workdoc_canonical_path(task.id)
+    worktree = service._workdoc_worktree_path(project_dir)
+    run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso(), branch=None)
+
+    canonical_text = canonical.read_text(encoding="utf-8").replace(
+        "## Plan\n<!-- WORKDOC:SECTION plan START -->\n_Pending: will be populated by the plan step._\n<!-- WORKDOC:SECTION plan END -->\n",
+        "## Plan\n<!-- WORKDOC:SECTION plan START -->\n_Pending: will be populated by the plan step._\n<!-- WORKDOC:SECTION plan END -->\n",
+    )
+    canonical.write_text(canonical_text, encoding="utf-8")
+
+    def run_step_with_empty_summary(*, task: Task, step: str, attempt: int) -> StepResult:
+        current = worktree.read_text(encoding="utf-8")
+        mismatched = current.replace(
+            "WORKDOC:SECTION plan START",
+            "WORKDOC:SECTION implementation_log START",
+        ).replace(
+            "WORKDOC:SECTION plan END",
+            "WORKDOC:SECTION implementation_log END",
+        )
+        worktree.write_text(mismatched, encoding="utf-8")
+        return StepResult(status="ok", summary="")
+
+    service.worker_adapter.run_step = run_step_with_empty_summary  # type: ignore[method-assign]
+
+    ok = service._run_non_review_step(task, run, "plan", attempt=2)
+
+    assert ok is False
+    updated_task = service.container.tasks.get(task.id)
+    assert updated_task is not None
+    assert updated_task.status == "blocked"
+    assert updated_task.metadata.get("workdoc_sync_error_type") == "section_id_mismatch"
+    assert updated_task.metadata.get("workdoc_sync_mode") == "blocked_invalid_structure"
+    assert updated_task.metadata.get("workdoc_sync_step") == "plan"
+    assert updated_task.metadata.get("workdoc_sync_attempt") == 2

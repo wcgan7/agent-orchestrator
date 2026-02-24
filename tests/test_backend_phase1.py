@@ -265,20 +265,20 @@ def test_tasks_board_uses_status_aware_ordering(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         seeded = {
-            "backlog_high": client.post("/api/tasks", json={"title": "Backlog high", "priority": "P1"}).json()["task"]["id"],
-            "backlog_urgent": client.post("/api/tasks", json={"title": "Backlog urgent", "priority": "P0"}).json()["task"]["id"],
-            "in_progress_old": client.post("/api/tasks", json={"title": "In progress old", "priority": "P1"}).json()["task"]["id"],
-            "in_progress_new": client.post("/api/tasks", json={"title": "In progress new", "priority": "P1"}).json()["task"]["id"],
-            "in_review_old": client.post("/api/tasks", json={"title": "In review old", "priority": "P1"}).json()["task"]["id"],
-            "in_review_new": client.post("/api/tasks", json={"title": "In review new", "priority": "P1"}).json()["task"]["id"],
-            "blocked_old": client.post("/api/tasks", json={"title": "Blocked old", "priority": "P1"}).json()["task"]["id"],
-            "blocked_new": client.post("/api/tasks", json={"title": "Blocked new", "priority": "P1"}).json()["task"]["id"],
-            "done_old": client.post("/api/tasks", json={"title": "Done old", "priority": "P2"}).json()["task"]["id"],
-            "done_new": client.post("/api/tasks", json={"title": "Done new", "priority": "P3"}).json()["task"]["id"],
-            "done_p0": client.post("/api/tasks", json={"title": "Done p0", "priority": "P0"}).json()["task"]["id"],
-            "done_p1": client.post("/api/tasks", json={"title": "Done p1", "priority": "P1"}).json()["task"]["id"],
-            "cancelled_old": client.post("/api/tasks", json={"title": "Cancelled old", "priority": "P1"}).json()["task"]["id"],
-            "cancelled_new": client.post("/api/tasks", json={"title": "Cancelled new", "priority": "P1"}).json()["task"]["id"],
+            "backlog_high": client.post("/api/tasks", json={"title": "Backlog high", "priority": "P1", "status": "backlog"}).json()["task"]["id"],
+            "backlog_urgent": client.post("/api/tasks", json={"title": "Backlog urgent", "priority": "P0", "status": "backlog"}).json()["task"]["id"],
+            "in_progress_old": client.post("/api/tasks", json={"title": "In progress old", "priority": "P1", "status": "backlog"}).json()["task"]["id"],
+            "in_progress_new": client.post("/api/tasks", json={"title": "In progress new", "priority": "P1", "status": "backlog"}).json()["task"]["id"],
+            "in_review_old": client.post("/api/tasks", json={"title": "In review old", "priority": "P1", "status": "backlog"}).json()["task"]["id"],
+            "in_review_new": client.post("/api/tasks", json={"title": "In review new", "priority": "P1", "status": "backlog"}).json()["task"]["id"],
+            "blocked_old": client.post("/api/tasks", json={"title": "Blocked old", "priority": "P1", "status": "backlog"}).json()["task"]["id"],
+            "blocked_new": client.post("/api/tasks", json={"title": "Blocked new", "priority": "P1", "status": "backlog"}).json()["task"]["id"],
+            "done_old": client.post("/api/tasks", json={"title": "Done old", "priority": "P2", "status": "backlog"}).json()["task"]["id"],
+            "done_new": client.post("/api/tasks", json={"title": "Done new", "priority": "P3", "status": "backlog"}).json()["task"]["id"],
+            "done_p0": client.post("/api/tasks", json={"title": "Done p0", "priority": "P0", "status": "backlog"}).json()["task"]["id"],
+            "done_p1": client.post("/api/tasks", json={"title": "Done p1", "priority": "P1", "status": "backlog"}).json()["task"]["id"],
+            "cancelled_old": client.post("/api/tasks", json={"title": "Cancelled old", "priority": "P1", "status": "backlog"}).json()["task"]["id"],
+            "cancelled_new": client.post("/api/tasks", json={"title": "Cancelled new", "priority": "P1", "status": "backlog"}).json()["task"]["id"],
         }
         tasks_path = tmp_path / ".agent_orchestrator" / "tasks.yaml"
         payload = yaml.safe_load(tasks_path.read_text(encoding="utf-8")) or {}
@@ -382,11 +382,11 @@ def test_tasks_board_uses_status_aware_ordering(tmp_path: Path) -> None:
 def test_tasks_board_sorting_is_deterministic_for_ties_and_missing_timestamps(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        done_new = client.post("/api/tasks", json={"title": "Done with timestamp", "priority": "P2"}).json()["task"]["id"]
-        done_bad_a = client.post("/api/tasks", json={"title": "Done malformed A", "priority": "P2"}).json()["task"]["id"]
-        done_bad_b = client.post("/api/tasks", json={"title": "Done malformed B", "priority": "P2"}).json()["task"]["id"]
-        backlog_tie_a = client.post("/api/tasks", json={"title": "Backlog tie A", "priority": "P2"}).json()["task"]["id"]
-        backlog_tie_b = client.post("/api/tasks", json={"title": "Backlog tie B", "priority": "P2"}).json()["task"]["id"]
+        done_new = client.post("/api/tasks", json={"title": "Done with timestamp", "priority": "P2", "status": "backlog"}).json()["task"]["id"]
+        done_bad_a = client.post("/api/tasks", json={"title": "Done malformed A", "priority": "P2", "status": "backlog"}).json()["task"]["id"]
+        done_bad_b = client.post("/api/tasks", json={"title": "Done malformed B", "priority": "P2", "status": "backlog"}).json()["task"]["id"]
+        backlog_tie_a = client.post("/api/tasks", json={"title": "Backlog tie A", "priority": "P2", "status": "backlog"}).json()["task"]["id"]
+        backlog_tie_b = client.post("/api/tasks", json={"title": "Backlog tie B", "priority": "P2", "status": "backlog"}).json()["task"]["id"]
 
         done_tie_ids = sorted([done_bad_a, done_bad_b])
         backlog_tie_ids = sorted([backlog_tie_a, backlog_tie_b])
@@ -774,7 +774,7 @@ def test_get_task_includes_timing_summary_for_completed_runs(tmp_path: Path) -> 
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     container = Container(tmp_path)
     with TestClient(app) as client:
-        created = client.post("/api/tasks", json={"title": "Timing complete runs"}).json()["task"]
+        created = client.post("/api/tasks", json={"title": "Timing complete runs", "status": "backlog"}).json()["task"]
         task = container.tasks.get(created["id"])
         assert task is not None
 
@@ -809,7 +809,7 @@ def test_get_task_timing_summary_keeps_completed_total_while_running(tmp_path: P
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     container = Container(tmp_path)
     with TestClient(app) as client:
-        created = client.post("/api/tasks", json={"title": "Timing running run"}).json()["task"]
+        created = client.post("/api/tasks", json={"title": "Timing running run", "status": "backlog"}).json()["task"]
         task = container.tasks.get(created["id"])
         assert task is not None
 
@@ -844,7 +844,7 @@ def test_get_task_timing_summary_ignores_malformed_timestamps(tmp_path: Path) ->
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     container = Container(tmp_path)
     with TestClient(app) as client:
-        created = client.post("/api/tasks", json={"title": "Timing malformed"}).json()["task"]
+        created = client.post("/api/tasks", json={"title": "Timing malformed", "status": "backlog"}).json()["task"]
         task = container.tasks.get(created["id"])
         assert task is not None
 
@@ -879,7 +879,10 @@ def test_get_task_timing_summary_handles_mixed_timezone_formats(tmp_path: Path) 
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     container = Container(tmp_path)
     with TestClient(app) as client:
-        created = client.post("/api/tasks", json={"title": "Timing mixed timezone formats"}).json()["task"]
+        created = client.post(
+            "/api/tasks",
+            json={"title": "Timing mixed timezone formats", "status": "backlog"},
+        ).json()["task"]
         task = container.tasks.get(created["id"])
         assert task is not None
 
@@ -1184,6 +1187,296 @@ def test_retry_clears_pending_gate_and_human_blockers(tmp_path: Path) -> None:
 
         rerun_resp = client.post(f"/api/tasks/{created['id']}/run")
         assert rerun_resp.status_code == 200
+
+
+def test_retry_preserves_existing_workdoc_content(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "title": "Retry keeps context",
+                "status": "backlog",
+                "approval_mode": "auto_approve",
+                "metadata": {
+                    "scripted_steps": {
+                        "plan": {"status": "ok", "summary": "Original plan context"},
+                        "implement": {"status": "error", "summary": "Intentional failure for retry"},
+                    }
+                },
+            },
+        ).json()["task"]
+
+        run_resp = client.post(f"/api/tasks/{created['id']}/run")
+        assert run_resp.status_code == 200
+        blocked_task = run_resp.json()["task"]
+        assert blocked_task["status"] == "blocked"
+
+        before = client.get(f"/api/tasks/{created['id']}/workdoc")
+        assert before.status_code == 200
+        before_content = before.json()["content"]
+        assert "Original plan context" in before_content
+
+        retry_resp = client.post(f"/api/tasks/{created['id']}/retry", json={"guidance": "Keep previous plan, continue from verify"})
+        assert retry_resp.status_code == 200
+
+        after = client.get(f"/api/tasks/{created['id']}/workdoc")
+        assert after.status_code == 200
+        after_content = after.json()["content"]
+        assert "Original plan context" in after_content
+        assert before_content == after_content
+
+
+def test_retry_run_blocks_when_prior_workdoc_missing(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "title": "Retry missing workdoc",
+                "status": "backlog",
+                "approval_mode": "auto_approve",
+                "metadata": {
+                    "scripted_steps": {
+                        "plan": {"status": "ok", "summary": "Plan before failure"},
+                        "implement": {"status": "error", "summary": "Fail so retry is available"},
+                    }
+                },
+            },
+        ).json()["task"]
+
+        first_run = client.post(f"/api/tasks/{created['id']}/run")
+        assert first_run.status_code == 200
+        assert first_run.json()["task"]["status"] == "blocked"
+
+        container = Container(tmp_path)
+        canonical = container.state_root / "workdocs" / f"{created['id']}.md"
+        assert canonical.exists()
+        canonical.unlink()
+        assert not canonical.exists()
+
+        retry_resp = client.post(f"/api/tasks/{created['id']}/retry")
+        assert retry_resp.status_code == 200
+        assert retry_resp.json()["task"]["status"] == "queued"
+
+        rerun = client.post(f"/api/tasks/{created['id']}/run")
+        assert rerun.status_code == 200
+        rerun_task = rerun.json()["task"]
+        assert rerun_task["status"] == "blocked"
+        assert "Missing required workdoc" in (rerun_task.get("error") or "")
+
+
+def test_retry_run_blocks_when_prior_workdoc_invalid_encoding(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "title": "Retry invalid workdoc",
+                "status": "backlog",
+                "approval_mode": "auto_approve",
+                "metadata": {
+                    "scripted_steps": {
+                        "plan": {"status": "ok", "summary": "Plan before failure"},
+                        "implement": {"status": "error", "summary": "Fail so retry is available"},
+                    }
+                },
+            },
+        ).json()["task"]
+
+        first_run = client.post(f"/api/tasks/{created['id']}/run")
+        assert first_run.status_code == 200
+        assert first_run.json()["task"]["status"] == "blocked"
+
+        container = Container(tmp_path)
+        canonical = container.state_root / "workdocs" / f"{created['id']}.md"
+        assert canonical.exists()
+        canonical.write_bytes(b"\xff\xfe\xfa")
+
+        retry_resp = client.post(f"/api/tasks/{created['id']}/retry")
+        assert retry_resp.status_code == 200
+        assert retry_resp.json()["task"]["status"] == "queued"
+
+        rerun = client.post(f"/api/tasks/{created['id']}/run")
+        assert rerun.status_code == 200
+        rerun_task = rerun.json()["task"]
+        assert rerun_task["status"] == "blocked"
+        assert "Invalid workdoc encoding" in (rerun_task.get("error") or "")
+
+
+def test_retry_clears_stale_invalid_workdoc_markers(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={"title": "Retry clears invalid markers", "status": "backlog"},
+        ).json()["task"]
+        task_id = created["id"]
+
+        container = Container(tmp_path)
+        task = container.tasks.get(task_id)
+        assert task is not None
+        task.status = "blocked"
+        task.metadata["invalid_workdoc_path"] = "/tmp/bad.md"
+        task.metadata["invalid_workdoc_error"] = "Invalid workdoc encoding"
+        task.metadata["workdoc_sync_error_type"] = "section_id_mismatch"
+        task.metadata["workdoc_sync_mode"] = "blocked_invalid_structure"
+        task.metadata["workdoc_sync_step"] = "plan"
+        task.metadata["workdoc_sync_attempt"] = 3
+        container.tasks.upsert(task)
+
+        retry_resp = client.post(f"/api/tasks/{task_id}/retry")
+        assert retry_resp.status_code == 200
+        payload = retry_resp.json()["task"]
+        assert payload["status"] == "queued"
+        assert payload["metadata"].get("invalid_workdoc_path") is None
+        assert payload["metadata"].get("invalid_workdoc_error") is None
+        assert payload["metadata"].get("workdoc_sync_error_type") is None
+        assert payload["metadata"].get("workdoc_sync_mode") is None
+        assert payload["metadata"].get("workdoc_sync_step") is None
+        assert payload["metadata"].get("workdoc_sync_attempt") is None
+
+
+def test_retry_run_appends_attempt_marker_to_workdoc(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "title": "Retry attempt marker",
+                "status": "backlog",
+                "approval_mode": "auto_approve",
+                "metadata": {
+                    "scripted_steps": {
+                        "plan": {"status": "ok", "summary": "Initial attempt plan"},
+                        "implement": {"status": "error", "summary": "Force retry"},
+                        "verify": {"status": "ok", "summary": "Retry verify completed"},
+                    }
+                },
+            },
+        ).json()["task"]
+
+        first_run = client.post(f"/api/tasks/{created['id']}/run")
+        assert first_run.status_code == 200
+        assert first_run.json()["task"]["status"] == "blocked"
+
+        retry_resp = client.post(
+            f"/api/tasks/{created['id']}/retry",
+            json={"guidance": "Resume from verify", "start_from_step": "verify"},
+        )
+        assert retry_resp.status_code == 200
+
+        second_run = client.post(f"/api/tasks/{created['id']}/run")
+        assert second_run.status_code == 200
+        assert second_run.json()["task"]["status"] == "done"
+
+        workdoc_resp = client.get(f"/api/tasks/{created['id']}/workdoc")
+        assert workdoc_resp.status_code == 200
+        content = workdoc_resp.json()["content"]
+        assert "## Retry Attempt 2" in content
+        assert "Resume from verify" in content
+        assert "### Attempt 2" in content
+        assert "Retry verify completed" in content
+
+        container = Container(tmp_path)
+        retry_workdoc_events = [
+            event
+            for event in container.events.list_recent(limit=2000)
+            if event.get("type") == "workdoc.updated"
+            and event.get("entity_id") == created["id"]
+            and isinstance(event.get("payload"), dict)
+            and event["payload"].get("step") == "retry"
+        ]
+        assert retry_workdoc_events
+        latest_payload = retry_workdoc_events[-1]["payload"]
+        assert latest_payload["attempt"] == 2
+        assert latest_payload["start_from_step"] == "verify"
+        assert latest_payload["has_guidance"] is True
+
+
+def test_retry_event_payload_includes_lifecycle_metadata(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={"title": "Retry event payload", "status": "backlog", "approval_mode": "auto_approve"},
+        ).json()["task"]
+        task_id = created["id"]
+
+        # Seed previous error + step so retry metadata is populated.
+        container = Container(tmp_path)
+        task = container.tasks.get(task_id)
+        assert task is not None
+        task.status = "blocked"
+        task.current_step = "verify"
+        task.error = "Verify failed previously"
+        container.tasks.upsert(task)
+
+        retry_resp = client.post(
+            f"/api/tasks/{task_id}/retry",
+            json={"guidance": "Narrow scope and retry verify", "start_from_step": "verify"},
+        )
+        assert retry_resp.status_code == 200
+
+        events = container.events.list_recent(limit=2000)
+        retry_events = [event for event in events if event.get("type") == "task.retry" and event.get("entity_id") == task_id]
+        assert retry_events
+        payload = retry_events[-1].get("payload")
+        assert isinstance(payload, dict)
+        assert payload.get("retry_count") == 1
+        assert payload.get("start_from_step") == "verify"
+        assert payload.get("has_guidance") is True
+        assert payload.get("guidance") == "Narrow scope and retry verify"
+        assert payload.get("previous_error_present") is True
+
+
+def test_retry_run_task_started_event_includes_retry_metadata(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/tasks",
+            json={
+                "title": "Retry started payload",
+                "status": "backlog",
+                "approval_mode": "auto_approve",
+                "metadata": {
+                    "scripted_steps": {
+                        "plan": {"status": "ok", "summary": "Plan one"},
+                        "implement": {"status": "error", "summary": "Force retry"},
+                        "verify": {"status": "ok", "summary": "Verify after retry"},
+                    }
+                },
+            },
+        ).json()["task"]
+        task_id = created["id"]
+
+        first = client.post(f"/api/tasks/{task_id}/run")
+        assert first.status_code == 200
+        assert first.json()["task"]["status"] == "blocked"
+
+        retry_resp = client.post(
+            f"/api/tasks/{task_id}/retry",
+            json={"guidance": "Continue from verify", "start_from_step": "verify"},
+        )
+        assert retry_resp.status_code == 200
+
+        second = client.post(f"/api/tasks/{task_id}/run")
+        assert second.status_code == 200
+
+        container = Container(tmp_path)
+        started_events = [
+            event
+            for event in container.events.list_recent(limit=2000)
+            if event.get("type") == "task.started" and event.get("entity_id") == task_id
+        ]
+        assert started_events
+        payload = started_events[-1].get("payload")
+        assert isinstance(payload, dict)
+        assert payload.get("is_retry") is True
+        assert payload.get("run_attempt") == 2
+        assert payload.get("start_from_step") == "verify"
+        assert payload.get("has_retry_guidance") is True
+        assert payload.get("retry_count") >= 1
 
 
 def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
@@ -1688,6 +1981,29 @@ def test_get_workdoc_returns_409_when_missing(tmp_path: Path) -> None:
         resp = client.get(f"/api/tasks/{task_id}/workdoc")
         assert resp.status_code == 409
         assert "Missing required workdoc" in resp.json()["detail"]
+
+
+def test_get_workdoc_returns_409_when_invalid_encoding(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Bad encoding workdoc", "status": "backlog"}).json()["task"]
+        task_id = task["id"]
+
+        from agent_orchestrator.runtime.orchestrator.service import OrchestratorService
+        from agent_orchestrator.runtime.events.bus import EventBus
+        from agent_orchestrator.runtime.storage.container import Container
+
+        container = Container(tmp_path)
+        bus = EventBus(container.events, container.project_id)
+        svc = OrchestratorService(container, bus, worker_adapter=DefaultWorkerAdapter())
+        t = container.tasks.get(task_id)
+        assert t is not None
+        canonical = svc._init_workdoc(t, tmp_path)
+        canonical.write_bytes(b"\xff\xfe\xfa")
+
+        resp = client.get(f"/api/tasks/{task_id}/workdoc")
+        assert resp.status_code == 409
+        assert "Invalid workdoc encoding" in resp.json()["detail"]
 
 
 def test_get_workdoc_404_for_unknown_task(tmp_path: Path) -> None:

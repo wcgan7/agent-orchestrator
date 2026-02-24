@@ -723,6 +723,12 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.pending_gate = None
         task.metadata = task.metadata if isinstance(task.metadata, dict) else {}
         task.metadata.pop("human_blocking_issues", None)
+        task.metadata.pop("invalid_workdoc_path", None)
+        task.metadata.pop("invalid_workdoc_error", None)
+        task.metadata.pop("workdoc_sync_error_type", None)
+        task.metadata.pop("workdoc_sync_mode", None)
+        task.metadata.pop("workdoc_sync_step", None)
+        task.metadata.pop("workdoc_sync_attempt", None)
         guidance = (body.guidance if body else None) or ""
         ts = now_iso()
         if guidance.strip() or previous_error.strip():
@@ -751,7 +757,18 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             task.metadata.pop("retry_from_step", None)
         task.updated_at = now_iso()
         container.tasks.upsert(task)
-        bus.emit(channel="tasks", event_type="task.retry", entity_id=task.id, payload={"retry_count": task.retry_count})
+        bus.emit(
+            channel="tasks",
+            event_type="task.retry",
+            entity_id=task.id,
+            payload={
+                "retry_count": task.retry_count,
+                "start_from_step": task.metadata.get("retry_from_step"),
+                "has_guidance": bool(guidance.strip()),
+                "guidance": guidance.strip(),
+                "previous_error_present": bool(previous_error.strip()),
+            },
+        )
         return {"task": _task_payload(task, container)}
 
     @router.post("/tasks/{task_id}/cancel")
@@ -950,6 +967,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         try:
             return orchestrator.get_workdoc(task_id)
         except FileNotFoundError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @router.get("/tasks/{task_id}/plan")

@@ -34,6 +34,67 @@ class WorkdocManager:
         "reproduce": ("## Verification Results", "verify"),
         "report": ("## Final Report", "report"),
     }
+    _WORKDOC_SENTINEL_ID_MAP: dict[str, str] = {
+        "plan": "plan",
+        "initiative_plan": "plan",
+        "analyze": "analysis",
+        "diagnose": "analysis",
+        "scan_deps": "dependency_scan_findings",
+        "scan_code": "code_scan_findings",
+        "generate_tasks": "generated_tasks",
+        "profile": "profiling_baseline",
+        "implement": "implementation_log",
+        "prototype": "implementation_log",
+        "implement_fix": "fix_log",
+        "verify": "verification_results",
+        "benchmark": "verification_results",
+        "reproduce": "verification_results",
+        "report": "final_report",
+        "review": "review_findings",
+    }
+    _WORKDOC_HEADING_SENTINEL_MAP: dict[str, str] = {
+        "## Plan": "plan",
+        "## Initiative Plan": "plan",
+        "## Refactor Plan": "plan",
+        "## Optimization Plan": "plan",
+        "## Analysis": "analysis",
+        "## Diagnosis": "analysis",
+        "## Repository Analysis": "analysis",
+        "## Research Analysis": "analysis",
+        "## Review Analysis": "analysis",
+        "## Refactor Analysis": "analysis",
+        "## Coverage Analysis": "analysis",
+        "## Documentation Analysis": "analysis",
+        "## Spike Analysis": "analysis",
+        "## Dependency Scan Findings": "dependency_scan_findings",
+        "## Code Scan Findings": "code_scan_findings",
+        "## Generated Tasks": "generated_tasks",
+        "## Generated Remediation Tasks": "generated_tasks",
+        "## Profiling Baseline": "profiling_baseline",
+        "## Implementation Log": "implementation_log",
+        "## Fix Implementation": "implementation_log",
+        "## Refactor Implementation": "implementation_log",
+        "## Optimization Implementation": "implementation_log",
+        "## Test Implementation": "implementation_log",
+        "## Documentation Updates": "implementation_log",
+        "## Hotfix Implementation": "implementation_log",
+        "## Chore Implementation": "implementation_log",
+        "## Prototype Notes": "implementation_log",
+        "## Fix Log": "fix_log",
+        "## Verification Results": "verification_results",
+        "## Reproduction Evidence": "verification_results",
+        "## Benchmark Results": "verification_results",
+        "## Final Report": "final_report",
+        "## Security Report": "final_report",
+        "## Review Findings": "review_findings",
+    }
+    _WORKDOC_SCHEMA_MARKER = "<!-- WORKDOC:SCHEMA v1 -->"
+    _SYNC_DIAGNOSTIC_KEYS = (
+        "workdoc_sync_error_type",
+        "workdoc_sync_mode",
+        "workdoc_sync_step",
+        "workdoc_sync_attempt",
+    )
 
     _FEATURE_WORKDOC_TEMPLATE = """\
 # Working Document: {title}
@@ -683,6 +744,7 @@ _Pending: will be populated by the report step._
             .replace("{created_at}", task.created_at)
             .replace("{description}", task.description or "(no description)")
         )
+        content = self._apply_schema_and_section_sentinels(content)
         canonical.write_text(content, encoding="utf-8")
 
         worktree_copy = self.workdoc_worktree_path(project_dir)
@@ -693,6 +755,68 @@ _Pending: will be populated by the report step._
         task.metadata["workdoc_path"] = str(canonical)
         return canonical
 
+    @classmethod
+    def _apply_schema_and_section_sentinels(cls, text: str) -> str:
+        """Inject schema marker and section sentinels into initialized workdocs."""
+        updated = cls._ensure_schema_marker(text)
+        managed_start = cls._managed_sections_start_offset(updated)
+        for heading, section_id in cls._WORKDOC_HEADING_SENTINEL_MAP.items():
+            updated = cls._wrap_heading_with_sentinel(updated, heading, section_id, start_offset=managed_start)
+        return updated
+
+    @classmethod
+    def _ensure_schema_marker(cls, text: str) -> str:
+        marker = cls._WORKDOC_SCHEMA_MARKER
+        if marker in text:
+            return text
+        first_newline = text.find("\n")
+        if first_newline == -1:
+            return marker + "\n" + text
+        return text[: first_newline + 1] + marker + "\n" + text[first_newline + 1 :]
+
+    @staticmethod
+    def _wrap_heading_with_sentinel(text: str, heading: str, section_id: str, *, start_offset: int = 0) -> str:
+        """Wrap heading body with sentinel markers when not already present."""
+        heading_re = re.compile(rf"(?m)^{re.escape(heading)}\s*$")
+        searchable = text[start_offset:] if start_offset > 0 else text
+        matches = list(heading_re.finditer(searchable))
+        if not matches:
+            return text
+        start_marker = f"<!-- WORKDOC:SECTION {section_id} START -->"
+        end_marker = f"<!-- WORKDOC:SECTION {section_id} END -->"
+        for match in reversed(matches):
+            absolute_start = (start_offset + match.start()) if start_offset > 0 else match.start()
+            absolute_end = (start_offset + match.end()) if start_offset > 0 else match.end()
+            heading_line_end = text.find("\n", absolute_end)
+            if heading_line_end == -1:
+                continue
+            section_start = heading_line_end + 1
+            rest = text[section_start:]
+            next_heading = re.search(r"^## ", rest, re.MULTILINE)
+            section_end = section_start + next_heading.start() if next_heading else len(text)
+            body = text[section_start:section_end]
+            if start_marker in body and end_marker in body:
+                continue
+            if "<!-- WORKDOC:SECTION " in body:
+                # Avoid nesting or rewriting already-structured blocks.
+                continue
+            if body and not body.endswith("\n"):
+                body += "\n"
+            wrapped = f"{start_marker}\n{body}{end_marker}\n"
+            text = text[:section_start] + wrapped + text[section_end:]
+        return text
+
+    @staticmethod
+    def _managed_sections_start_offset(text: str) -> int:
+        """Return offset where managed workdoc sections begin (after metadata/description prelude)."""
+        first = text.find("\n---\n")
+        if first == -1:
+            return 0
+        second = text.find("\n---\n", first + 1)
+        if second == -1:
+            return first + len("\n---\n")
+        return second + len("\n---\n")
+
     @staticmethod
     def cleanup_workdoc_for_commit(project_dir: Path) -> None:
         """Remove the worktree .workdoc.md before commit."""
@@ -700,79 +824,210 @@ _Pending: will be populated by the report step._
         if workdoc.exists():
             workdoc.unlink()
 
-    def refresh_workdoc(self, task: Task, project_dir: Path) -> None:
+    def refresh_workdoc(
+        self,
+        task: Task,
+        project_dir: Path,
+        *,
+        read_triplet: Callable[[], tuple[Path, Path, str, str] | None] | None = None,
+    ) -> None:
         """Copy canonical workdoc to worktree so worker sees the latest version."""
         canonical = self.workdoc_canonical_path(task.id)
         if not canonical.exists():
             return
         worktree_copy = self.workdoc_worktree_path(project_dir)
+        if read_triplet is not None:
+            triplet = read_triplet()
+            if triplet is None:
+                return
+            _, _, canonical_text, _ = triplet
+            worktree_copy.write_text(canonical_text, encoding="utf-8")
+            return
         shutil.copy2(str(canonical), str(worktree_copy))
 
     def sync_workdoc(
-        self, task: Task, step: str, project_dir: Path, summary: str | None, attempt: int | None = None
+        self,
+        task: Task,
+        step: str,
+        project_dir: Path,
+        summary: str | None,
+        attempt: int | None = None,
+        *,
+        read_workdoc_pair: Callable[[], tuple[str, str] | None] | None = None,
     ) -> None:
         """Post-step sync: accept worker changes or fallback-append summary."""
         canonical = self.workdoc_canonical_path(task.id)
         if not canonical.exists():
             return
         worktree_copy = self.workdoc_worktree_path(project_dir)
-        if not worktree_copy.exists():
+        if read_workdoc_pair is None and not worktree_copy.exists():
             return
 
-        try:
-            canonical_text = canonical.read_text(encoding="utf-8")
-            worktree_text = worktree_copy.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            # Parallel task cleanup can remove the worktree-local workdoc between
-            # existence checks and read operations. Treat that as a benign no-op.
-            return
+        if read_workdoc_pair is not None:
+            pair = read_workdoc_pair()
+            if pair is None:
+                return
+            canonical_text, worktree_text = pair
+        else:
+            try:
+                canonical_text = canonical.read_text(encoding="utf-8")
+                worktree_text = worktree_copy.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                # Parallel task cleanup can remove the worktree-local workdoc between
+                # existence checks and read operations. Treat that as a benign no-op.
+                return
 
         changed = False
+        sync_mode: str | None = None
+        sync_reason: str | None = None
         orchestrator_managed_steps = {"verify", "benchmark", "reproduce", "implement_fix", "report", "profile"}
         allow_worker_workdoc_write = step not in orchestrator_managed_steps
         if worktree_text != canonical_text and allow_worker_workdoc_write:
-            canonical.write_text(worktree_text, encoding="utf-8")
-            changed = True
+            section = self.workdoc_section_for_step(task, step)
+            if not section:
+                return
+            heading, _ = section
+            section_id = self._WORKDOC_SENTINEL_ID_MAP.get(step)
+            fallback_reason: str | None = None
+            allow_legacy_merge = True
+
+            if section_id is not None:
+                canonical_state, canonical_bounds, canonical_has_markers = self._sentinel_section_bounds(canonical_text, section_id)
+                worker_state, worker_bounds, worker_has_markers = self._sentinel_section_bounds(worktree_text, section_id)
+
+                if canonical_state == "malformed":
+                    self._set_sync_diagnostics(
+                        task,
+                        error_type="canonical_malformed",
+                        mode="blocked_invalid_structure",
+                        step=step,
+                        attempt=attempt,
+                    )
+                    raise ValueError(f"Malformed canonical workdoc section markers for step '{step}'")
+                if canonical_state == "valid":
+                    if worker_state == "valid" and worker_bounds is not None and canonical_bounds is not None:
+                        c_start, c_end = canonical_bounds
+                        w_start, w_end = worker_bounds
+                        updated = canonical_text[:c_start] + worktree_text[w_start:w_end] + canonical_text[c_end:]
+                        if updated != canonical_text:
+                            canonical.write_text(updated, encoding="utf-8")
+                            worktree_copy.write_text(updated, encoding="utf-8")
+                            changed = True
+                            sync_mode = "sentinel_merge"
+                        else:
+                            # Worker edits outside managed section are intentionally ignored.
+                            sync_mode = "sentinel_merge"
+                    elif worker_state == "missing" and worker_has_markers:
+                        fallback_reason = "section_id_mismatch"
+                        allow_legacy_merge = False
+                    elif worker_state == "missing":
+                        fallback_reason = "worktree_missing_section"
+                        allow_legacy_merge = False
+                    else:
+                        fallback_reason = "worktree_malformed"
+                        allow_legacy_merge = False
+                elif canonical_state == "missing":
+                    if worker_state == "valid":
+                        fallback_reason = "canonical_missing_section"
+                    elif worker_state == "malformed":
+                        fallback_reason = "worktree_malformed"
+                else:
+                    self._set_sync_diagnostics(
+                        task,
+                        error_type="canonical_malformed",
+                        mode="blocked_invalid_structure",
+                        step=step,
+                        attempt=attempt,
+                    )
+                    raise ValueError(f"Malformed canonical workdoc section markers for step '{step}'")
+
+            if not changed and sync_mode is None and allow_legacy_merge:
+                canonical_bounds = self._section_bounds(canonical_text, heading)
+                worker_bounds = self._section_bounds(worktree_text, heading)
+                if canonical_bounds and worker_bounds:
+                    c_start, c_end = canonical_bounds
+                    w_start, w_end = worker_bounds
+                    updated = canonical_text[:c_start] + worktree_text[w_start:w_end] + canonical_text[c_end:]
+                    if updated != canonical_text:
+                        canonical.write_text(updated, encoding="utf-8")
+                        worktree_copy.write_text(updated, encoding="utf-8")
+                        changed = True
+                        sync_mode = "legacy_heading_merge"
+                    else:
+                        sync_mode = "legacy_heading_merge"
+                else:
+                    fallback_reason = fallback_reason or "legacy_bounds_missing"
+
+            if not changed and sync_mode not in {"sentinel_merge", "legacy_heading_merge"}:
+                if summary and summary.strip():
+                    updated = self._append_summary_under_heading(
+                        canonical_text,
+                        heading=heading,
+                        placeholder_step=section[1],
+                        step=step,
+                        summary=summary,
+                        attempt=attempt,
+                    )
+                    if updated is not None and updated != canonical_text:
+                        canonical.write_text(updated, encoding="utf-8")
+                        worktree_copy.write_text(updated, encoding="utf-8")
+                        changed = True
+                        sync_mode = "fallback_append"
+                        sync_reason = fallback_reason or "worker_unstructured_change"
+                        self._set_sync_diagnostics(
+                            task,
+                            error_type=sync_reason,
+                            mode="fallback_append",
+                            step=step,
+                            attempt=attempt,
+                        )
+                else:
+                    reason = fallback_reason or "worker_unstructured_change"
+                    self._set_sync_diagnostics(
+                        task,
+                        error_type=reason,
+                        mode="blocked_invalid_structure",
+                        step=step,
+                        attempt=attempt,
+                    )
+                    raise ValueError(f"Unable to sync workdoc for step '{step}': {reason}")
         elif summary and summary.strip():
             section = self.workdoc_section_for_step(task, step)
             if not section:
                 return
             heading, placeholder_step = section
-            if placeholder_step:
-                placeholder = f"_Pending: will be populated by the {placeholder_step} step._"
-            else:
-                placeholder = "_Pending: will be populated as needed._"
-            trimmed = summary.strip()
-            if step == "implement_fix":
-                cycle_num = int(attempt or 1)
-                trimmed = f"### Fix Cycle {cycle_num}\n{trimmed}"
-            if placeholder in canonical_text:
-                updated = canonical_text.replace(placeholder, trimmed, 1)
-            else:
-                idx = canonical_text.find(heading)
-                if idx == -1:
-                    return
-                newline_after = canonical_text.find("\n", idx)
-                if newline_after == -1:
-                    updated = canonical_text + "\n\n" + trimmed
-                else:
-                    rest = canonical_text[newline_after + 1 :]
-                    next_heading = re.search(r"^## ", rest, re.MULTILINE)
-                    if next_heading:
-                        insert_pos = newline_after + 1 + next_heading.start()
-                        updated = canonical_text[:insert_pos] + trimmed + "\n\n" + canonical_text[insert_pos:]
-                    else:
-                        updated = canonical_text.rstrip() + "\n\n" + trimmed + "\n"
+            updated = self._append_summary_under_heading(
+                canonical_text,
+                heading=heading,
+                placeholder_step=placeholder_step,
+                step=step,
+                summary=summary,
+                attempt=attempt,
+            )
+            if updated is None:
+                return
             canonical.write_text(updated, encoding="utf-8")
             worktree_copy.write_text(updated, encoding="utf-8")
             changed = True
+            sync_mode = "fallback_append"
+            sync_reason = "orchestrator_summary"
+
+        if changed and sync_mode in {"sentinel_merge", "legacy_heading_merge"}:
+            self.clear_sync_diagnostics(task)
+        elif changed and sync_reason == "orchestrator_summary":
+            self.clear_sync_diagnostics(task)
 
         if changed:
+            payload: dict[str, object] = {"step": step}
+            if sync_mode:
+                payload["sync_mode"] = sync_mode
+            if sync_reason:
+                payload["reason"] = sync_reason
             self.bus.emit(
                 channel="tasks",
                 event_type="workdoc.updated",
                 entity_id=task.id,
-                payload={"step": step},
+                payload=payload,
             )
 
     def sync_workdoc_review(self, task: Task, cycle: ReviewCycle, project_dir: Path) -> None:
@@ -835,3 +1090,176 @@ _Pending: will be populated by the report step._
             entity_id=task.id,
             payload={"step": "review", "cycle": cycle.attempt},
         )
+
+    def append_retry_attempt_marker(
+        self,
+        task: Task,
+        *,
+        project_dir: Path,
+        attempt: int,
+        start_from_step: str | None = None,
+    ) -> None:
+        """Append a retry-attempt marker block to canonical/worktree workdoc."""
+        canonical = self.workdoc_canonical_path(task.id)
+        if not canonical.exists():
+            return
+
+        text = canonical.read_text(encoding="utf-8")
+        heading = f"## Retry Attempt {int(attempt)}"
+        if heading in text:
+            return
+
+        lines = [heading]
+        guidance = ""
+        previous_error = ""
+        if isinstance(task.metadata, dict):
+            retry_guidance = task.metadata.get("retry_guidance")
+            if isinstance(retry_guidance, dict):
+                guidance = str(retry_guidance.get("guidance") or "").strip()
+                previous_error = str(retry_guidance.get("previous_error") or "").strip()
+
+        if start_from_step:
+            lines.append(f"- Start from step: {start_from_step}")
+        if guidance:
+            lines.append(f"- Guidance: {guidance}")
+        if previous_error:
+            lines.append(f"- Previous error: {previous_error}")
+
+        block = "\n".join(lines)
+        updated = text.rstrip() + "\n\n" + block + "\n"
+        canonical.write_text(updated, encoding="utf-8")
+        worktree_copy = self.workdoc_worktree_path(project_dir)
+        if worktree_copy.exists():
+            worktree_copy.write_text(updated, encoding="utf-8")
+
+        self.bus.emit(
+            channel="tasks",
+            event_type="workdoc.updated",
+            entity_id=task.id,
+            payload={
+                "step": "retry",
+                "attempt": int(attempt),
+                "start_from_step": start_from_step,
+                "has_guidance": bool(guidance),
+            },
+        )
+    @staticmethod
+    def _section_bounds(text: str, heading: str) -> tuple[int, int] | None:
+        """Return [start, end) bounds for the content under ``heading``."""
+        idx = text.find(heading)
+        if idx == -1:
+            return None
+        newline_after = text.find("\n", idx)
+        if newline_after == -1:
+            return None
+        start = newline_after + 1
+        rest = text[start:]
+        next_heading = re.search(r"^## ", rest, re.MULTILINE)
+        end = start + next_heading.start() if next_heading else len(text)
+        return start, end
+
+    @staticmethod
+    def _sentinel_section_bounds(text: str, section_id: str) -> tuple[str, tuple[int, int] | None, bool]:
+        """Return (state, bounds, has_markers) for sentinel section parsing.
+
+        States: ``valid``, ``missing``, ``malformed``.
+        """
+        raw_marker_re = re.compile(r"<!--\s*WORKDOC:SECTION\b[^>]*-->")
+        strict_marker_re = re.compile(r"<!--\s*WORKDOC:SECTION\s+([a-z0-9_]+)\s+(START|END)\s*-->")
+        raw_markers = list(raw_marker_re.finditer(text))
+        if not raw_markers:
+            return "missing", None, False
+        markers: list[tuple[re.Match[str], str, str]] = []
+        for raw in raw_markers:
+            strict = strict_marker_re.fullmatch(raw.group(0))
+            if strict is None:
+                return "malformed", None, True
+            markers.append((raw, strict.group(1), strict.group(2)))
+
+        open_sections: dict[str, int] = {}
+        completed_sections: set[str] = set()
+        start_content: int | None = None
+        end_content: int | None = None
+        for raw, sid, kind in markers:
+            if kind == "START":
+                if sid in open_sections:
+                    return "malformed", None, True
+                if sid == section_id and sid in completed_sections:
+                    # Duplicate section blocks for the same sentinel ID are malformed.
+                    return "malformed", None, True
+                open_sections[sid] = raw.end()
+                if sid == section_id:
+                    start_content = raw.end()
+            else:
+                if sid not in open_sections:
+                    return "malformed", None, True
+                start_pos = open_sections.pop(sid)
+                completed_sections.add(sid)
+                if sid == section_id:
+                    start_content = start_pos
+                    end_content = raw.start()
+        if open_sections:
+            return "malformed", None, True
+        if start_content is not None and end_content is not None and start_content <= end_content:
+            return "valid", (start_content, end_content), True
+        return "missing", None, True
+
+    @staticmethod
+    def _append_summary_under_heading(
+        canonical_text: str,
+        *,
+        heading: str,
+        placeholder_step: str | None,
+        step: str,
+        summary: str,
+        attempt: int | None,
+    ) -> str | None:
+        """Append or replace summary content inside the target heading block."""
+        if placeholder_step:
+            placeholder = f"_Pending: will be populated by the {placeholder_step} step._"
+        else:
+            placeholder = "_Pending: will be populated as needed._"
+        trimmed = summary.strip()
+        attempt_num = int(attempt or 1)
+        if step == "implement_fix":
+            trimmed = f"### Fix Cycle {attempt_num}\n{trimmed}"
+        else:
+            trimmed = f"### Attempt {attempt_num}\n{trimmed}"
+        if placeholder in canonical_text:
+            return canonical_text.replace(placeholder, trimmed, 1)
+        idx = canonical_text.find(heading)
+        if idx == -1:
+            return None
+        newline_after = canonical_text.find("\n", idx)
+        if newline_after == -1:
+            return canonical_text + "\n\n" + trimmed
+        rest = canonical_text[newline_after + 1 :]
+        next_heading = re.search(r"^## ", rest, re.MULTILINE)
+        if next_heading:
+            insert_pos = newline_after + 1 + next_heading.start()
+            return canonical_text[:insert_pos] + trimmed + "\n\n" + canonical_text[insert_pos:]
+        return canonical_text.rstrip() + "\n\n" + trimmed + "\n"
+
+    @classmethod
+    def clear_sync_diagnostics(cls, task: Task) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        for key in cls._SYNC_DIAGNOSTIC_KEYS:
+            task.metadata.pop(key, None)
+
+    @classmethod
+    def _set_sync_diagnostics(
+        cls,
+        task: Task,
+        *,
+        error_type: str,
+        mode: str,
+        step: str,
+        attempt: int | None,
+    ) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        task.metadata["workdoc_sync_error_type"] = error_type
+        task.metadata["workdoc_sync_mode"] = mode
+        task.metadata["workdoc_sync_step"] = step
+        task.metadata["workdoc_sync_attempt"] = int(attempt or 1)
