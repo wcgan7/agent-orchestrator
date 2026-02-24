@@ -960,7 +960,7 @@ _Pending: will be populated by the report step._
 
             if not changed and sync_mode not in {"sentinel_merge", "legacy_heading_merge"}:
                 if summary and summary.strip():
-                    updated = self._append_summary_under_heading(
+                    summary_updated = self._append_summary_under_heading(
                         canonical_text,
                         heading=heading,
                         placeholder_step=section[1],
@@ -968,9 +968,9 @@ _Pending: will be populated by the report step._
                         summary=summary,
                         attempt=attempt,
                     )
-                    if updated is not None and updated != canonical_text:
-                        canonical.write_text(updated, encoding="utf-8")
-                        worktree_copy.write_text(updated, encoding="utf-8")
+                    if summary_updated is not None and summary_updated != canonical_text:
+                        canonical.write_text(summary_updated, encoding="utf-8")
+                        worktree_copy.write_text(summary_updated, encoding="utf-8")
                         changed = True
                         sync_mode = "fallback_append"
                         sync_reason = fallback_reason or "worker_unstructured_change"
@@ -996,7 +996,7 @@ _Pending: will be populated by the report step._
             if not section:
                 return
             heading, placeholder_step = section
-            updated = self._append_summary_under_heading(
+            summary_updated = self._append_summary_under_heading(
                 canonical_text,
                 heading=heading,
                 placeholder_step=placeholder_step,
@@ -1004,10 +1004,10 @@ _Pending: will be populated by the report step._
                 summary=summary,
                 attempt=attempt,
             )
-            if updated is None:
+            if summary_updated is None:
                 return
-            canonical.write_text(updated, encoding="utf-8")
-            worktree_copy.write_text(updated, encoding="utf-8")
+            canonical.write_text(summary_updated, encoding="utf-8")
+            worktree_copy.write_text(summary_updated, encoding="utf-8")
             changed = True
             sync_mode = "fallback_append"
             sync_reason = "orchestrator_summary"

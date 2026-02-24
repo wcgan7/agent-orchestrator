@@ -466,7 +466,9 @@ def _select_summary_run(task: Task, container: "Container") -> Any:
         "in_review": {"in_review"},
     }.get(task.status, set())
     for run in runs:
-        if run.status in preferred_statuses or run.finished_at:
+        run_status = getattr(run, "status", None)
+        run_finished_at = getattr(run, "finished_at", None)
+        if run_status in preferred_statuses or run_finished_at:
             return run
     return latest
 
