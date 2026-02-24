@@ -212,6 +212,11 @@ def _normalize_prompt_overrides(value: Any) -> dict[str, str]:
     return out
 
 
+def _normalize_prompt_injections(value: Any) -> dict[str, str]:
+    """Normalize per-step additive prompt injections from runtime config."""
+    return _normalize_prompt_overrides(value)
+
+
 def get_configurable_step_prompt_defaults() -> dict[str, str]:
     """Return default prompt text for settings-managed pipeline steps."""
     return {step: load_prompt(_instruction_prompt_name(step, "feature")) for step in _SETTINGS_PROMPT_STEPS}
@@ -601,6 +606,7 @@ def build_step_prompt(
     project_languages: list[str] | None = None,
     project_commands: dict[str, dict[str, str]] | None = None,
     prompt_overrides: dict[str, str] | None = None,
+    prompt_injections: dict[str, str] | None = None,
 ) -> str:
     """Build a prompt from Task fields with step-specific instructions.
 
@@ -616,12 +622,15 @@ def build_step_prompt(
             language-to-command mapping surfaced to workers as execution hints.
         prompt_overrides (dict[str, str] | None): Optional per-step prompt text
             overrides loaded from project settings.
+        prompt_injections (dict[str, str] | None): Optional per-step prompt text
+            snippets appended after the base task metadata block.
 
     Returns:
         str: Fully rendered prompt text sent to the worker process.
     """
     category = _step_category(step)
     normalized_overrides = _normalize_prompt_overrides(prompt_overrides)
+    normalized_injections = _normalize_prompt_injections(prompt_injections)
     instruction = normalized_overrides.get(step.strip().lower()) or load_prompt(
         _instruction_prompt_name(step, task.task_type)
     )
@@ -701,6 +710,11 @@ def build_step_prompt(
     parts.append(f"Type: {task.task_type}")
     if attempt > 1 and step != "implement":
         parts.append(f"Attempt: {attempt}")
+    step_injection = normalized_injections.get(step.strip().lower())
+    if step_injection:
+        parts.append("")
+        parts.append("## Project-configured step injection")
+        parts.append(step_injection)
 
     # Inject workdoc instructions for steps that use the working document.
     workdoc_block = _workdoc_prompt_section(step)
@@ -1257,7 +1271,9 @@ class LiveWorkerAdapter:
         langs = detect_project_languages(project_dir)
         raw_commands = (cfg.get("project") or {}).get("commands") or {}
         raw_prompt_overrides = (cfg.get("project") or {}).get("prompt_overrides")
+        raw_prompt_injections = (cfg.get("project") or {}).get("prompt_injections")
         prompt_overrides = _normalize_prompt_overrides(raw_prompt_overrides)
+        prompt_injections = _normalize_prompt_injections(raw_prompt_injections)
         project_commands = {
             lang: cmds for lang, cmds in raw_commands.items()
             if isinstance(cmds, dict)
@@ -1292,6 +1308,7 @@ class LiveWorkerAdapter:
             project_languages=langs or None,
             project_commands=project_commands,
             prompt_overrides=prompt_overrides or None,
+            prompt_injections=prompt_injections or None,
         )
 
         # 3. Execute

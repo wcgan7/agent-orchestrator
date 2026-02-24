@@ -120,6 +120,7 @@ def ensure_state_root(project_dir: Path) -> Path:
         config["project"] = project_cfg
     project_cfg.setdefault("commands", {})
     project_cfg.setdefault("prompt_overrides", {})
+    project_cfg.setdefault("prompt_injections", {})
     config_repo.save(config)
 
     return state_root

@@ -248,6 +248,7 @@ class ProjectSettingsRequest(BaseModel):
     """Patch payload for project-level lint/test/typecheck command overrides."""
     commands: Optional[dict[str, LanguageCommandsRequest]] = None
     prompt_overrides: Optional[dict[str, str]] = None
+    prompt_injections: Optional[dict[str, str]] = None
 
 
 class UpdateSettingsRequest(BaseModel):
@@ -401,6 +402,11 @@ def _normalize_prompt_overrides(value: Any) -> dict[str, str]:
     return out
 
 
+def _normalize_prompt_injections(value: Any) -> dict[str, str]:
+    """Normalize per-step additive prompt injections from runtime config."""
+    return _normalize_prompt_overrides(value)
+
+
 def _normalize_human_blocking_issues(value: Any) -> list[dict[str, str]]:
     if not isinstance(value, list):
         return []
@@ -516,7 +522,8 @@ def _build_task_timing_summary(task: Task, container: "Container") -> Optional[d
             last_finished_at = finished
 
         if run.status == "in_progress" and started is not None:
-            active_run_started_at = started
+            if active_run_started_at is None or started < active_run_started_at:
+                active_run_started_at = started
             continue
 
         if started is not None and finished is not None:
@@ -819,6 +826,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     project_cfg = dict(cfg.get("project") or {})
     prompt_defaults = get_configurable_step_prompt_defaults()
     prompt_overrides = _normalize_prompt_overrides(project_cfg.get("prompt_overrides"))
+    prompt_injections = _normalize_prompt_injections(project_cfg.get("prompt_injections"))
     return {
         "orchestrator": {
             "concurrency": _coerce_int(orchestrator.get("concurrency"), 2, minimum=1, maximum=128),
@@ -850,6 +858,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
         "project": {
             "commands": dict(project_cfg.get("commands") or {}),
             "prompt_overrides": prompt_overrides,
+            "prompt_injections": prompt_injections,
             "prompt_defaults": prompt_defaults,
         },
     }

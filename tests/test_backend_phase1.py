@@ -382,6 +382,8 @@ def test_tasks_board_uses_status_aware_ordering(tmp_path: Path) -> None:
 def test_tasks_board_sorting_is_deterministic_for_ties_and_missing_timestamps(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
+        pause = client.post("/api/orchestrator/control", json={"action": "pause"})
+        assert pause.status_code == 200
         done_new = client.post("/api/tasks", json={"title": "Done with timestamp", "priority": "P2"}).json()["task"]["id"]
         done_bad_a = client.post("/api/tasks", json={"title": "Done malformed A", "priority": "P2"}).json()["task"]["id"]
         done_bad_b = client.post("/api/tasks", json={"title": "Done malformed B", "priority": "P2"}).json()["task"]["id"]
@@ -917,6 +919,41 @@ def test_get_task_timing_summary_handles_mixed_timezone_formats(tmp_path: Path) 
         assert timing["last_finished_at"] == "2026-02-21T10:02:00+00:00"
 
 
+def test_get_task_timing_summary_prefers_earliest_active_run(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Timing active run selection"}).json()["task"]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        early_active = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at="2026-02-21T10:03:00Z",
+            finished_at=None,
+        )
+        late_active = RunRecord(
+            task_id=task.id,
+            status="in_progress",
+            started_at="2026-02-24T06:00:40.282283Z",
+            finished_at=None,
+        )
+        container.runs.upsert(early_active)
+        container.runs.upsert(late_active)
+        task.run_ids = [late_active.id, early_active.id]
+        container.tasks.upsert(task)
+
+        loaded = client.get(f"/api/tasks/{task.id}")
+        assert loaded.status_code == 200
+        timing = loaded.json()["task"]["timing_summary"]
+        assert timing["is_running"] is True
+        assert timing["active_run_started_at"] == "2026-02-21T10:03:00+00:00"
+        assert timing["total_completed_seconds"] == 0.0
+        assert timing["first_started_at"] == "2026-02-21T10:03:00+00:00"
+        assert timing["last_finished_at"] is None
+
+
 def test_project_commands_settings_round_trip(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
@@ -1007,6 +1044,7 @@ def test_project_prompt_overrides_round_trip(tmp_path: Path) -> None:
         assert baseline.status_code == 200
         project = baseline.json()["project"]
         assert project["prompt_overrides"] == {}
+        assert project["prompt_injections"] == {}
         assert "implement" in project["prompt_defaults"]
 
         updated = client.patch(
@@ -1037,6 +1075,44 @@ def test_project_prompt_overrides_round_trip(tmp_path: Path) -> None:
         reloaded = client.get("/api/settings")
         assert reloaded.status_code == 200
         assert reloaded.json()["project"]["prompt_overrides"] == overrides_after_remove
+
+
+def test_project_prompt_injections_round_trip(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        baseline = client.get("/api/settings")
+        assert baseline.status_code == 200
+        project = baseline.json()["project"]
+        assert project["prompt_injections"] == {}
+
+        updated = client.patch(
+            "/api/settings",
+            json={
+                "project": {
+                    "prompt_injections": {
+                        "IMPLEMENT": "Preserve public API compatibility.",
+                        "verify": "Run smoke tests first.",
+                    }
+                }
+            },
+        )
+        assert updated.status_code == 200
+        injections = updated.json()["project"]["prompt_injections"]
+        assert injections["implement"] == "Preserve public API compatibility."
+        assert injections["verify"] == "Run smoke tests first."
+
+        removed = client.patch(
+            "/api/settings",
+            json={"project": {"prompt_injections": {"verify": ""}}},
+        )
+        assert removed.status_code == 200
+        injections_after_remove = removed.json()["project"]["prompt_injections"]
+        assert "verify" not in injections_after_remove
+        assert injections_after_remove["implement"] == "Preserve public API compatibility."
+
+        reloaded = client.get("/api/settings")
+        assert reloaded.status_code == 200
+        assert reloaded.json()["project"]["prompt_injections"] == injections_after_remove
 
 
 def test_claim_lock_prevents_double_claim(tmp_path: Path) -> None:

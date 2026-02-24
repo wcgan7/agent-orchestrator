@@ -729,6 +729,20 @@ def test_build_step_prompt_ignores_unrelated_override() -> None:
     assert "Implement the task completely and safely" in prompt
 
 
+def test_build_step_prompt_appends_step_injection() -> None:
+    task = _make_task(task_type="feature")
+    prompt = build_step_prompt(
+        task=task,
+        step="implement",
+        attempt=1,
+        prompt_injections={"implement": "Preserve public API compatibility."},
+    )
+
+    assert "## Project-configured step injection" in prompt
+    assert "Preserve public API compatibility." in prompt
+    assert "Implement the task completely and safely" in prompt
+
+
 def test_implement_prompt_omits_review_history() -> None:
     task = _make_task(metadata={
         "review_history": [
@@ -1526,6 +1540,43 @@ def test_run_step_reads_prompt_overrides_from_config(container: Container, adapt
 
     assert result.status == "ok"
     assert "Custom verify injection." in captured_prompt["text"]
+
+
+def test_run_step_reads_prompt_injections_from_config(container: Container, adapter: LiveWorkerAdapter) -> None:
+    """run_step appends project.prompt_injections from runtime settings."""
+    cfg = container.config.load()
+    cfg["project"] = {"prompt_injections": {"verify": "Prefer quick smoke checks first."}}
+    container.config.save(cfg)
+
+    captured_prompt = {}
+    run_result = _make_run_result(exit_code=0)
+
+    def _capture_run_worker(**kwargs):
+        captured_prompt["text"] = kwargs["prompt"]
+        return run_result
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            side_effect=_capture_run_worker,
+        ),
+    ):
+        result = adapter.run_step(task=_make_task(), step="verify", attempt=1)
+
+    assert result.status == "ok"
+    assert "## Project-configured step injection" in captured_prompt["text"]
+    assert "Prefer quick smoke checks first." in captured_prompt["text"]
 
 
 # ---------------------------------------------------------------------------
