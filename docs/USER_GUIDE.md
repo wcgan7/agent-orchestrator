@@ -157,6 +157,8 @@ Settings sections:
 - `defaults`: quality gate thresholds and default dependency policy
 - `workers`: default provider/model, heartbeats, providers, step routing
 - `project.commands`: language-specific command overrides
+- `project.prompt_overrides`: per-step prompt instruction overrides
+- `project.prompt_injections`: per-step additive prompt snippets appended to worker prompts
 
 Worker provider types:
 - `codex` (`command`, optional `model`, optional `reasoning_effort`)
@@ -204,6 +206,56 @@ curl -X PATCH http://localhost:8080/api/settings \
           "test": ".venv/bin/pytest -n auto",
           "lint": ".venv/bin/ruff check ."
         }
+      }
+    }
+  }'
+```
+
+## Step Prompt Injections
+
+Use Settings -> `Step Prompt Injections` to append project-specific instructions
+per step without replacing the built-in instruction prompt.
+
+Rules:
+- Keys are normalized to lowercase step names.
+- Empty string in PATCH removes an existing injection.
+- Injections are appended only for that step.
+
+Example API patch:
+
+```bash
+curl -X PATCH http://localhost:8080/api/settings \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "project": {
+      "prompt_injections": {
+        "implement": "Preserve public API compatibility and avoid schema churn."
+      }
+    }
+  }'
+```
+
+## Step Prompt Overrides
+
+Use Settings -> `Step Prompt Injections` to review default prompt text and set
+per-step overrides.
+
+Rules:
+- Keys are normalized to lowercase step names (for example `implement`,
+  `verify`, `review`).
+- Empty string in PATCH removes an existing override.
+- Overrides replace only that step's instruction block; immutable preamble and
+  guardrails remain injected.
+
+Example API patch:
+
+```bash
+curl -X PATCH http://localhost:8080/api/settings \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "project": {
+      "prompt_overrides": {
+        "implement": "Implement this task with extra focus on backward compatibility."
       }
     }
   }'

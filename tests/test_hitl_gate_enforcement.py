@@ -75,6 +75,37 @@ def test_supervised_blocks_at_gates(tmp_path: Path) -> None:
     assert "before_commit" in gates_seen
 
 
+def test_supervised_keeps_previous_step_visible_until_gate_approval(tmp_path: Path) -> None:
+    """Current step should not advance to a gated step before approval."""
+    container, service, _ = _service(tmp_path)
+    task = Task(
+        title="Gate visibility task",
+        status="queued",
+        approval_mode="auto_approve",
+        hitl_mode="supervised",
+    )
+    container.tasks.upsert(task)
+
+    snapshots: list[tuple[str, str | None, str | None]] = []
+
+    def _mock_wait(t: Task, gate_name: str, timeout: int = 3600) -> bool:
+        phase = t.metadata.get("pipeline_phase") if isinstance(t.metadata, dict) else None
+        snapshots.append((gate_name, t.current_step, str(phase) if phase is not None else None))
+        t.pending_gate = None
+        container.tasks.upsert(t)
+        return gate_name != "before_commit"
+
+    with patch.object(service, "_wait_for_gate", side_effect=_mock_wait):
+        result = service.run_task(task.id)
+
+    assert result.status == "blocked"
+    assert snapshots[0] == ("before_implement", "plan", "plan")
+    assert snapshots[-1] == ("before_commit", "review", "review")
+    assert snapshots[1][0] == "after_implement"
+    assert snapshots[1][1] not in {"review", "commit"}
+    assert snapshots[1][2] == snapshots[1][1]
+
+
 # ---------------------------------------------------------------------------
 # Review-only — gates after_implement and before_commit only
 # ---------------------------------------------------------------------------

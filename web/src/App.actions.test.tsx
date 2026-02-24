@@ -29,7 +29,10 @@ class MockWebSocket {
   }
 }
 
-function installFetchMock() {
+function installFetchMock(options?: {
+  promptOverrides?: Record<string, string>
+  promptInjections?: Record<string, string>
+}) {
   const jsonResponse = (payload: unknown) =>
     Promise.resolve({
       ok: true,
@@ -102,6 +105,12 @@ function installFetchMock() {
     },
     project: {
       commands: {},
+      prompt_overrides: { ...(options?.promptOverrides || {}) },
+      prompt_injections: { ...(options?.promptInjections || {}) },
+      prompt_defaults: {
+        implement: 'Implement the task completely and safely.',
+        verify: 'Validate the implementation thoroughly.',
+      },
     },
   }
 
@@ -532,6 +541,9 @@ describe('App action coverage', () => {
       screen.getByLabelText(/Project commands by language/i),
       { target: { value: '{"python":{"test":"pytest -n auto","lint":"ruff check ."}}' } }
     )
+    fireEvent.change(screen.getByLabelText(/Pipeline step/i), { target: { value: 'implement' } })
+    fireEvent.change(screen.getByLabelText(/Override prompt \(optional\)/i), { target: { value: 'Custom implement prompt' } })
+    fireEvent.change(screen.getByLabelText(/Additional injection \(optional\)/i), { target: { value: 'Always preserve backward compatibility.' } })
     fireEvent.change(screen.getByLabelText(/Quality gate critical/i), { target: { value: '1' } })
     fireEvent.change(screen.getByLabelText(/Quality gate high/i), { target: { value: '2' } })
     fireEvent.change(screen.getByLabelText(/Quality gate medium/i), { target: { value: '3' } })
@@ -571,6 +583,8 @@ describe('App action coverage', () => {
       })
       expect(body.project.commands.python.test).toBe('pytest -n auto')
       expect(body.project.commands.python.lint).toBe('ruff check .')
+      expect(body.project.prompt_overrides.implement).toBe('Custom implement prompt')
+      expect(body.project.prompt_injections.implement).toBe('Always preserve backward compatibility.')
     })
 
     fireEvent.click(screen.getByRole('button', { name: /Unpin/i }))
@@ -580,6 +594,81 @@ describe('App action coverage', () => {
           String(url).includes('/api/projects/pinned/pinned-1') && (init as RequestInit | undefined)?.method === 'DELETE'
         )
       ).toBe(true)
+    })
+  })
+
+  it('sends empty override value when clearing an existing step prompt override', async () => {
+    const mockedFetch = installFetchMock({ promptOverrides: { implement: 'Existing implement override' } })
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Settings/i })).toBeInTheDocument()
+      expect(screen.getByLabelText(/Pipeline step/i)).toBeInTheDocument()
+      expect(screen.getByLabelText(/Override prompt \(optional\)/i)).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByLabelText(/Pipeline step/i), { target: { value: 'implement' } })
+    fireEvent.click(screen.getByRole('button', { name: /Clear override/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Save settings/i }))
+
+    await waitFor(() => {
+      const settingsCall = mockedFetch.mock.calls.find(([url, init]) =>
+        String(url).includes('/api/settings') && (init as RequestInit | undefined)?.method === 'PATCH'
+      )
+      expect(settingsCall).toBeTruthy()
+      const body = JSON.parse(String((settingsCall?.[1] as RequestInit).body))
+      expect(body.project.prompt_overrides.implement).toBe('')
+    })
+  })
+
+  it('sends empty override value when removing existing override text in the editor', async () => {
+    const mockedFetch = installFetchMock({ promptOverrides: { implement: 'Existing implement override' } })
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Settings/i })).toBeInTheDocument()
+      expect(screen.getByLabelText(/Pipeline step/i)).toBeInTheDocument()
+      expect(screen.getByLabelText(/Override prompt \(optional\)/i)).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByLabelText(/Pipeline step/i), { target: { value: 'implement' } })
+    fireEvent.change(screen.getByLabelText(/Override prompt \(optional\)/i), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: /Save settings/i }))
+
+    await waitFor(() => {
+      const settingsCall = mockedFetch.mock.calls.find(([url, init]) =>
+        String(url).includes('/api/settings') && (init as RequestInit | undefined)?.method === 'PATCH'
+      )
+      expect(settingsCall).toBeTruthy()
+      const body = JSON.parse(String((settingsCall?.[1] as RequestInit).body))
+      expect(body.project.prompt_overrides.implement).toBe('')
+    })
+  })
+
+  it('sends empty injection value when clearing an existing step prompt injection', async () => {
+    const mockedFetch = installFetchMock({ promptInjections: { implement: 'Existing implement injection' } })
+    render(<App />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Settings/i })).toBeInTheDocument()
+      expect(screen.getByLabelText(/Pipeline step/i)).toBeInTheDocument()
+      expect(screen.getByLabelText(/Additional injection \(optional\)/i)).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByLabelText(/Pipeline step/i), { target: { value: 'implement' } })
+    fireEvent.click(screen.getByRole('button', { name: /Clear injection/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Save settings/i }))
+
+    await waitFor(() => {
+      const settingsCall = mockedFetch.mock.calls.find(([url, init]) =>
+        String(url).includes('/api/settings') && (init as RequestInit | undefined)?.method === 'PATCH'
+      )
+      expect(settingsCall).toBeTruthy()
+      const body = JSON.parse(String((settingsCall?.[1] as RequestInit).body))
+      expect(body.project.prompt_injections.implement).toBe('')
     })
   })
 

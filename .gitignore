@@ -42,3 +42,4 @@ node_modules/
 
 # Agent Orchestrator runtime data
 .workdoc.md
+.agent_orchestrator_archive/

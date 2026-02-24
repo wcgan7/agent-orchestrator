@@ -170,6 +170,7 @@ Primary configurable areas:
 - `defaults.quality_gate`
 - `workers` (default provider, routing, providers)
 - `project.commands` (per-language test, lint, typecheck, format commands)
+- `project.prompt_injections` (per-step additive prompt text appended to worker instructions)
 
 Claude provider example:
 ```json

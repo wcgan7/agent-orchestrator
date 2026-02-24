@@ -493,27 +493,43 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
 
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
 
-        # When a specific step is requested, look up its log paths from run.steps.
+        active_meta = metadata.get("active_logs") if isinstance(metadata.get("active_logs"), dict) else None
+        last_meta = metadata.get("last_logs") if isinstance(metadata.get("last_logs"), dict) else None
+
+        requested_step = str(step or "").strip()
+
+        # When a specific step is requested, resolve logs strictly for that step.
         step_logs_meta: Optional[dict[str, Any]] = None
-        if step:
+        mode = "none"
+        if requested_step:
             for run_id in reversed(task.run_ids):
                 for run in container.runs.list():
                     if run.id == run_id:
                         # Find the last matching step entry (latest attempt).
                         for entry in reversed(run.steps or []):
-                            if isinstance(entry, dict) and entry.get("step") == step and entry.get("stdout_path"):
+                            if (
+                                isinstance(entry, dict)
+                                and str(entry.get("step") or "").strip() == requested_step
+                                and entry.get("stdout_path")
+                            ):
                                 step_logs_meta = entry
                                 break
                         break
                 if step_logs_meta:
                     break
 
-        if step_logs_meta:
-            logs_meta = step_logs_meta
-            mode = "history"
+            if step_logs_meta:
+                logs_meta = step_logs_meta
+                mode = "history"
+            elif active_meta and str(active_meta.get("step") or "").strip() == requested_step:
+                logs_meta = active_meta
+                mode = "active"
+            elif last_meta and str(last_meta.get("step") or "").strip() == requested_step:
+                logs_meta = last_meta
+                mode = "last"
+            else:
+                logs_meta = {"step": requested_step}
         else:
-            active_meta = metadata.get("active_logs") if isinstance(metadata.get("active_logs"), dict) else None
-            last_meta = metadata.get("last_logs") if isinstance(metadata.get("last_logs"), dict) else None
             logs_meta = active_meta or last_meta or {}
             mode = "active" if active_meta else ("last" if last_meta else "none")
 
@@ -574,11 +590,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                                     available_steps.append(s)
                                     seen.add(s)
                     break
-        # Include the currently running step so users can switch between
-        # earlier completed steps and the live step while a task is in progress.
-        active_step = (metadata.get("active_logs") or {}).get("step") if isinstance(metadata.get("active_logs"), dict) else None
-        if not active_step:
-            active_step = task.current_step
+        # Include the currently active log step for live switching support.
+        active_step = active_meta.get("step") if isinstance(active_meta, dict) else None
         if active_step and active_step not in seen:
             available_steps.append(str(active_step))
 

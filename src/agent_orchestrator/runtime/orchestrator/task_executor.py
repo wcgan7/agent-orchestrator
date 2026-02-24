@@ -238,14 +238,14 @@ class TaskExecutor:
                         svc.container.runs.upsert(run)
                         continue
                 svc._check_cancelled(task)
-                task.current_step = step
-                task.metadata["pipeline_phase"] = step
-                svc.container.tasks.upsert(task)
                 gate_name = svc._GATE_MAPPING.get(step)
                 if gate_name and svc._should_gate(mode, gate_name):
                     if not svc._wait_for_gate(task, gate_name):
                         svc._abort_for_gate(task, run, gate_name)
                         return
+                task.current_step = step
+                task.metadata["pipeline_phase"] = step
+                svc.container.tasks.upsert(task)
                 if not svc._run_non_review_step(task, run, step, attempt=1, workdoc_attempt=run_attempt):
                     if step in _VERIFY_STEPS:
                         if svc._consume_verify_non_actionable_flag(task):
@@ -512,15 +512,15 @@ class TaskExecutor:
 
             svc._check_cancelled(task)
             if has_commit:
+                if svc._should_gate(mode, "before_commit"):
+                    if not svc._wait_for_gate(task, "before_commit"):
+                        svc._abort_for_gate(task, run, "before_commit")
+                        return
                 task.current_step = "commit"
                 task.metadata["pipeline_phase"] = "commit"
                 svc.container.tasks.upsert(task)
                 if not self._ensure_workdoc_or_block(task, run, step="commit"):
                     return
-                if svc._should_gate(mode, "before_commit"):
-                    if not svc._wait_for_gate(task, "before_commit"):
-                        svc._abort_for_gate(task, run, "before_commit")
-                        return
 
                 commit_started = now_iso()
                 svc._cleanup_workdoc_for_commit(worktree_dir or svc.container.project_dir)

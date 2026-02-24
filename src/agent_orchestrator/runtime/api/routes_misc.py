@@ -374,6 +374,38 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             cfg["project"] = project_cfg
             touched_sections.append("project.commands")
 
+        if body.project is not None and body.project.prompt_overrides is not None:
+            project_cfg = dict(cfg.get("project") or {})
+            existing_overrides = impl._normalize_prompt_overrides(project_cfg.get("prompt_overrides"))
+            for raw_step, raw_prompt in body.project.prompt_overrides.items():
+                step = str(raw_step or "").strip().lower()
+                if not step:
+                    continue
+                prompt = raw_prompt if isinstance(raw_prompt, str) else str(raw_prompt)
+                if prompt.strip():
+                    existing_overrides[step] = prompt
+                else:
+                    existing_overrides.pop(step, None)
+            project_cfg["prompt_overrides"] = existing_overrides
+            cfg["project"] = project_cfg
+            touched_sections.append("project.prompt_overrides")
+
+        if body.project is not None and body.project.prompt_injections is not None:
+            project_cfg = dict(cfg.get("project") or {})
+            existing_injections = impl._normalize_prompt_injections(project_cfg.get("prompt_injections"))
+            for raw_step, raw_prompt in body.project.prompt_injections.items():
+                step = str(raw_step or "").strip().lower()
+                if not step:
+                    continue
+                prompt = raw_prompt if isinstance(raw_prompt, str) else str(raw_prompt)
+                if prompt.strip():
+                    existing_injections[step] = prompt
+                else:
+                    existing_injections.pop(step, None)
+            project_cfg["prompt_injections"] = existing_injections
+            cfg["project"] = project_cfg
+            touched_sections.append("project.prompt_injections")
+
         container.config.save(cfg)
         bus.emit(
             channel="system",
