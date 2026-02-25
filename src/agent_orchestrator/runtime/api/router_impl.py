@@ -326,6 +326,7 @@ _GATE_DISPLAY_LABELS: dict[str, str] = {
 
 
 def humanize_label(value: str | None) -> str:
+    """Convert snake_case identifiers into a title-cased human label."""
     raw = str(value or "").strip()
     if not raw:
         return ""
