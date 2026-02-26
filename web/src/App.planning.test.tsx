@@ -425,7 +425,7 @@ describe('Planning worker output', () => {
     fireEvent.click(screen.getByRole('button', { name: /Manual Revision/i }))
     await waitFor(() => {
       const textarea = screen.getByPlaceholderText(/Paste or edit full plan text/i) as HTMLTextAreaElement
-      expect(textarea.value).toContain('Initial plan')
+      expect(textarea.value).toContain('Updated plan')
     })
   }, 15_000)
 })
