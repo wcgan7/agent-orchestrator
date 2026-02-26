@@ -1,36 +1,39 @@
 # Agent Orchestrator
 
-Agent Orchestrator is a local orchestration control center for AI-assisted software delivery.
-It gives you a task board, execution controls, review gates, and worker management in one place.
+Agent Orchestrator is a local control center for AI-assisted software delivery, with task management, execution controls, review gates, and worker management in one place.
 
-Orchestrator autonomously plans and executes work across repositories — parallelizing independent changes, sequencing dependencies, and resolving conflicts as delivery progresses.
-Execution runs under enforced coding standards and a continuous review-and-fix cycle, producing resilient, merge-ready results instead of fragile one-pass output.
+It coordinates work across repositories by sequencing dependencies, parallelizing safe independent tasks, and managing integration as delivery progresses.
 
-Built-in prompts, pipeline templates, and quality controls let teams submit tasks directly without maintaining custom prompt packs or authoring a local `AGENTS.md` strategy file.
+You keep task prompts concise; the orchestrator handles step-specific guidance, pipeline structure, and quality controls to produce resilient, merge-ready outcomes without custom prompt packs.
 
 <!-- Screenshot may not reflect the latest UI. Regenerate with: npm --prefix web run screenshot:homepage -->
 ![Agent Orchestrator Dashboard](web/public/homepage-screenshot.png)
 
 ## What You Can Do
 
-- Run a full task lifecycle on a kanban board (`backlog` → `queued` → `in_progress` → `in_review` → `done`, plus `blocked` and `cancelled`).
-- Submit tasks with explicit types or use `task_type="auto"` to classify to the best pipeline first.
-- Execute task-specific pipelines that enforce multi-step quality (plan/analyze, implement, verify, review, commit) instead of single-pass coding.
-- Delete terminal tasks (`done`/`cancelled`) directly from task detail.
-- Clear the entire board while archiving prior runtime state to `.agent_orchestrator_archive/` instead of destructive wipe.
-- Import PRDs into executable task graphs, then execute in dependency-aware batches.
-- Parallelize safely with git worktree isolation for same-repo tasks.
-- Auto-handle merge integration and run conflict-resolution flows when branches collide.
-- Configure review strictness with severity-based quality gates (`critical`, `high`, `medium`, `low`) per defaults or task.
-- Choose a Human-in-the-Loop (HITL) mode per task: **Autopilot**, **Supervised**, **Collaborative**, or **Review Only**.
-- Add approval gates where needed, or fully automate execution when governance allows.
-- Draft, refine, and commit task plans with full revision lineage before execution.
-- Use an embedded interactive terminal directly in the project directory.
-- Control orchestrator execution (`pause`, `resume`, `drain`, `stop`).
-- Manage worker providers (Codex, Claude, Ollama) and configure step-to-provider routing.
-- Observe real-time updates across board, execution, and task detail via WebSocket.
-- Audit execution from persisted events, step logs (`stdout.log` / `stderr.log` / `progress.json`), and per-task workdocs.
-- View total time taken and execution summaries with per-step status, review findings, and commit SHAs in the task detail modal.
+### Deliver high-quality code with intent-specific pipelines
+- Write prompts as usual: short, concise, clear intent.
+- Select or let the orchestrator route work through the most suitable built-in pipeline (for example `feature`, `bug_fix`, `refactor`, `hotfix`, `docs`, `test`).
+- Each pipeline step applies step-specific guidance (`plan/analyze`, `implement`, `verify`, `review`, `commit`) to produce higher-quality outcomes than single-pass prompting.
+- Delivery pipelines run review-and-fix loops until findings are within your configured tolerance thresholds.
+- Full PRDs can be imported and automatically decomposed into dependency-aware execution batches.
+
+### Enforce quality and governance
+- Choose a Human-in-the-Loop mode per task: **Autopilot**, **Supervised**, **Collaborative**, or **Review Only**.
+- Gate execution at key handoff points (plan, review, commit) based on the selected mode.
+- Configure severity thresholds (`critical`, `high`, `medium`, `low`) globally or per task to control pass/fail tolerance.
+- Draft, refine, and commit plan revisions with full lineage before implementation when needed.
+
+### Scale execution across repositories
+- Run independent tasks in parallel, with automatic isolated git worktree provisioning for same-repo execution.
+- Automatically integrate branches and trigger conflict-resolution flows when collisions occur.
+- Route pipeline steps across providers (Codex, Claude, Ollama) with configurable step-to-provider mapping.
+- Use the embedded interactive terminal to intervene manually without leaving the orchestrator UI.
+
+### Audit and trace every task
+- Track full task history from prompt to completion: task state transitions, plan/workdoc revisions, review decisions, and gate approvals.
+- Every task produces a persistent workdoc, plus per-step runtime evidence (`stdout.log`, `stderr.log`, `progress.json`) and event timeline.
+- Inspect execution summaries, step outcomes, review findings, total runtime, and commit SHAs in task detail.
 
 ## Quick Start
 

@@ -1019,7 +1019,7 @@ describe('App default route', () => {
     })
   })
 
-  it('supports bounded font size controls in task detail plan view', async () => {
+  it('shows plan content without font size controls in task detail plan view', async () => {
     const task = {
       id: 'task-1',
       title: 'Task 1',
@@ -1095,32 +1095,11 @@ describe('App default route', () => {
     })
     fireEvent.click(screen.getByRole('button', { name: /^Plan$/i }))
 
-    const increaseButton = await screen.findByRole('button', { name: /Increase plan font size/i })
-    const decreaseButton = await screen.findByRole('button', { name: /Decrease plan font size/i })
     await waitFor(() => {
       expect(screen.getByText('Plan heading')).toBeInTheDocument()
     })
-
-    const planContent = document.querySelector('.plan-content-field.rendered-markdown') as HTMLDivElement
-    expect(planContent).toBeTruthy()
-    expect(planContent.style.fontSize).toBe('0.84rem')
-
-    for (let i = 0; i < 10; i += 1) {
-      fireEvent.click(increaseButton)
-    }
-    await waitFor(() => {
-      expect(increaseButton).toBeDisabled()
-    })
-    expect(planContent.style.fontSize).toBe('1.08rem')
-
-    for (let i = 0; i < 10; i += 1) {
-      fireEvent.click(decreaseButton)
-    }
-    await waitFor(() => {
-      expect(decreaseButton).toBeDisabled()
-    })
-    expect(planContent.style.fontSize).toBe('0.72rem')
-    expect(screen.getByText('Plan heading')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Increase plan font size/i })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Decrease plan font size/i })).not.toBeInTheDocument()
   })
 
   it('shows awaiting approval badge on board cards and opens plan tab for before_implement', async () => {
@@ -1176,8 +1155,6 @@ describe('App default route', () => {
 
     await waitFor(() => {
       expect(screen.getByText('Awaiting approval')).toBeInTheDocument()
-      expect(screen.getByText(/Approve plan to start implementation/i)).toBeInTheDocument()
-      expect(screen.getByText('Review & Approve')).toBeInTheDocument()
     })
 
     fireEvent.click(screen.getByText('Task 1'))

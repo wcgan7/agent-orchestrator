@@ -232,12 +232,6 @@ type BrowseProjectsResponse = {
   truncated: boolean
 }
 
-type CollaborationMode = {
-  mode: string
-  display_name: string
-  description: string
-}
-
 type WorkerProviderSettings = {
   type: 'codex' | 'ollama' | 'claude'
   command?: string
@@ -425,12 +419,6 @@ function isPlanningTaskType(taskType: string | undefined | null): boolean {
   return taskType === 'initiative_plan' || taskType === 'plan_only' || taskType === 'plan'
 }
 
-const DEFAULT_COLLABORATION_MODES: CollaborationMode[] = [
-  { mode: 'autopilot', display_name: 'Autopilot', description: 'Agents run freely.' },
-  { mode: 'supervised', display_name: 'Supervised', description: 'Approve each step.' },
-  { mode: 'collaborative', display_name: 'Collaborative', description: 'Work together with agents.' },
-  { mode: 'review_only', display_name: 'Review Only', description: 'Review changes before commit.' },
-]
 const DEFAULT_SETTINGS: SystemSettings = {
   orchestrator: {
     concurrency: 2,
@@ -504,18 +492,6 @@ typescript:
   test: npm test
   lint: npm run lint`
 
-const PLAN_TAB_FONT_SIZE_DEFAULT_REM = 0.84
-const PLAN_TAB_FONT_SIZE_STEP_REM = 0.06
-const PLAN_TAB_FONT_SIZE_MIN_REM = 0.72
-const PLAN_TAB_FONT_SIZE_MAX_REM = 1.08
-
-function clampPlanTabFontSize(size: number): number {
-  return Math.min(
-    PLAN_TAB_FONT_SIZE_MAX_REM,
-    Math.max(PLAN_TAB_FONT_SIZE_MIN_REM, Number(size.toFixed(2))),
-  )
-}
-
 function RenderedMarkdown({ content, className, style }: { content: string; className?: string; style?: CSSProperties }): JSX.Element {
   return (
     <div className={`rendered-markdown ${className || ''}`} style={style}>
@@ -552,19 +528,11 @@ function gateDisplayLabel(task: TaskRecord | null | undefined): string {
 
 function gateApprovalButtonLabel(gate: string | null | undefined): string {
   const normalized = String(gate || '').trim()
-  if (normalized === 'before_implement') return 'Approve plan and start implementation'
-  if (normalized === 'after_implement') return 'Approve review and continue'
+  if (normalized === 'before_implement') return 'Approve plan'
+  if (normalized === 'after_implement') return 'Approve review'
   if (normalized === 'before_commit') return 'Approve commit'
-  if (normalized === 'human_intervention') return 'Mark human intervention resolved'
+  if (normalized === 'human_intervention') return 'Acknowledge'
   return 'Approve gate'
-}
-
-function gateApprovalHelperText(task: TaskRecord | null | undefined): string {
-  const gate = String(task?.pending_gate || '').trim()
-  if (gate === 'human_intervention') {
-    return 'Task remains blocked after acknowledgement. Retry when ready.'
-  }
-  return 'Agent resumes automatically after approval.'
 }
 
 function routeFromHash(hash: string): RouteKey {
@@ -1526,9 +1494,10 @@ export default function App() {
   const [planRefineFeedback, setPlanRefineFeedback] = useState('')
   const [planJobLoading, setPlanJobLoading] = useState(false)
   const [planRefineStdout, setPlanRefineStdout] = useState('')
+  const [planRefineUiState, setPlanRefineUiState] = useState<'idle' | 'running' | 'done'>('idle')
+  const [planRefineTrackedJobId, setPlanRefineTrackedJobId] = useState('')
   const [planningWorkerTab, setPlanningWorkerTab] = useState<'plan' | 'manual'>('plan')
   const [planTabMode, setPlanTabMode] = useState<'view' | 'edit' | 'refine'>('view')
-  const [planTabFontSizeRem, setPlanTabFontSizeRem] = useState(PLAN_TAB_FONT_SIZE_DEFAULT_REM)
   const [planSavingManual, setPlanSavingManual] = useState(false)
   const [planCommitting, setPlanCommitting] = useState(false)
   const [planGenerateLoading, setPlanGenerateLoading] = useState(false)
@@ -1589,7 +1558,6 @@ export default function App() {
   const [newTaskMetadata, setNewTaskMetadata] = useState('')
   const [newTaskProjectCommands, setNewTaskProjectCommands] = useState('')
   const [newTaskWorkerModel, setNewTaskWorkerModel] = useState('')
-  const [collaborationModes, setCollaborationModes] = useState<CollaborationMode[]>(DEFAULT_COLLABORATION_MODES)
   const [newDependencyId, setNewDependencyId] = useState('')
   const [dependencyActionLoading, setDependencyActionLoading] = useState(false)
   const [dependencyActionMessage, setDependencyActionMessage] = useState('')
@@ -2017,25 +1985,6 @@ export default function App() {
     setNewTaskProjectCommands(settingsProjectCommands)
   }, [workOpen, createTab, newTaskProjectCommands, settingsProjectCommands])
 
-  useEffect(() => {
-    const fetchModes = async () => {
-      try {
-        const data = await requestJson<{ modes?: CollaborationMode[] }>(buildApiUrl('/api/collaboration/modes', projectDir))
-        const modes = (data.modes || []).map((mode) => ({
-          mode: mode.mode,
-          display_name: mode.display_name || humanizeLabel(mode.mode),
-          description: mode.description || '',
-        }))
-        if (modes.length > 0) {
-          setCollaborationModes(modes)
-        }
-      } catch {
-        setCollaborationModes(DEFAULT_COLLABORATION_MODES)
-      }
-    }
-    void fetchModes()
-  }, [projectDir])
-
   async function loadTaskDetail(taskId: string): Promise<void> {
     if (!taskId) {
       setSelectedTaskDetail(null)
@@ -2136,6 +2085,9 @@ export default function App() {
       void loadTaskPlanJobs(taskId)
       const committedOrLatest = planDoc.committed_revision_id || planDoc.latest_revision_id || ''
       setSelectedPlanRevisionId((prev) => {
+        if (prev === '') {
+          return ''
+        }
         if (prev && planDoc.revisions.some((item) => item.id === prev)) {
           return prev
         }
@@ -2175,12 +2127,13 @@ export default function App() {
       planRefineOutputRef.current = { taskId: selectedTaskId || '', logId: '', jobKey: '', text: '' }
       planGenerateOutputRef.current = { taskId: selectedTaskId || '', logId: '', jobKey: '', text: '' }
       planManualSeedRef.current = { taskId: selectedTaskId || '', workerText: '' }
+      setPlanRefineUiState('idle')
+      setPlanRefineTrackedJobId('')
       setPlanRefineStdout('')
       setPlanGenerateStdout('')
       setPlanningWorkerTab('plan')
       setPlanManualContent('')
       setPlanManualFeedbackNote('')
-      setPlanTabFontSizeRem(PLAN_TAB_FONT_SIZE_DEFAULT_REM)
     }
     if (!selectedTaskId) {
       setSelectedTaskPlan(null)
@@ -2744,6 +2697,40 @@ export default function App() {
       setPlanJobLoading(false)
     }
   }, [selectedTaskPlan?.active_refine_job?.status, planJobLoading])
+
+  useEffect(() => {
+    const activeJob = selectedTaskPlan?.active_refine_job || null
+    const activeStatus = activeJob?.status || null
+    const isActive = activeStatus === 'queued' || activeStatus === 'running'
+    if (isActive) {
+      if (planRefineUiState !== 'running') {
+        setPlanRefineUiState('running')
+      }
+      if (!planRefineTrackedJobId && activeJob?.id) {
+        setPlanRefineTrackedJobId(activeJob.id)
+      }
+      return
+    }
+    if (planRefineUiState !== 'running') {
+      return
+    }
+    const trackedJob = planRefineTrackedJobId
+      ? selectedTaskPlanJobs.find((job) => job.id === planRefineTrackedJobId) || null
+      : null
+    const terminalStatus = trackedJob?.status
+      || (activeStatus === 'completed' || activeStatus === 'failed' || activeStatus === 'cancelled' ? activeStatus : null)
+    if (terminalStatus === 'completed') {
+      setPlanRefineUiState('done')
+      setPlanRefineTrackedJobId('')
+      setPlanTabMode('view')
+      setSelectedPlanRevisionId('')
+      return
+    }
+    if (terminalStatus === 'failed' || terminalStatus === 'cancelled') {
+      setPlanRefineUiState('idle')
+      setPlanRefineTrackedJobId('')
+    }
+  }, [selectedTaskPlan?.active_refine_job, selectedTaskPlanJobs, planRefineTrackedJobId, planRefineUiState])
 
   useEffect(() => {
     if (!selectedTaskId) return
@@ -3534,7 +3521,7 @@ export default function App() {
     setPlanActionError('')
     try {
       const baseRevisionId = selectedPlanRevisionId || selectedTaskPlan?.latest_revision_id || undefined
-      await requestJson<{ job: PlanRefineJobRecord }>(buildApiUrl(`/api/tasks/${taskId}/plan/refine`, projectDir), {
+      const payload = await requestJson<{ job: PlanRefineJobRecord }>(buildApiUrl(`/api/tasks/${taskId}/plan/refine`, projectDir), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -3543,12 +3530,15 @@ export default function App() {
           priority: 'normal',
         }),
       })
-      setPlanActionMessage('Plan refine job queued.')
+      setPlanRefineUiState('running')
+      setPlanRefineTrackedJobId(payload.job?.id || '')
       planRefineOutputRef.current = { taskId, logId: '', jobKey: '', text: '' }
       setPlanRefineStdout('')
       await loadTaskPlan(taskId)
     } catch (err) {
       setPlanActionError(toErrorMessage('Failed to queue plan refine job', err))
+      setPlanRefineUiState('idle')
+      setPlanRefineTrackedJobId('')
       setPlanJobLoading(false)
     }
   }
@@ -4134,9 +4124,16 @@ export default function App() {
   })
   const hasUnresolvedBlockers = unresolvedBlockers.length > 0
   const showViewPlan = isPlanTask && selectedTaskView?.status === 'done'
+  const selectedTaskStep = String(selectedTaskView?.current_step || selectedTaskView?.metadata?.pipeline_phase || '').trim().toLowerCase()
+  const isPreImplementationStep = !selectedTaskStep || ['plan', 'analyze', 'generate_tasks'].includes(selectedTaskStep)
+  const showBeforeImplementGate = !!(
+    selectedTaskView
+    && selectedTaskView.pending_gate === 'before_implement'
+    && isPreImplementationStep
+  )
   const showPlanTab = selectedTaskView && !isPlanningTaskType(selectedTaskView.task_type) && (
     (selectedTaskPlan?.revisions?.length ?? 0) > 0 ||
-    selectedTaskView.pending_gate === 'before_implement'
+    showBeforeImplementGate
   )
   // Guard: if the Plan tab is selected but no longer visible, fall back to overview.
   const effectiveTaskDetailTab = (taskDetailTab === 'plan' && !showPlanTab) ? 'overview' : taskDetailTab
@@ -4378,7 +4375,6 @@ export default function App() {
                 <p className="field-label">
                   Pending gate: <strong>{gateDisplayLabel(selectedTaskView)}</strong>
                 </p>
-                <p className="field-label">{gateApprovalHelperText(selectedTaskView)}</p>
                 <button
                   className="button button-primary"
                   onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}
@@ -4426,25 +4422,10 @@ export default function App() {
           const planContent = (effectiveRevision?.content || '').trim()
           const isRefining = !!(selectedTaskPlan?.active_refine_job
             && (selectedTaskPlan.active_refine_job.status === 'queued' || selectedTaskPlan.active_refine_job.status === 'running'))
-          const canDecreasePlanFontSize = planTabFontSizeRem > PLAN_TAB_FONT_SIZE_MIN_REM
-          const canIncreasePlanFontSize = planTabFontSizeRem < PLAN_TAB_FONT_SIZE_MAX_REM
-          return (
-            <div className="task-detail-section-body">
-              {selectedTaskView.pending_gate === 'before_implement' ? (
-                <div className="preview-box plan-gate-banner">
-                  <p className="field-label">Plan ready for review. Approve to proceed with implementation.</p>
-                  <p className="field-label">{gateApprovalHelperText(selectedTaskView)}</p>
-                  <button
-                    className="button button-primary"
-                    onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}
-                    disabled={taskActionPending === 'approve_gate'}
-                  >
-                    {taskActionPending === 'approve_gate'
-                      ? 'Approving...'
-                      : gateApprovalButtonLabel(selectedTaskView.pending_gate)}
-                  </button>
-                </div>
-              ) : null}
+          const showRefineRunningBanner = planRefineUiState === 'running' || isRefining
+          const showRefineDoneBanner = planRefineUiState === 'done'
+          const renderPlanModeToolbar = (): JSX.Element => (
+            <div className="plan-tab-toolbar">
               <div className="plan-tab-mode-switcher">
                 <button className={`button ${planTabMode === 'view' ? 'is-active' : ''}`} onClick={() => setPlanTabMode('view')}>View</button>
                 <button className={`button ${planTabMode === 'edit' ? 'is-active' : ''}`} onClick={() => {
@@ -4462,29 +4443,39 @@ export default function App() {
                 }}>Edit</button>
                 <button className={`button ${planTabMode === 'refine' ? 'is-active' : ''}`} onClick={() => setPlanTabMode('refine')}>Refine</button>
               </div>
+            </div>
+          )
+          return (
+            <div className="task-detail-section-body">
+              {showBeforeImplementGate ? (
+                <div className="preview-box plan-gate-banner">
+                  <p className="field-label">Approve plan to continue.</p>
+                  <button
+                    className="button button-primary"
+                    onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}
+                    disabled={taskActionPending === 'approve_gate'}
+                  >
+                    {taskActionPending === 'approve_gate'
+                      ? 'Approving...'
+                      : gateApprovalButtonLabel(selectedTaskView.pending_gate)}
+                  </button>
+                </div>
+              ) : null}
               {planActionMessage ? <p className="field-label" style={{ color: 'var(--color-success, #5cb85c)' }}>{planActionMessage}</p> : null}
               {planActionError ? <p className="field-label" style={{ color: 'var(--color-danger, #d9534f)' }}>{planActionError}</p> : null}
+              {showRefineRunningBanner ? (
+                <div className="refine-banner">
+                  <span className="refine-banner-dot" />
+                  <span>Refining plan...</span>
+                </div>
+              ) : null}
+              {showRefineDoneBanner ? (
+                <div className="refine-banner refine-banner-done">
+                  <span>Refine complete. Showing latest plan.</span>
+                </div>
+              ) : null}
               {planTabMode === 'view' ? (
                 <div className="form-stack">
-                  <div className="plan-font-size-controls" role="group" aria-label="Plan font size controls">
-                    <span className="field-label">Font size</span>
-                    <button
-                      className="button"
-                      aria-label="Decrease plan font size"
-                      disabled={!canDecreasePlanFontSize}
-                      onClick={() => setPlanTabFontSizeRem((current) => clampPlanTabFontSize(current - PLAN_TAB_FONT_SIZE_STEP_REM))}
-                    >
-                      -
-                    </button>
-                    <button
-                      className="button"
-                      aria-label="Increase plan font size"
-                      disabled={!canIncreasePlanFontSize}
-                      onClick={() => setPlanTabFontSizeRem((current) => clampPlanTabFontSize(current + PLAN_TAB_FONT_SIZE_STEP_REM))}
-                    >
-                      +
-                    </button>
-                  </div>
                   {planRevisions.length > 1 ? (
                     <>
                       <label className="field-label" htmlFor="plan-tab-revision-selector">Revision</label>
@@ -4504,6 +4495,7 @@ export default function App() {
                   ) : null}
                   {planContent ? (
                     <div className="preview-box">
+                      {renderPlanModeToolbar()}
                       {effectiveRevision ? (
                         <p className="task-meta">
                           {humanizeLabel(effectiveRevision.source)}
@@ -4514,16 +4506,19 @@ export default function App() {
                       <RenderedMarkdown
                         content={planContent}
                         className="plan-content-field"
-                        style={{ fontSize: `${planTabFontSizeRem}rem` }}
                       />
                     </div>
                   ) : (
-                    <p className="empty">No plan content yet.</p>
+                    <>
+                      {renderPlanModeToolbar()}
+                      <p className="empty">No plan content yet.</p>
+                    </>
                   )}
                 </div>
               ) : null}
               {planTabMode === 'edit' ? (
                 <div className="form-stack">
+                  {renderPlanModeToolbar()}
                   <textarea
                     className="plan-content-field"
                     rows={20}
@@ -4549,12 +4544,7 @@ export default function App() {
               ) : null}
               {planTabMode === 'refine' ? (
                 <div className="form-stack">
-                  {isRefining ? (
-                    <div className="refine-banner">
-                      <span className="refine-banner-dot" />
-                      <span>Refining plan...</span>
-                    </div>
-                  ) : null}
+                  {renderPlanModeToolbar()}
                   <label className="field-label" htmlFor="plan-tab-refine-feedback">Request changes from worker</label>
                   <div className="planning-refine-inline">
                     <input
@@ -5034,10 +5024,6 @@ export default function App() {
                     {!boardCompact && task.pending_gate ? (
                       <p className="task-meta">
                         <span className="status-pill status-pill-inline status-review">Awaiting approval</span>
-                        {' · '}
-                        {gateDisplayLabel(task)}
-                        {' · '}
-                        <span className="link-button">Review &amp; Approve</span>
                       </p>
                     ) : null}
                     {!boardCompact && task.description ? <p className="task-desc">{task.description}</p> : null}
@@ -6536,18 +6522,12 @@ export default function App() {
                           {humanizeLabel('auto_approve')}
                         </button>
                       </div>
-                      <label className="field-label" htmlFor="task-hitl-mode">HITL mode</label>
-                      <select
-                        id="task-hitl-mode"
-                        value={newTaskHitlMode}
-                        onChange={(event) => setNewTaskHitlMode(event.target.value)}
-                      >
-                        {collaborationModes.map((mode) => (
-                          <option key={mode.mode} value={mode.mode}>
-                            {mode.display_name}
-                          </option>
-                        ))}
-                      </select>
+                      <label className="field-label">HITL mode</label>
+                      <HITLModeSelector
+                        currentMode={newTaskHitlMode}
+                        onModeChange={setNewTaskHitlMode}
+                        projectDir={projectDir}
+                      />
                       <label className="field-label">Dependency policy</label>
                       <div className="toggle-group" role="group" aria-label="Dependency policy">
                         {(['permissive', 'prudent', 'strict'] as const).map((level) => (
