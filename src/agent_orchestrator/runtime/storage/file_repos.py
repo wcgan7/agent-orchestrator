@@ -777,3 +777,31 @@ class FileConfigRepository:
                     os.fsync(handle.fileno())
                 os.replace(tmp_path, self._path)
         return config
+
+    def update(self, updater: Callable[[dict[str, Any]], dict[str, Any]]) -> dict[str, Any]:
+        """Atomically load, transform, and save configuration under one lock.
+
+        Args:
+            updater (Callable[[dict[str, Any]], dict[str, Any]]): Pure function
+                that receives the latest loaded config and returns the config to save.
+
+        Returns:
+            dict[str, Any]: Persisted configuration mapping.
+        """
+        _require_yaml()
+        with self._thread_lock:
+            with self._lock:
+                if self._path.exists():
+                    raw = yaml.safe_load(self._path.read_text(encoding="utf-8"))
+                    current = raw if isinstance(raw, dict) else {}
+                else:
+                    current = {}
+                updated = updater(dict(current))
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                tmp_path = self._path.with_suffix(f"{self._path.suffix}.tmp")
+                with tmp_path.open("w", encoding="utf-8") as handle:
+                    yaml.safe_dump(updated, handle, sort_keys=False)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp_path, self._path)
+                return updated

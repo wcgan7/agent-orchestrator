@@ -164,6 +164,32 @@ def test_patch_rejects_direct_status_changes(tmp_path: Path) -> None:
         assert "cannot be changed via PATCH" in response.text
 
 
+def test_patch_rejects_internal_metadata_keys(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Metadata guarded"}).json()["task"]
+        response = client.patch(
+            f"/api/tasks/{task['id']}",
+            json={"metadata": {"execution_checkpoint": {"gate": "before_implement"}}},
+        )
+        assert response.status_code == 400
+        assert "Only metadata.user.* keys are mutable via PATCH" in str(response.json().get("detail") or "")
+
+
+def test_patch_allows_user_metadata_namespace(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "User metadata patch"}).json()["task"]
+        response = client.patch(
+            f"/api/tasks/{task['id']}",
+            json={"metadata": {"user": {"owner": "ops"}, "user.note": "do not deploy on friday"}},
+        )
+        assert response.status_code == 200
+        metadata = response.json()["task"].get("metadata") or {}
+        assert metadata.get("user", {}).get("owner") == "ops"
+        assert metadata.get("user.note") == "do not deploy on friday"
+
+
 def test_review_actions_require_in_review_state(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
@@ -172,6 +198,29 @@ def test_review_actions_require_in_review_state(tmp_path: Path) -> None:
         assert approve.status_code == 400
         changes = client.post(f"/api/review/{task['id']}/request-changes", json={"guidance": "x"})
         assert changes.status_code == 400
+
+
+def test_manual_reconcile_repairs_invalid_queued_gate_state(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Invalid queued gate", "status": "queued"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+        task.status = "queued"
+        task.pending_gate = "before_implement"
+        container.tasks.upsert(task)
+
+        resp = client.post("/api/orchestrator/reconcile")
+        assert resp.status_code == 200
+        body = resp.json()
+        summary = body.get("reconcile") or {}
+        assert int(summary.get("repairs") or 0) >= 1
+
+        updated = container.tasks.get(created["id"])
+        assert updated is not None
+        assert updated.status == "blocked"
+        assert updated.pending_gate is None
 
 
 def test_classify_pipeline_endpoint_high_confidence(tmp_path: Path) -> None:
@@ -1951,12 +2000,40 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
         assert latest_run.finished_at is not None
 
 
+def test_precommit_review_approve_rejects_missing_context(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        client.get("/api/tasks")
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = Task(
+            title="Missing precommit context",
+            status="in_review",
+            task_type="feature",
+            hitl_mode="review_only",
+            metadata={"pending_precommit_approval": True, "review_stage": "pre_commit"},
+        )
+        container.tasks.upsert(task)
+
+        resp = client.post(f"/api/review/{task.id}/approve", json={})
+        assert resp.status_code == 409
+        assert "Pre-commit context missing" in str(resp.json().get("detail") or "")
+
+
 def test_task_changes_endpoint_handles_unborn_head(tmp_path: Path) -> None:
     _git(["init"], tmp_path)
 
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         task = client.post("/api/tasks", json={"title": "Unborn head changes"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        metadata = dict(stored.metadata or {})
+        metadata["worktree_dir"] = str(tmp_path)
+        stored.metadata = metadata
+        container.tasks.upsert(stored)
         (tmp_path / "new-file.txt").write_text("draft\n", encoding="utf-8")
 
         resp = client.get(f"/api/tasks/{task['id']}/changes")
@@ -2004,10 +2081,43 @@ def test_task_changes_endpoint_ignores_out_of_scope_worktree_dir(tmp_path: Path)
         resp = client.get(f"/api/tasks/{task['id']}/changes")
         assert resp.status_code == 200
         payload = resp.json()
-        assert payload["mode"] == "working_tree"
+        assert payload["mode"] == "none"
+        assert payload["reason"] == "invalid_worktree_context"
         assert payload["commit"] is None
-        assert any(item.get("path") == "tracked.txt" for item in payload["files"])
-        assert "+update" in payload["diff"]
+        assert payload["files"] == []
+        assert payload["diff"] == ""
+
+
+def test_task_changes_endpoint_does_not_fallback_to_repo_root_without_context(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        tmp_path,
+    )
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "No context"}).json()["task"]
+        (tmp_path / "tracked.txt").write_text("base\nunrelated root change\n", encoding="utf-8")
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "none"
+        assert payload["reason"] == "task_context_missing"
+        assert payload["commit"] is None
+        assert payload["files"] == []
+        assert payload["diff"] == ""
 
 
 def test_task_changes_endpoint_falls_back_when_commit_diff_errors(tmp_path: Path) -> None:
@@ -2033,6 +2143,9 @@ def test_task_changes_endpoint_falls_back_when_commit_diff_errors(tmp_path: Path
         container = app.state.containers[str(tmp_path.resolve())]
         stored = container.tasks.get(task["id"])
         assert stored is not None
+        metadata = dict(stored.metadata or {})
+        metadata["worktree_dir"] = str(tmp_path)
+        stored.metadata = metadata
 
         bad_run = RunRecord(
             task_id=stored.id,
@@ -2124,7 +2237,7 @@ def test_task_changes_endpoint_uses_preserved_branch_when_worktree_is_empty(tmp_
         assert "+branch change" in payload["diff"]
 
 
-def test_task_changes_endpoint_prefers_working_tree_over_preserved_branch(tmp_path: Path) -> None:
+def test_task_changes_endpoint_prefers_preserved_branch_without_task_worktree_context(tmp_path: Path) -> None:
     _git(["init"], tmp_path)
     (tmp_path / ".gitignore").write_text(
         ".agent_orchestrator/\n\n# Agent Orchestrator runtime data\n.agent_orchestrator_archive/\n.workdoc.md\n",
@@ -2173,7 +2286,7 @@ def test_task_changes_endpoint_prefers_working_tree_over_preserved_branch(tmp_pa
 
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        task = client.post("/api/tasks", json={"title": "Prefer working tree"}).json()["task"]
+        task = client.post("/api/tasks", json={"title": "Prefer preserved branch"}).json()["task"]
         container = app.state.containers[str(tmp_path.resolve())]
         stored = container.tasks.get(task["id"])
         assert stored is not None
@@ -2185,10 +2298,13 @@ def test_task_changes_endpoint_prefers_working_tree_over_preserved_branch(tmp_pa
         resp = client.get(f"/api/tasks/{task['id']}/changes")
         assert resp.status_code == 200
         payload = resp.json()
-        assert payload["mode"] == "working_tree"
+        assert payload["mode"] == "preserved_branch"
         assert payload["commit"] is None
+        assert payload["branch"] == preserved_branch
+        assert payload["base_branch"] == base_branch
         assert any(item.get("path") == "tracked.txt" for item in payload["files"])
-        assert "+working change" in payload["diff"]
+        assert "+branch change" in payload["diff"]
+        assert "+working change" not in payload["diff"]
 
 
 def test_task_execution_summary_prefers_terminal_run_for_done_task(tmp_path: Path) -> None:

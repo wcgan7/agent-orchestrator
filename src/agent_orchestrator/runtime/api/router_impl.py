@@ -181,7 +181,7 @@ class ApproveGateRequest(BaseModel):
 
 class OrchestratorControlRequest(BaseModel):
     """Request body for runtime control actions such as pause/resume/stop."""
-    action: str
+    action: Literal["pause", "resume", "drain", "stop", "reset", "reconcile"]
 
 
 class OrchestratorSettingsRequest(BaseModel):
@@ -194,6 +194,11 @@ class OrchestratorSettingsRequest(BaseModel):
     gate_stale_minutes: int = Field(0, ge=0, le=10080)
     gate_max_wait_minutes: int = Field(0, ge=0, le=43200)
     gate_timeout_action: Literal["none", "block"] = "none"
+    reliability_mode: Literal["strict", "balanced", "availability"] = "strict"
+    reconcile_interval_seconds: int = Field(30, ge=1, le=3600)
+    lease_ttl_seconds: int = Field(120, ge=15, le=86400)
+    tick_stale_seconds: int = Field(15, ge=5, le=3600)
+    tick_failure_threshold: int = Field(5, ge=1, le=1000)
 
 
 class AgentRoutingSettingsRequest(BaseModel):
@@ -914,6 +919,24 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
                 str(orchestrator.get("gate_timeout_action") or "none").strip().lower()
                 if str(orchestrator.get("gate_timeout_action") or "none").strip().lower() in {"none", "block"}
                 else "none"
+            ),
+            "reliability_mode": (
+                str(orchestrator.get("reliability_mode") or "strict").strip().lower()
+                if str(orchestrator.get("reliability_mode") or "strict").strip().lower()
+                in {"strict", "balanced", "availability"}
+                else "strict"
+            ),
+            "reconcile_interval_seconds": _coerce_int(
+                orchestrator.get("reconcile_interval_seconds"), 30, minimum=1, maximum=3600
+            ),
+            "lease_ttl_seconds": _coerce_int(
+                orchestrator.get("lease_ttl_seconds"), 120, minimum=15, maximum=86400
+            ),
+            "tick_stale_seconds": _coerce_int(
+                orchestrator.get("tick_stale_seconds"), 15, minimum=5, maximum=3600
+            ),
+            "tick_failure_threshold": _coerce_int(
+                orchestrator.get("tick_failure_threshold"), 5, minimum=1, maximum=1000
             ),
         },
         "agent_routing": {

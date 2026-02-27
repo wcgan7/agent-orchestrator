@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import importlib
 from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 
 from .file_repos import FileConfigRepository
 
+yaml: ModuleType | None
 try:
-    import yaml  # type: ignore[import-untyped]
+    yaml = importlib.import_module("yaml")
 except ImportError:  # pragma: no cover
     yaml = None
 
@@ -123,6 +126,11 @@ def ensure_state_root(project_dir: Path) -> Path:
             "gate_stale_minutes": 0,
             "gate_max_wait_minutes": 0,
             "gate_timeout_action": "none",
+            "reliability_mode": "strict",
+            "reconcile_interval_seconds": 30,
+            "lease_ttl_seconds": 120,
+            "tick_stale_seconds": 15,
+            "tick_failure_threshold": 5,
         },
     )
     config.setdefault(

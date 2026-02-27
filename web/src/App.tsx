@@ -118,6 +118,14 @@ type OrchestratorStatus = {
   run_branch?: string | null
   scheduler_attached?: boolean
   scheduler_stale?: boolean
+  last_tick_at?: string | null
+  last_dispatch_at?: string | null
+  tick_lag_seconds?: number | null
+  consecutive_tick_failures?: number
+  last_tick_error?: string | null
+  dispatch_blocked_reason?: string | null
+  last_reconcile_at?: string | null
+  reconcile_repairs?: number
 }
 
 type AgentRecord = {
@@ -550,6 +558,18 @@ function gateApprovalButtonLabel(gate: string | null | undefined): string {
   if (normalized === 'before_commit') return 'Approve'
   if (normalized === 'human_intervention') return 'Acknowledge'
   return 'Approve gate'
+}
+
+function dispatchBlockedReasonLabel(raw: string | null | undefined): string {
+  const normalized = String(raw || '').trim().toLowerCase()
+  if (!normalized) return ''
+  if (normalized === 'paused') return 'Queue paused'
+  if (normalized === 'blocked_by_dependencies') return 'Queued tasks blocked by dependencies'
+  if (normalized === 'waiting_gate') return 'Queued tasks waiting for approval gates'
+  if (normalized === 'concurrency_limit') return 'At concurrency limit'
+  if (normalized === 'no_runnable_queued_tasks') return 'No runnable queued tasks'
+  if (normalized === 'scheduler_stale') return 'Scheduler stale'
+  return humanizeLabel(normalized)
 }
 
 function orderLogStepsByPipeline(steps: string[], pipelineTemplate?: string[]): string[] {
@@ -1584,7 +1604,16 @@ export default function App() {
   const [planActionMessage, setPlanActionMessage] = useState('')
   const [planActionError, setPlanActionError] = useState('')
   const [taskDetailTab, setTaskDetailTab] = useState<TaskDetailTab>('overview')
-  const [taskDiff, setTaskDiff] = useState<{ mode?: 'working_tree' | 'committed' | 'preserved_branch' | 'none'; branch?: string | null; base_branch?: string | null; commit: string | null; files: { path: string; changes: string }[]; diff: string; stat: string } | null>(null)
+  const [taskDiff, setTaskDiff] = useState<{
+    mode?: 'working_tree' | 'committed' | 'preserved_branch' | 'none'
+    reason?: 'task_context_missing' | 'invalid_worktree_context' | 'preserved_branch_missing'
+    branch?: string | null
+    base_branch?: string | null
+    commit: string | null
+    files: { path: string; changes: string }[]
+    diff: string
+    stat: string
+  } | null>(null)
   const [taskDiffLoading, setTaskDiffLoading] = useState(false)
   const [boardCompact, setBoardCompact] = useState(false)
   const [expandedSummarySteps, setExpandedSummarySteps] = useState<Set<string>>(new Set())
@@ -2992,8 +3021,13 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action: 'reset' }),
       })
+      await requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/control', refreshProjectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reconcile' }),
+      })
       await reloadAll()
-      setTaskActionMessage('Scheduler reattached.')
+      setTaskActionMessage('Scheduler reattached and reconciled.')
     } catch (err) {
       setError(toErrorMessage('Failed to repair scheduler', err))
     }
@@ -3491,11 +3525,21 @@ export default function App() {
     setTaskDiffLoading(true)
     try {
       try {
-        const data = await requestJson<{ mode?: 'working_tree' | 'committed' | 'preserved_branch' | 'none'; branch?: string | null; base_branch?: string | null; commit: string | null; files: { path: string; changes: string }[]; diff: string; stat: string }>(
+        const data = await requestJson<{
+          mode?: 'working_tree' | 'committed' | 'preserved_branch' | 'none'
+          reason?: 'task_context_missing' | 'invalid_worktree_context' | 'preserved_branch_missing'
+          branch?: string | null
+          base_branch?: string | null
+          commit: string | null
+          files: { path: string; changes: string }[]
+          diff: string
+          stat: string
+        }>(
           buildApiUrl(`/api/tasks/${taskId}/changes`, projectDir),
         )
         setTaskDiff({
           mode: data.mode,
+          reason: data.reason,
           branch: data.branch ?? null,
           base_branch: data.base_branch ?? null,
           commit: data.commit ?? null,
@@ -3509,6 +3553,7 @@ export default function App() {
         )
         setTaskDiff({
           mode: legacy.commit ? 'committed' : 'none',
+          reason: undefined,
           branch: null,
           base_branch: null,
           commit: legacy.commit ?? null,
@@ -5241,7 +5286,10 @@ export default function App() {
         {taskDetailTab === 'changes' ? (
           <div className="task-detail-section-body">
             {taskDiffLoading ? <p className="field-label">Loading diff...</p> : null}
-            {!taskDiffLoading && taskDiff && (taskDiff.mode === 'none' || (!taskDiff.commit && !taskDiff.diff && (taskDiff.files?.length || 0) === 0)) ? (
+            {!taskDiffLoading && taskDiff && taskDiff.mode === 'none' && taskDiff.reason ? (
+              <p className="field-label">No task-scoped changes available yet. Request changes to rerun implementation.</p>
+            ) : null}
+            {!taskDiffLoading && taskDiff && (taskDiff.mode === 'none' || (!taskDiff.commit && !taskDiff.diff && (taskDiff.files?.length || 0) === 0)) && !taskDiff.reason ? (
               <p className="empty">No changes found for this task.</p>
             ) : null}
             {!taskDiffLoading && taskDiff && (taskDiff.mode === 'working_tree' || taskDiff.mode === 'committed' || taskDiff.mode === 'preserved_branch' || taskDiff.commit || taskDiff.diff || (taskDiff.files?.length || 0) > 0) ? (() => {
@@ -5369,6 +5417,9 @@ export default function App() {
           <span className="field-label">Running now: {runningNowCount}</span>
           <span className="field-label">Waiting approval: {waitingApprovalCount}</span>
           <span className="field-label">Workers: {agents.length}</span>
+          {dispatchBlockedReasonLabel(orchestrator?.dispatch_blocked_reason) ? (
+            <span className="field-label">Dispatch: {dispatchBlockedReasonLabel(orchestrator?.dispatch_blocked_reason)}</span>
+          ) : null}
         </div>
       </section>
     )
@@ -5417,6 +5468,16 @@ export default function App() {
             <span>Blocked</span>
             <strong>{blockedCount}</strong>
           </button>
+        </div>
+        <div className="board-summary">
+          <span className="field-label">Last tick: {toLocaleTimestamp(orchestrator?.last_tick_at) || '-'}</span>
+          <span className="field-label">Tick lag: {Number.isFinite(Number(orchestrator?.tick_lag_seconds ?? NaN)) ? `${Number(orchestrator?.tick_lag_seconds)}s` : '-'}</span>
+          <span className="field-label">Tick failures: {orchestrator?.consecutive_tick_failures ?? 0}</span>
+          <span className="field-label">Last reconcile: {toLocaleTimestamp(orchestrator?.last_reconcile_at) || '-'}</span>
+          <span className="field-label">Repairs: {orchestrator?.reconcile_repairs ?? 0}</span>
+          {dispatchBlockedReasonLabel(orchestrator?.dispatch_blocked_reason) ? (
+            <span className="field-label">Dispatch: {dispatchBlockedReasonLabel(orchestrator?.dispatch_blocked_reason)}</span>
+          ) : null}
         </div>
         <div className="list-stack">
           <p className="field-label section-heading">Execution pipeline</p>

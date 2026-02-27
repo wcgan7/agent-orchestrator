@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import subprocess
 from pathlib import Path
@@ -80,6 +81,77 @@ class TaskExecutor:
         svc._init_workdoc(task, project_dir)
         return True
 
+    def _branch_exists(self, branch_name: str) -> bool:
+        """Return whether a local branch exists in the project repository."""
+        svc = self._service
+        normalized = str(branch_name or "").strip()
+        if not normalized:
+            return False
+        try:
+            result = subprocess.run(
+                ["git", "rev-parse", "--verify", f"refs/heads/{normalized}"],
+                cwd=svc.container.project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        except Exception:
+            return False
+        return result.returncode == 0
+
+    def _prepare_precommit_review_context(self, task: Task, worktree_dir: Path | None) -> tuple[bool, str]:
+        """Persist task-scoped changes for pre-commit human review.
+
+        Returns:
+            tuple[bool, str]: ``(ok, reason)`` where ``reason`` is non-empty when
+            ``ok`` is ``False``.
+        """
+        svc = self._service
+        # Non-git flows can legitimately run without task worktrees.
+        if worktree_dir is None:
+            return True, ""
+        if not worktree_dir.exists() or not worktree_dir.is_dir():
+            return False, "missing task worktree context"
+
+        has_task_changes = svc._has_uncommitted_changes(worktree_dir) or svc._has_commits_ahead(worktree_dir)
+        if not has_task_changes:
+            return False, "no task-scoped changes available"
+
+        if not svc._preserve_worktree_work(task, worktree_dir):
+            return False, "failed to preserve task-scoped changes"
+
+        metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        preserved_branch = str(metadata.get("preserved_branch") or "").strip()
+        if not preserved_branch:
+            return False, "missing preserved branch metadata"
+        if not self._branch_exists(preserved_branch):
+            return False, "preserved branch is not available"
+        base_branch = str(svc._run_branch or "HEAD").strip() or "HEAD"
+        try:
+            diff_result = subprocess.run(
+                ["git", "diff", "--binary", "--no-color", f"{base_branch}..{preserved_branch}"],
+                cwd=svc.container.project_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+        except Exception:
+            return False, "failed to prepare review context fingerprint"
+        if diff_result.returncode != 0:
+            return False, "failed to prepare review context fingerprint"
+        fingerprint = hashlib.sha256((diff_result.stdout or "").encode("utf-8", errors="replace")).hexdigest()
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        task.metadata["review_context"] = {
+            "run_id": task.run_ids[-1] if task.run_ids else None,
+            "preserved_branch": preserved_branch,
+            "base_branch": base_branch,
+            "prepared_at": now_iso(),
+            "diff_fingerprint": fingerprint,
+        }
+        return True, ""
+
     def execute_task(self, task: Task) -> None:
         """Execute one task and normalize top-level cancellation/error outcomes.
 
@@ -112,9 +184,11 @@ class TaskExecutor:
                 )
         except Exception:
             logger.exception("Unexpected error executing task %s", task.id)
-            task.status = "blocked"
-            task.error = "Internal error during execution"
-            svc.container.tasks.upsert(task)
+            fresh = svc.container.tasks.get(task.id) or task
+            fresh.status = "blocked"
+            fresh.current_agent_id = None
+            fresh.error = "Internal error during execution"
+            svc.container.tasks.upsert(fresh)
 
     def execute_task_inner(self, task: Task) -> None:
         """Run the full pipeline, including retries, gates, review, and merge.
@@ -123,6 +197,9 @@ class TaskExecutor:
         human-gate checks, review cycles, and final commit/merge behavior.
         """
         svc = self._service
+        fresh_task = svc.container.tasks.get(task.id)
+        if fresh_task is not None:
+            task = fresh_task
         worktree_dir: Optional[Path] = None
         try:
             old_preserved = task.metadata.get("preserved_branch")
@@ -406,7 +483,11 @@ class TaskExecutor:
                         svc._block_for_invalid_workdoc(task, run, step="review", detail=str(exc))
                         return
                     review_started = now_iso()
+                    svc._heartbeat_execution_lease(task)
+                    svc.container.tasks.upsert(task)
                     findings, review_result = svc._findings_from_result(task, review_attempt)
+                    svc._heartbeat_execution_lease(task)
+                    svc.container.tasks.upsert(task)
                     review_step_log: dict[str, object] = {
                         "step": "review",
                         "status": "ok",
@@ -580,6 +661,32 @@ class TaskExecutor:
                 precommit_review_modes = {"supervised", "review_only"}
                 requires_precommit_review = mode in precommit_review_modes
                 if requires_precommit_review and retry_from != "commit":
+                    context_ok, context_reason = self._prepare_precommit_review_context(task, worktree_dir)
+                    if not context_ok:
+                        task.status = "blocked"
+                        task.pending_gate = None
+                        task.current_step = "review"
+                        task.current_agent_id = None
+                        task.metadata["pipeline_phase"] = "review"
+                        task.metadata.pop("pending_precommit_approval", None)
+                        task.metadata.pop("review_stage", None)
+                        detail = context_reason.strip()
+                        task.error = "Failed to preserve task-scoped changes for pre-commit review"
+                        if detail:
+                            task.error = f"{task.error}: {detail}"
+                        svc.container.tasks.upsert(task)
+                        svc._finalize_run(task, run, status="blocked", summary="Blocked: pre-commit review context unavailable")
+                        svc.bus.emit(
+                            channel="tasks",
+                            event_type="task.blocked",
+                            entity_id=task.id,
+                            payload={"error": task.error},
+                        )
+                        return
+
+                    # Context is now preserved on task branch; current worktree has
+                    # already been removed by preserve_worktree_work.
+                    worktree_dir = None
                     task.status = "in_review"
                     task.current_step = "review"
                     task.metadata["pipeline_phase"] = "review"
@@ -750,5 +857,7 @@ class TaskExecutor:
                         capture_output=True,
                         text=True,
                     )
-            if task.metadata.pop("worktree_dir", None):
+            worktree_removed = bool(task.metadata.pop("worktree_dir", None))
+            lease_removed = svc._release_execution_lease(task)
+            if worktree_removed or lease_removed:
                 svc.container.tasks.upsert(task)

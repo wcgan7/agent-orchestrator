@@ -915,6 +915,7 @@ describe('App action coverage', () => {
           run_branch: null,
           scheduler_attached: repaired,
           scheduler_stale: !repaired,
+          tick_lag_seconds: repaired ? 0 : 120,
         })
       }
       if (u.includes('/api/orchestrator/control') && method === 'POST') {
@@ -928,6 +929,7 @@ describe('App action coverage', () => {
           run_branch: null,
           scheduler_attached: true,
           scheduler_stale: false,
+          tick_lag_seconds: 0,
         })
       }
       if (u.includes('/api/agents')) return jsonResponse({ agents: [] })
@@ -969,7 +971,93 @@ describe('App action coverage', () => {
       ).toBe(true)
     })
     await waitFor(() => {
-      expect(screen.getByText('Scheduler reattached.')).toBeInTheDocument()
+      expect(
+        mockedFetch.mock.calls.some(([url, init]) => {
+          if (!String(url).includes('/api/orchestrator/control')) return false
+          if ((init as RequestInit | undefined)?.method !== 'POST') return false
+          const body = JSON.parse(String((init as RequestInit).body || '{}'))
+          return body.action === 'reconcile'
+        }),
+      ).toBe(true)
     })
+    await waitFor(() => {
+      expect(screen.getByText('Scheduler reattached and reconciled.')).toBeInTheDocument()
+    })
+  })
+
+  it('shows context-missing message in changes tab when task-scoped diff is unavailable', async () => {
+    const jsonResponse = (payload: unknown) => Promise.resolve({ ok: true, json: async () => payload })
+    const task = {
+      id: 'task-ctx',
+      title: 'Contextless review task',
+      description: 'Needs human review but has no scoped context',
+      priority: 'P2',
+      status: 'blocked',
+      task_type: 'feature',
+      labels: [],
+      blocked_by: [],
+      blocks: [],
+      hitl_mode: 'review_only',
+    }
+    const mockedFetch = vi.fn().mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      if (u === '/' || u.startsWith('/?')) return jsonResponse({ project_id: 'repo-alpha' })
+      if (u.includes('/api/collaboration/modes')) return jsonResponse({ modes: [] })
+      if (u.includes('/api/tasks/board')) {
+        return jsonResponse({
+          columns: { backlog: [], queued: [], in_progress: [], in_review: [], blocked: [task], done: [], cancelled: [] },
+        })
+      }
+      if (u.includes('/api/tasks/execution-order')) return jsonResponse({ batches: [], completed: [] })
+      if (u.includes('/api/tasks/task-ctx/changes')) {
+        return jsonResponse({ mode: 'none', reason: 'task_context_missing', commit: null, files: [], diff: '', stat: '' })
+      }
+      if (u.includes('/api/tasks/task-ctx') && method === 'GET') return jsonResponse({ task })
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) return jsonResponse({ tasks: [task] })
+      if (u.includes('/api/orchestrator/status')) return jsonResponse({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null })
+      if (u.includes('/api/metrics')) return jsonResponse({})
+      if (u.includes('/api/workers/health')) return jsonResponse({ providers: [] })
+      if (u.includes('/api/workers/routing')) return jsonResponse({ default: 'codex', rows: [] })
+      if (u.includes('/api/agents')) return jsonResponse({ agents: [] })
+      if (u.includes('/api/projects/pinned')) return jsonResponse({ items: [] })
+      if (u.includes('/api/projects')) return jsonResponse({ projects: [] })
+      if (u.includes('/api/review-queue')) return jsonResponse({ tasks: [] })
+      if (u.includes('/api/phases')) return jsonResponse([])
+      if (u.includes('/api/collaboration/presence')) return jsonResponse({ users: [] })
+      if (u.includes('/api/collaboration/timeline/task-ctx')) return jsonResponse({ events: [] })
+      if (u.includes('/api/collaboration/feedback/task-ctx')) return jsonResponse({ feedback: [] })
+      if (u.includes('/api/collaboration/comments/task-ctx')) return jsonResponse({ comments: [] })
+      if (u.includes('/api/tasks/task-ctx/plan')) return jsonResponse({ task_id: 'task-ctx', revisions: [] })
+      if (u.includes('/api/tasks/task-ctx/plan/jobs')) return jsonResponse({ jobs: [] })
+      if (u.includes('/api/tasks/task-ctx/workdoc')) return jsonResponse({ task_id: 'task-ctx', content: '', exists: false })
+      if (u.includes('/api/settings')) {
+        return jsonResponse({
+          orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10, step_timeout_seconds: 600 },
+          agent_routing: { default_role: 'general', task_type_roles: {}, role_provider_overrides: {} },
+          defaults: { quality_gate: { critical: 0, high: 0, medium: 0, low: 0 }, dependency_policy: 'prudent' },
+          workers: { default: 'codex', default_model: '', routing: {}, providers: { codex: { type: 'codex', command: 'codex exec' } } },
+          project: { commands: {}, prompt_overrides: {}, prompt_injections: {}, prompt_defaults: {} },
+        })
+      }
+      return jsonResponse({})
+    })
+    global.fetch = mockedFetch as unknown as typeof fetch
+
+    render(<App />)
+    await waitFor(() => {
+      expect(screen.getByText('Contextless review task')).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByText('Contextless review task'))
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Changes$/i })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Changes$/i }))
+
+    await waitFor(() => {
+      expect(screen.getByText('No task-scoped changes available yet. Request changes to rerun implementation.')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('Working tree changes')).not.toBeInTheDocument()
   })
 })
