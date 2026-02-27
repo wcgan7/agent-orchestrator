@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -21,6 +20,38 @@ class PlanManager:
     def __init__(self, service: OrchestratorService) -> None:
         """Initialize the manager with orchestrator dependencies."""
         self._service = service
+
+    @staticmethod
+    def _replace_plan_section_in_workdoc(text: str, plan_body: str, *, manager: Any) -> str:
+        """Replace the canonical plan section body without corrupting sentinels."""
+        state, bounds, _ = manager._sentinel_section_bounds(text, "plan")
+        if state == "malformed":
+            raise ValueError("Malformed canonical workdoc section markers for step 'plan'")
+        replacement = f"{plan_body}\n\n"
+        if state == "valid" and bounds is not None:
+            start, end = bounds
+            return text[:start] + replacement + text[end:]
+
+        heading = "## Plan"
+        heading_idx = text.find(heading)
+        if heading_idx == -1:
+            return text
+        heading_line_end = text.find("\n", heading_idx)
+        if heading_line_end == -1:
+            return text
+        section_start = heading_line_end + 1
+        end_candidates = []
+        for next_heading in (
+            "\n## Implementation Log",
+            "\n## Verification Results",
+            "\n## Review Findings",
+            "\n## Fix Log",
+        ):
+            candidate = text.find(next_heading, section_start)
+            if candidate != -1:
+                end_candidates.append(candidate + 1)
+        section_end = min(end_candidates) if end_candidates else len(text)
+        return text[:section_start] + replacement + text[section_end:]
 
     def active_plan_refine_job(self, task_id: str) -> PlanRefineJob | None:
         """Return the active queued/running refine job for a task if present."""
@@ -341,27 +372,20 @@ class PlanManager:
         )
         if canonical.exists():
             text = canonical.read_text(encoding="utf-8")
-            heading = "## Plan"
-            idx = text.find(heading)
-            if idx != -1:
-                after_heading = text.find("\n", idx)
-                if after_heading != -1:
-                    rest = text[after_heading + 1 :]
-                    next_heading = re.search(r"^## ", rest, re.MULTILINE)
-                    section_end = after_heading + 1 + next_heading.start() if next_heading else len(text)
-                    plan_body = (target.content or "").strip() or "_(empty committed plan)_"
-                    updated = text[: after_heading + 1] + plan_body + "\n\n" + text[section_end:]
-                    canonical.write_text(updated, encoding="utf-8")
-                    step_project_dir = svc._step_project_dir(task)
-                    worktree_copy = svc._workdoc_worktree_path(step_project_dir)
-                    if worktree_copy.exists():
-                        worktree_copy.write_text(updated, encoding="utf-8")
-                    svc.bus.emit(
-                        channel="tasks",
-                        event_type="workdoc.updated",
-                        entity_id=task.id,
-                        payload={"step": "plan", "source": "plan_commit"},
-                    )
+            plan_body = (target.content or "").strip() or "_(empty committed plan)_"
+            updated = self._replace_plan_section_in_workdoc(text, plan_body, manager=svc._workdoc_manager)
+            if updated != text:
+                canonical.write_text(updated, encoding="utf-8")
+                step_project_dir = svc._step_project_dir(task)
+                worktree_copy = svc._workdoc_worktree_path(step_project_dir)
+                if worktree_copy.exists():
+                    worktree_copy.write_text(updated, encoding="utf-8")
+                svc.bus.emit(
+                    channel="tasks",
+                    event_type="workdoc.updated",
+                    entity_id=task.id,
+                    payload={"step": "plan", "source": "plan_commit"},
+                )
 
         svc.bus.emit(
             channel="tasks",

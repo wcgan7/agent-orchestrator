@@ -91,7 +91,6 @@ Request fields include:
 - `description`, `task_type`, `priority`, `status`
 - `labels[]`, `blocked_by[]`, `parent_id`
 - `pipeline_template[]` (optional override)
-- `approval_mode` (`human_review|auto_approve`)
 - `hitl_mode`
 - `dependency_policy` (`permissive|prudent|strict`)
 - `source`, `worker_model`
@@ -225,10 +224,12 @@ Behavior:
 Set task status to `cancelled`.
 
 ### `POST /api/tasks/{task_id}/approve-gate`
-Clear a pending human gate.
+Handle a pending human gate action.
 
 Request:
 - `gate` (optional; if provided must match `task.pending_gate`)
+- `action` (optional; `approve` or `request_changes`, default `approve`)
+- `guidance` (optional; used with `request_changes`)
 
 ### `POST /api/tasks/{task_id}/dependencies`
 Add dependency edge.
@@ -314,6 +315,12 @@ Response:
 - `diff` (full unified diff)
 - `stat` (git stat text)
 
+### `GET /api/tasks/{task_id}/changes`
+Return best-available task changes:
+- committed diff when commit evidence exists
+- otherwise working-tree changes (including pre-commit/unborn-HEAD states)
+- otherwise preserved-branch changes (`preserved_branch` vs base branch) when available
+
 ### `GET /api/tasks/{task_id}/logs`
 Read current or historical step logs.
 
@@ -323,12 +330,14 @@ Query:
 - `backfill` (align chunk to line starts)
 - `stdout_read_to`, `stderr_read_to` (optional byte limits)
 - `step` (optional, fetch logs for a specific step attempt)
+- `run_id` (optional, used with `step` to select a specific run attempt)
 
 Response includes:
 - `mode` (`active|last|history|none`)
 - `stdout`, `stderr`
 - offsets and chunk metadata
-- `available_steps[]`, `step_execution_counts`
+- `available_steps[]`, `step_execution_counts`, `step_latest_run`
+- `step_history[]` (most-recent-first step attempts across runs)
 - `progress` JSON payload when present
 
 ## PRD Import

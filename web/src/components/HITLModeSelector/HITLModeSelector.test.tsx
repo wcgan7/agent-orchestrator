@@ -32,15 +32,15 @@ const MOCK_MODES = [
     require_reasoning: true,
   },
   {
-    mode: 'collaborative',
-    display_name: 'Collaborative',
-    description: 'Work together with agents.',
+    mode: 'review_only',
+    display_name: 'Review Only',
+    description: 'Review all changes before commit.',
     approve_before_plan: false,
     approve_before_implement: false,
     approve_before_commit: true,
-    approve_after_implement: true,
-    allow_unattended: false,
-    require_reasoning: true,
+    approve_after_implement: false,
+    allow_unattended: true,
+    require_reasoning: false,
   },
 ]
 
@@ -89,9 +89,9 @@ describe('HITLModeSelector', () => {
 
     // All mode options should be visible
     expect(screen.getByText('Supervised')).toBeInTheDocument()
-    expect(screen.getByText('Collaborative')).toBeInTheDocument()
+    expect(screen.getByText('Review Only')).toBeInTheDocument()
     expect(screen.getByText('Approve each step.')).toBeInTheDocument()
-    expect(screen.getByText('Work together with agents.')).toBeInTheDocument()
+    expect(screen.getByText('Review all changes before commit.')).toBeInTheDocument()
   })
 
   it('calls onModeChange when selecting a mode', async () => {
@@ -199,7 +199,7 @@ describe('HITLModeSelector', () => {
     fireEvent.click(currentMode)
 
     expect(screen.getByText('Supervised')).toBeInTheDocument()
-    expect(screen.getByText('Collaborative')).toBeInTheDocument()
+    expect(screen.getByText('Review Only')).toBeInTheDocument()
   })
 
   it('falls back to default modes on non-ok response', async () => {
@@ -220,6 +220,6 @@ describe('HITLModeSelector', () => {
     fireEvent.click(currentMode)
 
     expect(screen.getByText('Supervised')).toBeInTheDocument()
-    expect(screen.getByText('Collaborative')).toBeInTheDocument()
+    expect(screen.getByText('Review Only')).toBeInTheDocument()
   })
 })

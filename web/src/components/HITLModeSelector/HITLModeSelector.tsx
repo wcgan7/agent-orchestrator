@@ -13,7 +13,9 @@ interface ModeConfig {
   description: string
   approve_before_plan: boolean
   approve_before_implement: boolean
+  approve_before_generate_tasks?: boolean
   approve_before_commit: boolean
+  approve_before_done?: boolean
   approve_after_implement: boolean
   allow_unattended: boolean
   require_reasoning: boolean
@@ -28,7 +30,6 @@ interface Props {
 const MODE_ICONS: Record<string, string> = {
   autopilot: '\u{1F680}',
   supervised: '\u{1F440}',
-  collaborative: '\u{1F91D}',
   review_only: '\u{1F50D}',
 }
 
@@ -36,7 +37,7 @@ const DEFAULT_MODES: ModeConfig[] = [
   {
     mode: 'autopilot',
     display_name: 'Autopilot',
-    description: 'Agents run freely.',
+    description: 'No approvals. Agents run end-to-end automatically.',
     approve_before_plan: false,
     approve_before_implement: false,
     approve_before_commit: false,
@@ -47,37 +48,32 @@ const DEFAULT_MODES: ModeConfig[] = [
   {
     mode: 'supervised',
     display_name: 'Supervised',
-    description: 'Approve each step.',
-    approve_before_plan: true,
-    approve_before_implement: true,
-    approve_before_commit: true,
-    approve_after_implement: false,
-    allow_unattended: false,
-    require_reasoning: true,
-  },
-  {
-    mode: 'collaborative',
-    display_name: 'Collaborative',
-    description: 'Work together with agents.',
+    description: 'Approve the plan, then review implementation before commit.',
     approve_before_plan: false,
-    approve_before_implement: false,
+    approve_before_implement: true,
+    approve_before_generate_tasks: true,
     approve_before_commit: true,
-    approve_after_implement: true,
+    approve_before_done: true,
+    approve_after_implement: false,
     allow_unattended: false,
     require_reasoning: true,
   },
   {
     mode: 'review_only',
     display_name: 'Review Only',
-    description: 'Review all changes before commit.',
+    description: 'Skip plan approval. Review implementation before commit.',
     approve_before_plan: false,
     approve_before_implement: false,
+    approve_before_generate_tasks: false,
     approve_before_commit: true,
-    approve_after_implement: true,
+    approve_before_done: true,
+    approve_after_implement: false,
     allow_unattended: true,
     require_reasoning: false,
   },
 ]
+
+const SELECTABLE_MODES = new Set(['autopilot', 'supervised', 'review_only'])
 
 export default function HITLModeSelector({ currentMode, onModeChange, projectDir }: Props) {
   const [modes, setModes] = useState<ModeConfig[]>(DEFAULT_MODES)
@@ -132,14 +128,17 @@ export default function HITLModeSelector({ currentMode, onModeChange, projectDir
     }
   }, [expanded])
 
-  const currentModeConfig = modes.find(m => m.mode === currentMode) || modes[0]
+  const selectableModes = modes.filter((mode) => SELECTABLE_MODES.has(mode.mode))
+  const currentModeConfig = modes.find(m => m.mode === currentMode) || selectableModes[0] || modes[0]
 
   const getGateBadges = (mode: ModeConfig) => {
     const gates: string[] = []
     if (mode.approve_before_plan) gates.push('Plan')
     if (mode.approve_before_implement) gates.push('Impl')
+    if (mode.approve_before_generate_tasks) gates.push('Tasks')
     if (mode.approve_after_implement) gates.push('Review')
     if (mode.approve_before_commit) gates.push('Commit')
+    if (mode.approve_before_done) gates.push('Done')
     return gates
   }
 
@@ -163,7 +162,7 @@ export default function HITLModeSelector({ currentMode, onModeChange, projectDir
 
       {expanded && (
         <div className="hitl-options" role="listbox" id={listboxIdRef.current}>
-          {modes.map(mode => {
+          {selectableModes.map(mode => {
             const gates = getGateBadges(mode)
             const isActive = mode.mode === currentMode
 
@@ -193,10 +192,11 @@ export default function HITLModeSelector({ currentMode, onModeChange, projectDir
                     ))}
                   </div>
                 )}
-                <div className="hitl-option-flags">
-                  {mode.allow_unattended && <span className="flag-badge flag-unattended">Unattended</span>}
-                  {mode.require_reasoning && <span className="flag-badge flag-reasoning">Shows Reasoning</span>}
-                </div>
+                {mode.mode === 'autopilot' ? (
+                  <div className="hitl-option-flags">
+                    {mode.allow_unattended && <span className="flag-badge flag-unattended">Unattended</span>}
+                  </div>
+                ) : null}
               </button>
             )
           })}

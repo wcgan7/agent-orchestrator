@@ -134,7 +134,6 @@ def test_retry_does_not_reinitialize_existing_workdoc(service: OrchestratorServi
             description="Lock expected retry semantics",
             task_type="feature",
             status="queued",
-            approval_mode="auto_approve",
             hitl_mode="autopilot",
             pipeline_template=["plan", "implement"],
             metadata={
@@ -1064,6 +1063,43 @@ def test_commit_plan_revision_updates_workdoc_plan_section(
     content = service._workdoc_canonical_path(task.id).read_text()
     assert "Manually edited committed plan" in content
     assert "_Pending: will be populated by the plan step._" not in content
+
+
+def test_commit_plan_revision_preserves_plan_sentinels_with_markdown_headings(
+    service: OrchestratorService, task: Task, project_dir: Path
+) -> None:
+    """Committing a markdown-rich plan must not corrupt canonical section markers."""
+    service.container.tasks.upsert(task)
+    service._init_workdoc(task, project_dir)
+
+    base = service.create_plan_revision(
+        task_id=task.id,
+        content="Initial plan text",
+        source="worker_plan",
+        step="plan",
+    )
+    manual = service.create_plan_revision(
+        task_id=task.id,
+        content=(
+            "## Objective\n"
+            "- Add dropdown inputs.\n\n"
+            "## Verification Plan\n"
+            "- Run focused tests.\n"
+        ),
+        source="human_edit",
+        parent_revision_id=base.id,
+    )
+
+    service.commit_plan_revision(task.id, manual.id)
+
+    content = service._workdoc_canonical_path(task.id).read_text(encoding="utf-8")
+    assert content.count("<!-- WORKDOC:SECTION plan START -->") == 1
+    assert content.count("<!-- WORKDOC:SECTION plan END -->") == 1
+    assert "## Implementation Log" in content
+    assert "## Objective" in content
+    assert "## Verification Plan" in content
+    state, _, _ = service._workdoc_manager._sentinel_section_bounds(content, "plan")
+    assert state == "valid"
 
 
 # ------------------------------------------------------------------

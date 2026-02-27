@@ -57,8 +57,7 @@ function installFetchMock(options?: {
         action: 'Provide token',
       },
     ],
-    approval_mode: 'human_review',
-    hitl_mode: 'autopilot',
+        hitl_mode: 'autopilot',
   }
   let terminalTask = {
     id: 'task-d1',
@@ -763,8 +762,7 @@ describe('App action coverage', () => {
         blocked_by: [],
         blocks: [],
         pending_gate: 'human_review',
-        approval_mode: 'human_review',
-        hitl_mode: 'autopilot',
+                hitl_mode: 'autopilot',
       }
       if (u === '/' || u.startsWith('/?')) return jsonResponse({ project_id: 'repo-alpha' })
       if (u.includes('/api/collaboration/modes')) return jsonResponse({ modes: [] })
@@ -830,23 +828,22 @@ describe('App action coverage', () => {
         title: 'Task 2',
         description: 'Finalize commit',
         priority: 'P2',
-        status: 'in_progress',
+        status: 'in_review',
         task_type: 'feature',
         labels: ['ui'],
         blocked_by: [],
         blocks: [],
-        pending_gate: 'before_commit',
-        approval_mode: 'human_review',
-        hitl_mode: 'autopilot',
+        pending_gate: null,
+                hitl_mode: 'review_only',
       }
       if (u === '/' || u.startsWith('/?')) return jsonResponse({ project_id: 'repo-alpha' })
       if (u.includes('/api/collaboration/modes')) return jsonResponse({ modes: [] })
       if (u.includes('/api/tasks/board')) {
-        return jsonResponse({ columns: { backlog: [], queued: [], in_progress: [task], in_review: [], blocked: [], done: [] } })
+        return jsonResponse({ columns: { backlog: [], queued: [], in_progress: [], in_review: [task], blocked: [], done: [] } })
       }
       if (u.includes('/api/tasks/task-2') && method === 'GET') return jsonResponse({ task })
       if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) return jsonResponse({ tasks: [task] })
-      if (u.includes('/api/tasks/task-2/approve-gate') && method === 'POST') {
+      if (u.includes('/api/review/task-2/approve') && method === 'POST') {
         return Promise.resolve({
           ok: false,
           status: 500,
@@ -884,13 +881,13 @@ describe('App action coverage', () => {
     })
     fireEvent.click(screen.getByText('Task 2'))
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Approve commit/i })).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /^Approve$/i })).toBeInTheDocument()
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /Approve commit/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^Approve$/i }))
     await waitFor(() => {
       expect(screen.getAllByText(/500 Internal Server Error/i).length).toBeGreaterThan(0)
     })
-    expect(screen.getByRole('button', { name: /Approve commit/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Approve$/i })).toBeInTheDocument()
   })
 })

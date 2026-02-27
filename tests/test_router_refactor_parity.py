@@ -35,6 +35,7 @@ EXPECTED_API_ROUTE_TABLE: set[tuple[str, str]] = {
     ("GET", "/api/tasks/board"),
     ("GET", "/api/tasks/execution-order"),
     ("GET", "/api/tasks/{task_id}"),
+    ("GET", "/api/tasks/{task_id}/changes"),
     ("GET", "/api/tasks/{task_id}/diff"),
     ("GET", "/api/tasks/{task_id}/logs"),
     ("GET", "/api/tasks/{task_id}/plan"),

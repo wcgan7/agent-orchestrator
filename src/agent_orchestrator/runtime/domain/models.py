@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Literal, Optional, cast
 
+from ...collaboration.modes import normalize_hitl_mode
 
 TaskStatus = Literal[
     "backlog",
@@ -20,14 +21,12 @@ TaskStatus = Literal[
 ]
 
 Priority = Literal["P0", "P1", "P2", "P3"]
-ApprovalMode = Literal["human_review", "auto_approve"]
 DependencyPolicy = Literal["permissive", "prudent", "strict"]
 PlanRevisionSource = Literal["worker_plan", "worker_refine", "human_edit", "import"]
 PlanRevisionStatus = Literal["draft", "committed"]
 PlanRefineJobStatus = Literal["queued", "running", "completed", "failed", "cancelled"]
 _VALID_PRIORITIES = {"P0", "P1", "P2", "P3"}
 _VALID_TASK_STATUSES = {"backlog", "queued", "in_progress", "in_review", "done", "blocked", "cancelled"}
-_VALID_APPROVAL_MODES = {"human_review", "auto_approve"}
 _VALID_DEPENDENCY_POLICIES = {"permissive", "prudent", "strict"}
 _VALID_PLAN_REVISION_SOURCES = {"worker_plan", "worker_refine", "human_edit", "import"}
 _VALID_PLAN_REVISION_STATUSES = {"draft", "committed"}
@@ -176,7 +175,6 @@ class Task:
     error: Optional[str] = None
 
     quality_gate: dict[str, int] = field(default_factory=lambda: {"critical": 0, "high": 0, "medium": 0, "low": 0})
-    approval_mode: ApprovalMode = "human_review"
     hitl_mode: str = "autopilot"
     dependency_policy: DependencyPolicy = "prudent"
     pending_gate: Optional[str] = None
@@ -220,14 +218,9 @@ class Task:
             if isinstance(raw_pc, dict) and raw_pc
             else None
         )
-        approval_mode = str(data.get("approval_mode") or "human_review")
-        if approval_mode not in _VALID_APPROVAL_MODES:
-            approval_mode = "human_review"
-        hitl_mode = str(data.get("hitl_mode") or "autopilot")
+        hitl_mode = normalize_hitl_mode(str(data.get("hitl_mode") or "autopilot"))
         raw_dep_policy = str(data.get("dependency_policy") or "prudent")
         dependency_policy = raw_dep_policy if raw_dep_policy in _VALID_DEPENDENCY_POLICIES else "prudent"
-        if "hitl_mode" not in data:
-            hitl_mode = "autopilot" if approval_mode == "auto_approve" else "review_only"
         raw_retry_count = data.get("retry_count")
         try:
             retry_count = int(raw_retry_count) if raw_retry_count is not None else 0
@@ -252,7 +245,6 @@ class Task:
             retry_count=retry_count,
             error=(str(data.get("error")) if data.get("error") is not None else None),
             quality_gate=dict(data.get("quality_gate") or {"critical": 0, "high": 0, "medium": 0, "low": 0}),
-            approval_mode=cast(ApprovalMode, approval_mode),
             hitl_mode=hitl_mode,
             dependency_policy=cast(DependencyPolicy, dependency_policy),
             pending_gate=(str(data.get("pending_gate")) if data.get("pending_gate") else None),

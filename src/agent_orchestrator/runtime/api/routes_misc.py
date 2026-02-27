@@ -7,6 +7,7 @@ from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
+from ...collaboration.modes import normalize_hitl_mode
 from ..domain.models import now_iso
 from .deps import RouteDeps
 from . import router_impl as impl
@@ -152,6 +153,32 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         if task.status not in ("in_review", "blocked"):
             raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review or blocked")
 
+        is_precommit_review = bool(task.metadata.get("pending_precommit_approval"))
+
+        if is_precommit_review:
+            ts = now_iso()
+            task.status = "queued"
+            task.error = None
+            task.metadata.pop("pending_precommit_approval", None)
+            task.metadata.pop("review_stage", None)
+            task.metadata["retry_from_step"] = "commit"
+            task.metadata["last_review_approval"] = {"ts": ts, "guidance": body.guidance}
+            history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
+            history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
+            latest_run = None
+            for run_id in reversed(task.run_ids):
+                latest_run = container.runs.get(run_id)
+                if latest_run:
+                    break
+            if latest_run and latest_run.status in {"in_review", "in_progress", "waiting_gate"}:
+                latest_run.status = "interrupted"
+                latest_run.finished_at = latest_run.finished_at or ts
+                latest_run.summary = latest_run.summary or "Approved pre-commit; queued to run commit"
+                container.runs.upsert(latest_run)
+            container.tasks.upsert(task)
+            bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={"stage": "pre_commit", "guidance": body.guidance or ""})
+            return {"task": _task_payload(task, container)}
+
         # If there's a preserved branch, merge it before marking done
         if task.metadata.get("preserved_branch"):
             merge_result = orchestrator.approve_and_merge(task)
@@ -208,10 +235,22 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             raise HTTPException(status_code=400, detail=f"Task {task_id} is not in_review")
         task.status = "queued"
         ts = now_iso()
+        task.metadata.pop("pending_precommit_approval", None)
+        task.metadata.pop("review_stage", None)
         task.metadata["requested_changes"] = {"ts": ts, "guidance": body.guidance}
         task.metadata["retry_from_step"] = "implement"
         history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
         history.append({"action": "request_changes", "ts": ts, "guidance": body.guidance or ""})
+        latest_run = None
+        for run_id in reversed(task.run_ids):
+            latest_run = container.runs.get(run_id)
+            if latest_run:
+                break
+        if latest_run and latest_run.status in {"in_review", "in_progress", "waiting_gate"}:
+            latest_run.status = "interrupted"
+            latest_run.finished_at = latest_run.finished_at or ts
+            latest_run.summary = latest_run.summary or "Changes requested before commit"
+            container.runs.upsert(latest_run)
         container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.changes_requested", entity_id=task.id, payload={"guidance": body.guidance})
         return {"task": _task_payload(task, container)}
@@ -322,6 +361,8 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             dep_policy = str(incoming_defaults.get("dependency_policy") or "").strip()
             if dep_policy in ("permissive", "prudent", "strict"):
                 defaults_cfg["dependency_policy"] = dep_policy
+            if "hitl_mode" in incoming_defaults:
+                defaults_cfg["hitl_mode"] = normalize_hitl_mode(incoming_defaults.get("hitl_mode"))
             cfg["defaults"] = defaults_cfg
             touched_sections.append("defaults")
 

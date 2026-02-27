@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from ...collaboration.modes import normalize_hitl_mode
 from ...pipelines.registry import PipelineRegistry
 from ...worker import WorkerCancelledError
 from ..domain.models import RunRecord, ReviewCycle, ReviewFinding, Task, now_iso
@@ -232,6 +233,8 @@ class TaskExecutor:
                 start_step = retry_from
             elif retry_from in {"review", "commit"}:
                 start_step = retry_from
+            elif retry_from == svc._BEFORE_DONE_RESUME_STEP:
+                start_step = None
             else:
                 start_step = steps[0] if steps else None
             task.current_step = start_step
@@ -254,13 +257,19 @@ class TaskExecutor:
                 },
             )
 
-            mode = getattr(task, "hitl_mode", "autopilot") or "autopilot"
+            mode = normalize_hitl_mode(getattr(task, "hitl_mode", "autopilot"))
+            # Retry flows resumed from implement/review/commit should not require
+            # re-approval of the original plan gate.
+            skip_before_implement_gate = bool(is_retry_run and retry_from and retry_from != "plan")
 
             skip_phase1 = retry_from in ("review", "commit")
+            resume_from_done_gate = retry_from == svc._BEFORE_DONE_RESUME_STEP
             reached_retry_step = not retry_from
             last_phase1_step: str | None = None
             for step in steps:
                 if step in ("review", "commit"):
+                    continue
+                if resume_from_done_gate:
                     continue
                 if skip_phase1:
                     last_phase1_step = step
@@ -276,7 +285,13 @@ class TaskExecutor:
                         svc.container.runs.upsert(run)
                         continue
                 svc._check_cancelled(task)
-                gate_name = svc._GATE_MAPPING.get(step)
+                gate_name = svc._gate_for_step(
+                    task=task,
+                    mode=mode,
+                    steps=steps,
+                    step=step,
+                    skip_before_implement_gate=skip_before_implement_gate,
+                )
                 if gate_name and svc._should_gate(mode, gate_name):
                     if not svc._wait_for_gate(task, gate_name):
                         return
@@ -356,12 +371,8 @@ class TaskExecutor:
                     return
 
             svc._check_cancelled(task)
-            if has_review and retry_from != "commit":
+            if has_review and retry_from not in {"commit", svc._BEFORE_DONE_RESUME_STEP}:
                 post_fix_validation_step = svc._select_post_fix_validation_step(steps)
-                gate_name = svc._GATE_MAPPING.get("review")
-                if gate_name and svc._should_gate(mode, gate_name):
-                    if not svc._wait_for_gate(task, gate_name):
-                        return
 
                 review_attempt = 0
                 review_passed = False
@@ -548,9 +559,30 @@ class TaskExecutor:
 
             svc._check_cancelled(task)
             if has_commit:
-                if svc._should_gate(mode, "before_commit"):
-                    if not svc._wait_for_gate(task, "before_commit"):
-                        return
+                # Supervised/review-only flows pause in in_review before commit so
+                # footer review actions drive final approve/request-changes.
+                precommit_review_modes = {"supervised", "review_only"}
+                requires_precommit_review = mode in precommit_review_modes
+                if requires_precommit_review and retry_from != "commit":
+                    task.status = "in_review"
+                    task.current_step = "review"
+                    task.metadata["pipeline_phase"] = "review"
+                    task.metadata["pending_precommit_approval"] = True
+                    task.metadata["review_stage"] = "pre_commit"
+                    svc.container.tasks.upsert(task)
+                    run.status = "in_review"
+                    run.summary = "Awaiting pre-commit approval"
+                    svc.container.runs.upsert(run)
+                    svc.bus.emit(
+                        channel="review",
+                        event_type="task.awaiting_human",
+                        entity_id=task.id,
+                        payload={"stage": "pre_commit"},
+                    )
+                    return
+
+                task.metadata.pop("pending_precommit_approval", None)
+                task.metadata.pop("review_stage", None)
                 task.current_step = "commit"
                 task.metadata["pipeline_phase"] = "commit"
                 svc.container.tasks.upsert(task)
@@ -618,31 +650,29 @@ class TaskExecutor:
                     return
 
                 svc._run_summarize_step(task, run)
-                if task.approval_mode == "auto_approve":
-                    task.status = "done"
-                    task.current_step = None
-                    task.metadata.pop("pipeline_phase", None)
-                    run.status = "done"
-                    run.summary = "Completed with auto-approve"
-                    svc.bus.emit(
-                        channel="tasks",
-                        event_type="task.done",
-                        entity_id=task.id,
-                        payload={"commit": commit_sha},
-                    )
-                else:
-                    task.status = "in_review"
-                    task.current_step = None
-                    task.metadata.pop("pipeline_phase", None)
-                    run.status = "in_review"
-                    run.summary = "Awaiting human review"
-                    svc.bus.emit(
-                        channel="review",
-                        event_type="task.awaiting_human",
-                        entity_id=task.id,
-                        payload={"commit": commit_sha},
-                    )
+                task.status = "done"
+                task.current_step = None
+                task.metadata.pop("pipeline_phase", None)
+                task.metadata.pop("pending_precommit_approval", None)
+                task.metadata.pop("review_stage", None)
+                run.status = "done"
+                run.summary = "Pipeline completed"
+                svc.bus.emit(
+                    channel="tasks",
+                    event_type="task.done",
+                    entity_id=task.id,
+                    payload={"commit": commit_sha},
+                )
             else:
+                requires_done_gate = svc._should_before_done_gate(task=task, mode=mode, has_commit=has_commit)
+                if requires_done_gate and retry_from != svc._BEFORE_DONE_RESUME_STEP:
+                    gate_resume_step = svc._BEFORE_DONE_RESUME_STEP
+                    task.current_step = last_phase1_step
+                    task.metadata["pipeline_phase"] = last_phase1_step
+                    svc.container.tasks.upsert(task)
+                    if not svc._wait_for_gate(task, "before_done", resume_step=gate_resume_step):
+                        return
+
                 if worktree_dir:
                     subprocess.run(
                         ["git", "worktree", "remove", str(worktree_dir), "--force"],

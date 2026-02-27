@@ -125,7 +125,14 @@ def ensure_state_root(project_dir: Path) -> Path:
             "gate_timeout_action": "none",
         },
     )
-    config.setdefault("defaults", {"approval_mode": "human_review", "quality_gate": {"critical": 0, "high": 0, "medium": 0, "low": 0}, "dependency_policy": "prudent"})
+    config.setdefault(
+        "defaults",
+        {
+            "quality_gate": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+            "dependency_policy": "prudent",
+            "hitl_mode": "autopilot",
+        },
+    )
     project_cfg = config.get("project")
     if not isinstance(project_cfg, dict):
         project_cfg = {}

@@ -22,8 +22,7 @@ async function createTask(
       status,
       labels: ['readme', 'screenshot'],
       blocked_by: [],
-      approval_mode: 'human_review',
-      hitl_mode: 'autopilot',
+            hitl_mode: 'autopilot',
     },
   })
   expect(response.ok()).toBeTruthy()

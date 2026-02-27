@@ -1070,6 +1070,10 @@ textarea {
   margin-left: 0.35rem;
 }
 
+.status-pill.status-pill-no-offset {
+  margin-left: 0;
+}
+
 /* ── Step badge (task detail header) ── */
 /* ── Pipeline flow ─────────────────────────────────────── */
 .pipeline-flow {
@@ -2391,6 +2395,10 @@ textarea {
 .plan-gate-banner {
   border-left: 3px solid var(--color-warning-500);
   background: var(--color-warning-50);
+}
+
+.plan-gate-banner .field-label {
+  margin: 0 0 0.35rem;
 }
 
 .plan-tab-toolbar {

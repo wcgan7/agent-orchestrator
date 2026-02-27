@@ -260,6 +260,57 @@ describe('App default route', () => {
     })
   })
 
+  it('does not show awaiting approval badge for cancelled tasks', async () => {
+    const mockedFetch = vi.fn().mockImplementation((url) => {
+      const u = String(url)
+      if (u.includes('/api/tasks/board')) {
+        return Promise.resolve({
+          ok: true,
+          json: async () => ({
+            columns: {
+              backlog: [],
+              queued: [],
+              in_progress: [],
+              in_review: [],
+              blocked: [],
+              done: [],
+              cancelled: [
+                {
+                  id: 'task-cancelled-1',
+                  title: 'Cancelled task',
+                  status: 'cancelled',
+                  priority: 'P2',
+                  task_type: 'feature',
+                  pending_gate: 'before_implement',
+                  blocked_by: [],
+                  blocks: [],
+                },
+              ],
+            },
+          }),
+        })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) {
+        return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      }
+      if (u.includes('/api/orchestrator/status')) {
+        return Promise.resolve({ ok: true, json: async () => ({ status: 'running', queue_depth: 0, in_progress: 0, draining: false, run_branch: null }) })
+      }
+      if (u.includes('/api/review-queue')) return Promise.resolve({ ok: true, json: async () => ({ tasks: [] }) })
+      if (u.includes('/api/agents')) return Promise.resolve({ ok: true, json: async () => ({ agents: [] }) })
+      if (u.includes('/api/projects')) return Promise.resolve({ ok: true, json: async () => ({ projects: [] }) })
+      return Promise.resolve({ ok: true, json: async () => ({}) })
+    })
+    global.fetch = mockedFetch as unknown as typeof fetch
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /cancelled task/i })).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/Awaiting approval/i)).toBeNull()
+  })
+
   it('submits task_type and advanced create fields from Create Task form', async () => {
     const mockedFetch = global.fetch as unknown as ReturnType<typeof vi.fn>
     render(<App />)

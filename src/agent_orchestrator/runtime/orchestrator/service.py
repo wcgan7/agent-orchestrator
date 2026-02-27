@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, Optional, cast
 
-from ...collaboration.modes import should_gate
+from ...collaboration.modes import normalize_hitl_mode, should_gate
 from ...pipelines.registry import PipelineRegistry
 from ...workers.config import get_workers_runtime_config, resolve_worker_for_step
 from ..domain.models import (
@@ -48,12 +48,16 @@ class OrchestratorService:
     _GATE_MAPPING: dict[str, str] = {
         "plan": "before_plan",
         "implement": "before_implement",
-        "review": "after_implement",
+        "generate_tasks": "before_generate_tasks",
         "commit": "before_commit",
     }
+    _BEFORE_DONE_RESUME_STEP = "__before_done__"
+    _DECOMPOSITION_PIPELINES = {"plan_only", "repo_review", "security_audit"}
     _GATE_RESUME_STEP: dict[str, str] = {
         "before_plan": "plan",
         "before_implement": "implement",
+        "before_generate_tasks": "generate_tasks",
+        "before_done": _BEFORE_DONE_RESUME_STEP,
         "after_implement": "review",
         "before_commit": "commit",
     }
@@ -148,23 +152,63 @@ class OrchestratorService:
         )
         return True
 
-    def _mark_gate_waiting(self, task: Task, gate_name: str) -> None:
+    def _mark_gate_waiting(self, task: Task, gate_name: str, *, resume_step: str | None = None) -> None:
         if not isinstance(task.metadata, dict):
             task.metadata = {}
-        resume_step = self._GATE_RESUME_STEP.get(gate_name, task.current_step or "")
+        resolved_resume_step = resume_step if resume_step is not None else self._GATE_RESUME_STEP.get(gate_name, task.current_step or "")
         checkpoint = self._execution_checkpoint(task)
         checkpoint.update(
             {
                 "gate": gate_name,
-                "resume_step": resume_step or None,
+                "resume_step": resolved_resume_step or None,
                 "run_id": task.run_ids[-1] if task.run_ids else None,
                 "paused_at": now_iso(),
                 "resume_requested_at": None,
                 "approved_gate": None,
             }
         )
-        task.metadata["retry_from_step"] = resume_step
+        if resolved_resume_step:
+            task.metadata["retry_from_step"] = resolved_resume_step
+        else:
+            task.metadata.pop("retry_from_step", None)
         self._save_execution_checkpoint(task, checkpoint)
+
+    def _gate_for_step(
+        self,
+        *,
+        task: Task,
+        mode: str,
+        steps: list[str],
+        step: str,
+        skip_before_implement_gate: bool = False,
+    ) -> str | None:
+        """Resolve whether a specific step should pause for a human gate."""
+        normalized_mode = normalize_hitl_mode(mode)
+        if normalized_mode != "supervised":
+            return None
+        if step == "implement":
+            if skip_before_implement_gate:
+                return None
+            if step not in steps:
+                return None
+            idx = steps.index(step)
+            if idx <= 0:
+                return None
+            meaningful_pre_work = any(str(prev or "").strip() not in {"review", "commit"} for prev in steps[:idx])
+            return "before_implement" if meaningful_pre_work else None
+        if step == "generate_tasks":
+            pipeline_id = self._pipeline_id_for_task(task)
+            if pipeline_id in self._DECOMPOSITION_PIPELINES:
+                return "before_generate_tasks"
+        return None
+
+    def _should_before_done_gate(self, *, task: Task, mode: str, has_commit: bool) -> bool:
+        """Return whether a task should pause at a final done gate."""
+        if has_commit:
+            return False
+        if not self._should_gate(mode, "before_done"):
+            return False
+        return self._pipeline_id_for_task(task) not in self._DECOMPOSITION_PIPELINES
 
     @staticmethod
     def _parse_iso_epoch(value: Any) -> float | None:
@@ -1395,7 +1439,14 @@ class OrchestratorService:
             },
         )
 
-    def _wait_for_gate(self, task: Task, gate_name: str, timeout: int = 3600) -> bool:
+    def _wait_for_gate(
+        self,
+        task: Task,
+        gate_name: str,
+        timeout: int = 3600,
+        *,
+        resume_step: str | None = None,
+    ) -> bool:
         """Park execution at a gate and resume only after explicit approval.
 
         Returns:
@@ -1408,7 +1459,7 @@ class OrchestratorService:
         task.pending_gate = gate_name
         task.status = "in_progress"
         task.current_agent_id = None
-        self._mark_gate_waiting(task, gate_name)
+        self._mark_gate_waiting(task, gate_name, resume_step=resume_step)
         task.updated_at = now_iso()
         self.container.tasks.upsert(task)
         if task.run_ids:

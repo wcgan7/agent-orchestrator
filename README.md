@@ -19,8 +19,10 @@ You keep task prompts concise; the orchestrator handles step-specific guidance, 
 - Full PRDs can be imported and automatically decomposed into dependency-aware execution batches.
 
 ### Enforce quality and governance
-- Choose a Human-in-the-Loop mode per task: **Autopilot**, **Supervised**, **Collaborative**, or **Review Only**.
-- Gate execution at key handoff points (plan, review, commit) based on the selected mode.
+- Choose a Human-in-the-Loop mode per task: **Autopilot**, **Supervised**, or **Review Only**.
+- **Autopilot** runs end-to-end with no approvals.
+- **Supervised** requires plan/decomposition approval and human review before commit.
+- **Review Only** skips planning gates, pauses for human review before commit, and adds a final done gate for non-commit pipelines.
 - Configure severity thresholds (`critical`, `high`, `medium`, `low`) globally or per task to control pass/fail tolerance.
 - Draft, refine, and commit plan revisions with full lineage before implementation when needed.
 

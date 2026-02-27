@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 import subprocess
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional, cast
 
 from fastapi import APIRouter, HTTPException, Query
 
+from ...collaboration.modes import normalize_hitl_mode
 from ...pipelines.registry import PipelineRegistry
 from ..domain.models import (
-    ApprovalMode,
     DependencyPolicy,
     Priority,
     Task,
@@ -54,10 +55,14 @@ def _gate_approved_message(gate: str | None, *, will_resume: bool) -> str:
     if will_resume:
         if normalized == "before_implement":
             return "Plan approved. Task will resume shortly."
+        if normalized == "before_generate_tasks":
+            return "Task generation approved. Task will resume shortly."
+        if normalized == "before_done":
+            return "Marked done. Task will finalize shortly."
         if normalized == "after_implement":
-            return "Review approved. Task will resume shortly."
+            return "Implementation approved. Task will resume shortly."
         if normalized == "before_commit":
-            return "Commit approved. Task will resume shortly."
+            return "Approved. Task will resume shortly."
         if normalized == "human_intervention":
             return "Intervention acknowledged. Task will resume shortly."
         gate_label = _gate_display_label(normalized)
@@ -73,14 +78,261 @@ def _gate_approved_message(gate: str | None, *, will_resume: bool) -> str:
     return "Gate approved."
 
 
+def _gate_changes_requested_message(gate: str | None, *, start_from_step: str | None) -> str:
+    normalized = str(gate or "").strip()
+    if normalized == "before_implement":
+        return "Changes requested. Task resumed from planning."
+    if normalized == "before_generate_tasks":
+        return "Changes requested. Task resumed before task generation."
+    if normalized == "before_done":
+        return "Changes requested. Task resumed from the final step."
+    if start_from_step:
+        return f"Changes requested. Task resumed from {start_from_step}."
+    return "Changes requested. Task resumed."
+
+
 def _resume_step_for_gate(gate: str | None) -> str | None:
     mapping = {
         "before_plan": "plan",
         "before_implement": "implement",
+        "before_generate_tasks": "generate_tasks",
+        "before_done": "__before_done__",
         "after_implement": "review",
         "before_commit": "commit",
     }
     return mapping.get(str(gate or "").strip())
+
+
+def _pipeline_steps(task: Task) -> list[str]:
+    if task.pipeline_template:
+        return [str(step).strip() for step in task.pipeline_template if str(step).strip()]
+    try:
+        return PipelineRegistry().resolve_for_task_type(task.task_type).step_names()
+    except Exception:
+        return []
+
+
+def _previous_step(steps: list[str], target_step: str) -> str | None:
+    if target_step not in steps:
+        return None
+    index = steps.index(target_step)
+    if index <= 0:
+        return target_step
+    return steps[index - 1]
+
+
+def _request_changes_step_for_gate(task: Task, gate: str | None) -> str | None:
+    normalized = str(gate or "").strip()
+    steps = _pipeline_steps(task)
+    if normalized == "before_implement":
+        return _previous_step(steps, "implement")
+    if normalized == "before_generate_tasks":
+        return _previous_step(steps, "generate_tasks")
+    if normalized == "before_done":
+        return steps[-1] if steps else task.current_step
+    if normalized == "before_commit":
+        return _previous_step(steps, "commit") or "implement"
+    if normalized == "after_implement":
+        return "implement"
+    if normalized == "before_plan":
+        return _previous_step(steps, "plan") or "plan"
+    return task.current_step or None
+
+
+def _mark_latest_run_interrupted(container: Any, task: Task, *, summary: str, ts: str) -> None:
+    latest_run = None
+    for run_id in reversed(task.run_ids):
+        latest_run = container.runs.get(run_id)
+        if latest_run:
+            break
+    if latest_run and latest_run.status in {"in_review", "in_progress", "waiting_gate"}:
+        latest_run.status = "interrupted"
+        latest_run.finished_at = latest_run.finished_at or ts
+        latest_run.summary = latest_run.summary or summary
+        container.runs.upsert(latest_run)
+
+
+def _parse_stat_files(stat_text: str) -> list[dict[str, str]]:
+    files: list[dict[str, str]] = []
+    for line in str(stat_text or "").strip().splitlines():
+        text = line.strip()
+        if not text or text.startswith("Showing") or " | " not in text:
+            continue
+        parts = text.split(" | ", 1)
+        files.append({"path": parts[0].strip(), "changes": parts[1].strip() if len(parts) > 1 else ""})
+    return files
+
+
+def _is_within_project(candidate: Path, project_root: Path) -> bool:
+    try:
+        resolved_candidate = candidate.resolve()
+        resolved_root = project_root.resolve()
+    except Exception:
+        return False
+    return resolved_candidate == resolved_root or resolved_root in resolved_candidate.parents
+
+
+def _is_runtime_state_path(path_text: str) -> bool:
+    normalized = str(path_text or "").replace("\\", "/").strip()
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized == ".agent_orchestrator" or normalized.startswith(".agent_orchestrator/")
+
+
+def _resolve_base_branch(git_dir: Path, *, avoid_branch: str | None = None) -> str | None:
+    candidates: list[str] = []
+    try:
+        remote_head = subprocess.run(
+            ["git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"],
+            cwd=git_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if remote_head.returncode == 0:
+            value = remote_head.stdout.strip()
+            if value.startswith("origin/"):
+                value = value[len("origin/") :]
+            if value:
+                candidates.append(value)
+    except Exception:
+        pass
+
+    candidates.extend(["main", "master", "develop", "trunk"])
+    try:
+        configured_default = subprocess.run(
+            ["git", "config", "--get", "init.defaultBranch"],
+            cwd=git_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        ).stdout.strip()
+        if configured_default:
+            candidates.append(configured_default)
+    except Exception:
+        pass
+    try:
+        current = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=git_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        current_name = current.stdout.strip()
+        if (
+            current.returncode == 0
+            and current_name
+            and current_name != "HEAD"
+            and current_name != str(avoid_branch or "").strip()
+        ):
+            candidates.append(current_name)
+    except Exception:
+        pass
+    try:
+        local_heads = subprocess.run(
+            ["git", "for-each-ref", "--format=%(refname:short)", "refs/heads"],
+            cwd=git_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+        if local_heads.returncode == 0:
+            for raw in local_heads.stdout.splitlines():
+                name = raw.strip()
+                if not name or name == str(avoid_branch or "").strip():
+                    continue
+                if name.startswith("task-"):
+                    continue
+                candidates.append(name)
+    except Exception:
+        pass
+
+    seen: set[str] = set()
+    for name in candidates:
+        if not name or name in seen or name == str(avoid_branch or "").strip():
+            continue
+        seen.add(name)
+        try:
+            verify = subprocess.run(
+                ["git", "rev-parse", "--verify", f"refs/heads/{name}"],
+                cwd=git_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            if verify.returncode == 0:
+                return name
+        except Exception:
+            continue
+    return None
+
+
+def _preserved_branch_changes(
+    *,
+    metadata: dict[str, Any] | None,
+    git_dir: Path,
+) -> dict[str, Any] | None:
+    preserved_branch = str((metadata or {}).get("preserved_branch") or "").strip()
+    if not preserved_branch:
+        return None
+    try:
+        has_branch = (
+            subprocess.run(
+                ["git", "rev-parse", "--verify", f"refs/heads/{preserved_branch}"],
+                cwd=git_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            ).returncode
+            == 0
+        )
+    except Exception:
+        has_branch = False
+    if not has_branch:
+        return None
+    base_branch = _resolve_base_branch(git_dir, avoid_branch=preserved_branch)
+    if not base_branch:
+        return None
+    try:
+        branch_stat = subprocess.run(
+            ["git", "diff", "--stat", f"{base_branch}...{preserved_branch}"],
+            cwd=git_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        branch_diff = subprocess.run(
+            ["git", "diff", f"{base_branch}...{preserved_branch}"],
+            cwd=git_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return None
+    branch_files = _parse_stat_files(branch_stat.stdout)
+    branch_diff_text = branch_diff.stdout or ""
+    branch_stat_text = branch_stat.stdout or ""
+    if not branch_diff_text and not branch_files and not branch_stat_text.strip():
+        return None
+    return {
+        "mode": "preserved_branch",
+        "commit": None,
+        "branch": preserved_branch,
+        "base_branch": base_branch,
+        "files": branch_files,
+        "diff": branch_diff_text,
+        "stat": branch_stat_text,
+    }
 
 
 def _timestamp_sort_value(value: Any, *, descending: bool) -> float:
@@ -206,8 +458,11 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             dep_policy = str((cfg.get("defaults") or {}).get("dependency_policy") or "prudent")
             if dep_policy not in ("permissive", "prudent", "strict"):
                 dep_policy = "prudent"
+        cfg = container.config.load()
+        configured_hitl_mode = normalize_hitl_mode((cfg.get("defaults") or {}).get("hitl_mode"))
+        requested_hitl_mode = normalize_hitl_mode(body.hitl_mode, default="")
+        hitl_mode = requested_hitl_mode or configured_hitl_mode
         priority = body.priority if body.priority in ("P0", "P1", "P2", "P3") else "P2"
-        approval_mode = body.approval_mode if body.approval_mode in ("human_review", "auto_approve") else "human_review"
         task = Task(
             title=body.title,
             description=body.description,
@@ -217,8 +472,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             blocked_by=body.blocked_by,
             parent_id=body.parent_id,
             pipeline_template=pipeline_steps,
-            approval_mode=cast(ApprovalMode, approval_mode),
-            hitl_mode=body.hitl_mode,
+            hitl_mode=hitl_mode,
             dependency_policy=cast(DependencyPolicy, dep_policy),
             source=body.source,
             worker_model=(str(body.worker_model).strip() if body.worker_model else None),
@@ -493,22 +747,128 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
             raise HTTPException(status_code=500, detail=f"Failed to read diff: {exc}") from exc
 
-        # Parse stat lines into structured file list.
-        files: list[dict[str, str]] = []
-        for line in stat_result.stdout.strip().splitlines():
-            line = line.strip()
-            if not line or line.startswith("Showing") or " | " not in line:
-                continue
-            parts = line.split(" | ", 1)
-            file_path = parts[0].strip()
-            change_info = parts[1].strip() if len(parts) > 1 else ""
-            files.append({"path": file_path, "changes": change_info})
+        files = _parse_stat_files(stat_result.stdout)
 
         return {
             "commit": commit_sha,
             "files": files,
             "diff": diff_result.stdout,
             "stat": stat_result.stdout,
+        }
+
+    @router.get("/tasks/{task_id}/changes")
+    async def get_task_changes(task_id: str, project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Return best-available task change evidence.
+
+        Prefers committed diff when present; otherwise returns current working tree
+        changes for task worktree/repo context.
+        """
+        container, _, _ = deps.ctx(project_dir)
+        task = container.tasks.get(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        commit_payload: dict[str, Any] | None = None
+        try:
+            commit_payload = await get_task_diff(task_id, project_dir)
+        except HTTPException as exc:
+            if exc.status_code != 500:
+                raise
+        if commit_payload and commit_payload.get("commit"):
+            return {
+                "mode": "committed",
+                "commit": commit_payload.get("commit"),
+                "files": commit_payload.get("files") or [],
+                "diff": commit_payload.get("diff") or "",
+                "stat": commit_payload.get("stat") or "",
+            }
+
+        task_metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        worktree_dir = None
+        if isinstance(task_metadata, dict):
+            candidate = str(task_metadata.get("worktree_dir") or "").strip()
+            if candidate:
+                worktree_dir = candidate
+        git_dir = container.project_dir
+        project_root = container.project_dir
+        has_task_worktree = False
+        if worktree_dir:
+            try:
+                worktree_path = Path(worktree_dir).expanduser().resolve()
+            except Exception:
+                worktree_path = None
+            if (
+                worktree_path
+                and worktree_path.exists()
+                and worktree_path.is_dir()
+                and _is_within_project(worktree_path, project_root)
+            ):
+                git_dir = worktree_path
+                has_task_worktree = True
+
+        try:
+            status_result = subprocess.run(
+                ["git", "status", "--short"],
+                cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
+            )
+            has_head = (
+                subprocess.run(
+                    ["git", "rev-parse", "--verify", "HEAD"],
+                    cwd=git_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                ).returncode
+                == 0
+            )
+            stat_cmd = ["git", "diff", "--stat", "HEAD"] if has_head else ["git", "diff", "--stat"]
+            diff_cmd = ["git", "diff", "HEAD"] if has_head else ["git", "diff"]
+            stat_result = subprocess.run(
+                stat_cmd,
+                cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
+            )
+            diff_result = subprocess.run(
+                diff_cmd,
+                cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to read working-tree changes: {exc}") from exc
+
+        raw_status_lines = [line.rstrip() for line in status_result.stdout.splitlines() if line.strip()]
+        status_entries: list[dict[str, str]] = []
+        for line in raw_status_lines:
+            code = line[:2].strip() or "??"
+            path_fragment = line[3:].strip() if len(line) > 3 else line.strip()
+            logical_paths = [path_fragment]
+            if " -> " in path_fragment:
+                logical_paths = [p.strip() for p in path_fragment.split(" -> ", 1)]
+            if logical_paths and all(_is_runtime_state_path(p) for p in logical_paths):
+                continue
+            status_entries.append({"code": code, "path": path_fragment})
+        status_lines = [f"{entry['code']} {entry['path']}".strip() for entry in status_entries]
+
+        files = [entry for entry in _parse_stat_files(stat_result.stdout) if not _is_runtime_state_path(entry.get("path", ""))]
+        if not files and status_entries:
+            parsed: list[dict[str, str]] = []
+            for entry in status_entries:
+                parsed.append({"path": entry["path"], "changes": entry["code"]})
+            files = parsed
+
+        diff_text = diff_result.stdout or ""
+        if not files and not status_lines:
+            preserved_payload = _preserved_branch_changes(metadata=task_metadata, git_dir=container.project_dir)
+            if preserved_payload:
+                return preserved_payload
+            return {"mode": "none", "commit": None, "files": [], "diff": "", "stat": ""}
+
+        stat_text = stat_result.stdout or ("\n".join(status_lines) if status_lines else "")
+        return {
+            "mode": "working_tree",
+            "commit": None,
+            "files": files,
+            "diff": diff_text,
+            "stat": stat_text,
         }
 
     @router.get("/tasks/{task_id}/logs")
@@ -522,6 +882,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         stdout_read_to: int = Query(0, ge=0),
         stderr_read_to: int = Query(0, ge=0),
         step: Optional[str] = Query(None),
+        run_id: Optional[str] = Query(None),
     ) -> dict[str, Any]:
         """Return active, historical, or incremental task log output.
         
@@ -535,6 +896,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             stdout_read_to: Optional upper byte boundary for stdout reads.
             stderr_read_to: Optional upper byte boundary for stderr reads.
             step: Optional step name to load logs from historical run metadata.
+            run_id: Optional run identifier used with ``step`` to select a specific
+                historical step attempt.
         
         Returns:
             A payload containing log text, offsets, and progress metadata.
@@ -553,40 +916,93 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         last_meta = metadata.get("last_logs") if isinstance(metadata.get("last_logs"), dict) else None
 
         requested_step = str(step or "").strip()
+        requested_run_id = str(run_id or "").strip()
+
+        runs_by_id = {run.id: run for run in container.runs.list()}
+        step_execution_counts: dict[str, int] = {}
+        step_latest_run: dict[str, str] = {}
+        available_steps: list[str] = []
+        seen_steps: set[str] = set()
+        # Most-recent-first list of step executions with available stdout logs.
+        step_history_entries: list[dict[str, Any]] = []
+        step_attempt_counts: dict[str, int] = {}
+        for task_run_id in reversed(task.run_ids):
+            run = runs_by_id.get(task_run_id)
+            if not run:
+                continue
+            for entry in reversed(run.steps or []):
+                if not isinstance(entry, dict) or not entry.get("stdout_path"):
+                    continue
+                step_name = str(entry.get("step") or "").strip()
+                if not step_name:
+                    continue
+                step_execution_counts[step_name] = step_execution_counts.get(step_name, 0) + 1
+                if step_name not in seen_steps:
+                    available_steps.append(step_name)
+                    seen_steps.add(step_name)
+                if step_name not in step_latest_run:
+                    step_latest_run[step_name] = task_run_id
+                step_attempt_counts[step_name] = step_attempt_counts.get(step_name, 0) + 1
+                step_history_entries.append(
+                    {
+                        "step": step_name,
+                        "run_id": task_run_id,
+                        "attempt": step_attempt_counts[step_name],
+                        "started_at": entry.get("started_at"),
+                        "finished_at": entry.get("ts"),
+                        "entry": entry,
+                    }
+                )
 
         # When a specific step is requested, resolve logs strictly for that step.
         step_logs_meta: Optional[dict[str, Any]] = None
+        selected_run_id: str | None = None
         mode = "none"
         if requested_step:
-            for run_id in reversed(task.run_ids):
-                for run in container.runs.list():
-                    if run.id == run_id:
-                        # Find the last matching step entry (latest attempt).
-                        for entry in reversed(run.steps or []):
-                            if (
-                                isinstance(entry, dict)
-                                and str(entry.get("step") or "").strip() == requested_step
-                                and entry.get("stdout_path")
-                            ):
-                                step_logs_meta = entry
-                                break
-                        break
+            strict_run_selection = bool(requested_run_id)
+            if requested_run_id:
+                direct_run = runs_by_id.get(requested_run_id)
+                if direct_run:
+                    for entry in reversed(direct_run.steps or []):
+                        if (
+                            isinstance(entry, dict)
+                            and str(entry.get("step") or "").strip() == requested_step
+                            and entry.get("stdout_path")
+                        ):
+                            step_logs_meta = entry
+                            selected_run_id = requested_run_id
+                            break
+            for item in step_history_entries:
+                if step_logs_meta:
+                    break
+                if item.get("step") != requested_step:
+                    continue
+                if requested_run_id and str(item.get("run_id") or "") != requested_run_id:
+                    continue
+                selected_run_id = str(item.get("run_id") or "") or None
+                entry = item.get("entry")
+                step_logs_meta = entry if isinstance(entry, dict) else None
                 if step_logs_meta:
                     break
 
             if step_logs_meta:
                 logs_meta = step_logs_meta
                 mode = "history"
+            elif strict_run_selection:
+                logs_meta = {"step": requested_step}
             elif active_meta and str(active_meta.get("step") or "").strip() == requested_step:
                 logs_meta = active_meta
+                selected_run_id = str(active_meta.get("run_id") or "").strip() or None
                 mode = "active"
             elif last_meta and str(last_meta.get("step") or "").strip() == requested_step:
                 logs_meta = last_meta
+                selected_run_id = str(last_meta.get("run_id") or "").strip() or None
                 mode = "last"
             else:
                 logs_meta = {"step": requested_step}
         else:
             logs_meta = active_meta or last_meta or {}
+            selected_run_id = str(logs_meta.get("run_id") or "").strip() or None
             mode = "active" if active_meta else ("last" if last_meta else "none")
 
         stdout_path = _safe_state_path(logs_meta.get("stdout_path"), container.state_root)
@@ -630,31 +1046,18 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             stdout_chunk_start = stdout_tail_start
             stderr_chunk_start = stderr_tail_start
 
-        # Collect which steps have stored logs and count executions.
-        available_steps: list[str] = []
-        step_execution_counts: dict[str, int] = {}
-        seen: set[str] = set()
-        for run_id in task.run_ids[-1:]:
-            for run in container.runs.list():
-                if run.id == run_id:
-                    for entry in (run.steps or []):
-                        if isinstance(entry, dict) and entry.get("stdout_path"):
-                            s = str(entry.get("step") or "")
-                            if s:
-                                step_execution_counts[s] = step_execution_counts.get(s, 0) + 1
-                                if s not in seen:
-                                    available_steps.append(s)
-                                    seen.add(s)
-                    break
         # Include the currently active log step for live switching support.
         active_step = active_meta.get("step") if isinstance(active_meta, dict) else None
-        if active_step and active_step not in seen:
+        if active_step and active_step not in seen_steps:
             available_steps.append(str(active_step))
+        if active_step and str(active_step) not in step_execution_counts:
+            step_execution_counts[str(active_step)] = 1
 
         return {
             "mode": mode,
             "task_status": task.status,
             "step": str(logs_meta.get("step") or task.current_step or ""),
+            "run_id": selected_run_id,
             "current_step": str(task.current_step or ""),
             "stdout": stdout_text,
             "stderr": stderr_text,
@@ -670,6 +1073,17 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             "progress": progress_payload,
             "available_steps": available_steps,
             "step_execution_counts": step_execution_counts,
+            "step_latest_run": step_latest_run,
+            "step_history": [
+                {
+                    "step": str(item.get("step") or ""),
+                    "run_id": str(item.get("run_id") or ""),
+                    "attempt": int(item.get("attempt") or 0),
+                    "started_at": item.get("started_at"),
+                    "finished_at": item.get("finished_at"),
+                }
+                for item in step_history_entries[:200]
+            ],
         }
 
     @router.patch("/tasks/{task_id}")
@@ -702,6 +1116,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if "project_commands" in updates and not updates["project_commands"]:
             updates["project_commands"] = None
         for key, value in updates.items():
+            if key == "hitl_mode":
+                value = normalize_hitl_mode(value)
             setattr(task, key, value)
         task.updated_at = now_iso()
         container.tasks.upsert(task)
@@ -862,6 +1278,10 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
         task.status = "cancelled"
+        task.pending_gate = None
+        task.current_agent_id = None
+        task.metadata = task.metadata if isinstance(task.metadata, dict) else {}
+        task.metadata.pop("execution_checkpoint", None)
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.cancelled", entity_id=task.id, payload={})
         return {"task": _task_payload(task, container)}
@@ -889,23 +1309,77 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             raise HTTPException(status_code=400, detail="No pending gate on this task")
         if body.gate and body.gate != task.pending_gate:
             raise HTTPException(status_code=400, detail=f"Gate mismatch: pending={task.pending_gate}, requested={body.gate}")
+        action = str(getattr(body, "action", "approve") or "approve").strip().lower()
+        if action not in {"approve", "request_changes"}:
+            raise HTTPException(status_code=400, detail=f"Unsupported gate action: {action}")
+
         cleared_gate = task.pending_gate
-        approved_at = now_iso()
+        acted_at = now_iso()
         should_resume = task.status == "in_progress"
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+
+        if action == "request_changes":
+            start_from_step = _request_changes_step_for_gate(task, cleared_gate)
+            guidance = str(getattr(body, "guidance", "") or "").strip()
+            task.retry_count += 1
+            task.status = "queued"
+            task.error = None
+            task.pending_gate = None
+            task.current_agent_id = None
+            task.metadata.pop("execution_checkpoint", None)
+            if start_from_step:
+                task.metadata["retry_from_step"] = start_from_step
+            else:
+                task.metadata.pop("retry_from_step", None)
+            task.metadata["requested_changes"] = {
+                "ts": acted_at,
+                "guidance": guidance,
+                "gate": cleared_gate,
+            }
+            history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
+            history.append(
+                {
+                    "action": "request_changes",
+                    "ts": acted_at,
+                    "guidance": guidance,
+                    "gate": cleared_gate,
+                }
+            )
+            _mark_latest_run_interrupted(
+                container,
+                task,
+                summary=f"Changes requested at gate: {cleared_gate}",
+                ts=acted_at,
+            )
+            task.updated_at = acted_at
+            container.tasks.upsert(task)
+            bus.emit(
+                channel="tasks",
+                event_type="task.changes_requested",
+                entity_id=task.id,
+                payload={"gate": cleared_gate, "guidance": guidance, "start_from_step": start_from_step},
+            )
+            orchestrator.ensure_worker()
+            return {
+                "task": _task_payload(task, container),
+                "cleared_gate": cleared_gate,
+                "message": _gate_changes_requested_message(cleared_gate, start_from_step=start_from_step),
+                "approved_at": acted_at,
+            }
+
         if should_resume:
-            checkpoint = task.metadata.get("execution_checkpoint") if isinstance(task.metadata, dict) else None
+            checkpoint = task.metadata.get("execution_checkpoint")
             checkpoint_payload = dict(checkpoint) if isinstance(checkpoint, dict) else {}
             checkpoint_payload["gate"] = cleared_gate
             checkpoint_payload["resume_step"] = (
                 str(checkpoint_payload.get("resume_step") or "").strip() or _resume_step_for_gate(cleared_gate)
             )
             checkpoint_payload["approved_gate"] = cleared_gate
-            checkpoint_payload["resume_requested_at"] = approved_at
-            if not isinstance(task.metadata, dict):
-                task.metadata = {}
+            checkpoint_payload["resume_requested_at"] = acted_at
             task.metadata["execution_checkpoint"] = checkpoint_payload
         task.pending_gate = None
-        task.updated_at = approved_at
+        task.updated_at = acted_at
         container.tasks.upsert(task)
         bus.emit(channel="tasks", event_type="task.gate_approved", entity_id=task.id, payload={"gate": cleared_gate})
         if should_resume:
@@ -915,7 +1389,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             "task": _task_payload(task, container),
             "cleared_gate": cleared_gate,
             "message": _gate_approved_message(cleared_gate, will_resume=should_resume),
-            "approved_at": approved_at,
+            "approved_at": acted_at,
         }
 
     @router.post("/tasks/{task_id}/dependencies")

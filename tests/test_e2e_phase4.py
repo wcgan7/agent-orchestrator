@@ -114,7 +114,6 @@ def test_findings_loop_until_zero_open_then_done(tmp_path: Path) -> None:
             json={
                 'title': 'Loop task',
                 'status': 'backlog',
-                'approval_mode': 'auto_approve',
                 'metadata': {
                     'scripted_findings': [
                         [{'severity': 'high', 'summary': 'Need fix'}],
@@ -158,8 +157,8 @@ def test_single_run_branch_commits_in_task_order(tmp_path: Path) -> None:
 
     app = create_app(project_dir=tmp_path, worker_adapter=_FileWritingAdapter())
     with TestClient(app) as client:
-        first = client.post('/api/tasks', json={'title': 'First', 'approval_mode': 'auto_approve'}).json()['task']
-        second = client.post('/api/tasks', json={'title': 'Second', 'approval_mode': 'auto_approve'}).json()['task']
+        first = client.post('/api/tasks', json={'title': 'First', }).json()['task']
+        second = client.post('/api/tasks', json={'title': 'Second', }).json()['task']
 
         client.post(f"/api/tasks/{first['id']}/run")
         client.post(f"/api/tasks/{second['id']}/run")

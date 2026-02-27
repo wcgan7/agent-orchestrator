@@ -90,7 +90,7 @@ Provider health checks for Codex, Claude, and Ollama. Step-to-provider routing t
 Project selector with pin/unpin and directory browser. Concurrency, auto-deps, max review attempts. Role routing, worker provider configuration, per-language project commands, and quality gate thresholds.
 
 ### Task Detail Modal
-Accessible from any task card. Tabs: **Overview** (description, execution summary, error details, pending gates, HITL blocking issues), **Logs** (live stdout/stderr with step selector), **Activity** (event timeline), **Dependencies** (graph visualization), **Configuration** (approval mode, HITL mode, pipeline, worker model), **Changes** (git diff viewer).
+Accessible from any task card. Tabs: **Overview** (description, execution summary, error details, pending gates, HITL blocking issues), **Logs** (live stdout/stderr with step selector), **Activity** (event timeline), **Dependencies** (graph visualization), **Configuration** (HITL mode, pipeline, worker model), **Changes** (git diff viewer).
 
 ### Create Work
 - **Create Task** — manual task creation with all fields

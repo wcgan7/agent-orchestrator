@@ -18,9 +18,9 @@ from ...collaboration.modes import MODE_CONFIGS
 from ...pipelines.registry import PipelineRegistry
 from ...workers.config import WorkerProviderSpec, get_workers_runtime_config
 from ...workers.diagnostics import test_worker
+from ...collaboration.modes import normalize_hitl_mode
 from ..domain.models import (
     AgentRecord,
-    ApprovalMode,
     DependencyPolicy,
     Priority,
     Task,
@@ -50,8 +50,7 @@ class CreateTaskRequest(BaseModel):
     blocked_by: list[str] = Field(default_factory=list)
     parent_id: Optional[str] = None
     pipeline_template: Optional[list[str]] = None
-    approval_mode: str = "human_review"
-    hitl_mode: str = "autopilot"
+    hitl_mode: Optional[str] = None
     dependency_policy: str = ""
     source: str = "manual"
     worker_model: Optional[str] = None
@@ -89,7 +88,6 @@ class UpdateTaskRequest(BaseModel):
     status: Optional[str] = None
     labels: Optional[list[str]] = None
     blocked_by: Optional[list[str]] = None
-    approval_mode: Optional[str] = None
     hitl_mode: Optional[str] = None
     dependency_policy: Optional[str] = None
     worker_model: Optional[str] = None
@@ -177,6 +175,8 @@ class GenerateTasksRequest(BaseModel):
 class ApproveGateRequest(BaseModel):
     """Request body for clearing a pending human gate on the active task."""
     gate: Optional[str] = None
+    action: Literal["approve", "request_changes"] = "approve"
+    guidance: Optional[str] = None
 
 
 class OrchestratorControlRequest(BaseModel):
@@ -241,6 +241,7 @@ class DefaultsSettingsRequest(BaseModel):
         low=0,
     )
     dependency_policy: str = "prudent"
+    hitl_mode: str = "autopilot"
 
 
 class LanguageCommandsRequest(BaseModel):
@@ -318,9 +319,11 @@ VALID_TRANSITIONS: dict[str, set[str]] = {
 IMPORT_JOB_TTL_SECONDS = 60 * 60 * 24
 IMPORT_JOB_MAX_RECORDS = 200
 _GATE_DISPLAY_LABELS: dict[str, str] = {
-    "before_implement": "Approve plan to start implementation",
-    "after_implement": "Approve review to continue",
-    "before_commit": "Approve before commit",
+    "before_implement": "Plan ready.",
+    "before_generate_tasks": "Plan ready to generate tasks.",
+    "before_done": "Work complete.",
+    "after_implement": "Implementation complete; approval required",
+    "before_commit": "Implementation completed.",
     "human_intervention": "Human intervention required",
 }
 
@@ -626,6 +629,7 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
 
 def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[str, Any]:
     payload = task.to_dict()
+    payload["hitl_mode"] = normalize_hitl_mode(str(payload.get("hitl_mode") or "autopilot"))
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
     step_timeout_seconds: int | None = None
     raw_step_timeouts = metadata.get("step_timeouts")
@@ -885,6 +889,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     prompt_defaults = get_configurable_step_prompt_defaults()
     prompt_overrides = _normalize_prompt_overrides(project_cfg.get("prompt_overrides"))
     prompt_injections = _normalize_prompt_injections(project_cfg.get("prompt_injections"))
+    default_hitl_mode = normalize_hitl_mode(str(defaults.get("hitl_mode") or "autopilot"))
     return {
         "orchestrator": {
             "concurrency": _coerce_int(orchestrator.get("concurrency"), 2, minimum=1, maximum=128),
@@ -921,6 +926,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
                 "low": _coerce_int(quality_gate.get("low"), 0, minimum=0),
             },
             "dependency_policy": str(defaults.get("dependency_policy") or "prudent") if str(defaults.get("dependency_policy") or "prudent") in ("permissive", "prudent", "strict") else "prudent",
+            "hitl_mode": default_hitl_mode,
         },
         "workers": {
             "default": workers_default,

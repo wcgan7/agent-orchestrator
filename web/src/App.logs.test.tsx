@@ -39,6 +39,7 @@ function installFetchMock(
     priority: 'P2',
     status: 'in_progress',
     task_type: 'feature',
+    pipeline_template: ['plan', 'implement', 'verify', 'review', 'commit'],
     blocked_by: [],
     blocks: [],
   }
@@ -484,6 +485,111 @@ describe('Task logs loading', () => {
       expect(stdout).toContain('"status":"pass"')
       expect(stderr).toContain('Reading prompt from stdin...')
       expect(stderr).toContain('{"findings":[]}')
+    })
+  }, 20_000)
+
+  it('orders log step chips by pipeline order', async () => {
+    installFetchMock(() => ({
+      mode: 'history',
+      step: 'verify',
+      run_id: 'run-z',
+      current_step: 'verify',
+      stdout: 'verify output\n',
+      stderr: '',
+      stdout_offset: 14,
+      stderr_offset: 0,
+      stdout_tail_start: 0,
+      stderr_tail_start: 0,
+      started_at: '2026-02-21T13:13:13Z',
+      finished_at: '2026-02-21T13:13:54Z',
+      available_steps: ['verify', 'implement', 'plan'],
+      step_execution_counts: { verify: 1, implement: 1, plan: 1 },
+      step_latest_run: { verify: 'run-z', implement: 'run-z', plan: 'run-z' },
+      step_history: [
+        { step: 'verify', run_id: 'run-z', attempt: 1 },
+        { step: 'implement', run_id: 'run-z', attempt: 1 },
+        { step: 'plan', run_id: 'run-z', attempt: 1 },
+      ],
+      log_id: 'run-z',
+      stdout_chunk_start: 0,
+      stderr_chunk_start: 0,
+    }))
+
+    render(<App />)
+    await openTaskLogsTab()
+
+    await waitFor(() => {
+      const selector = document.querySelector('.log-step-selector')
+      expect(selector).not.toBeNull()
+      const chips = Array.from(selector!.querySelectorAll('button.log-step-pill'))
+      const labels = chips
+        .map((chip) => (chip.textContent || '').trim())
+        .filter((text) => text !== 'Latest')
+      expect(labels.slice(0, 3)).toEqual(['Plan', 'Implement', 'Verify'])
+    })
+  }, 20_000)
+
+  it('orders attempt selector options from oldest to newest', async () => {
+    installFetchMock((url) => {
+      const parsed = new URL(url, 'http://localhost')
+      const runId = parsed.searchParams.get('run_id') || ''
+      const isStepScoped = parsed.searchParams.get('step') === 'verify'
+      if (isStepScoped && runId === 'run-old') {
+        return {
+          mode: 'history',
+          step: 'verify',
+          run_id: 'run-old',
+          current_step: 'verify',
+          stdout: 'verify old\n',
+          stderr: '',
+          stdout_offset: 11,
+          stderr_offset: 0,
+          stdout_tail_start: 0,
+          stderr_tail_start: 0,
+          available_steps: ['verify', 'implement', 'plan'],
+          step_execution_counts: { verify: 2, implement: 1, plan: 1 },
+          step_latest_run: { verify: 'run-new', implement: 'run-new', plan: 'run-new' },
+          step_history: [
+            { step: 'verify', run_id: 'run-new', attempt: 2, started_at: '2026-02-21T13:13:13Z' },
+            { step: 'verify', run_id: 'run-old', attempt: 1, started_at: '2026-02-21T12:13:13Z' },
+          ],
+          log_id: 'run-old',
+          stdout_chunk_start: 0,
+          stderr_chunk_start: 0,
+        }
+      }
+      return {
+        mode: 'history',
+        step: 'verify',
+        run_id: 'run-new',
+        current_step: 'verify',
+        stdout: 'verify new\n',
+        stderr: '',
+        stdout_offset: 11,
+        stderr_offset: 0,
+        stdout_tail_start: 0,
+        stderr_tail_start: 0,
+        available_steps: ['verify', 'implement', 'plan'],
+        step_execution_counts: { verify: 2, implement: 1, plan: 1 },
+        step_latest_run: { verify: 'run-new', implement: 'run-new', plan: 'run-new' },
+        step_history: [
+          { step: 'verify', run_id: 'run-new', attempt: 2, started_at: '2026-02-21T13:13:13Z' },
+          { step: 'verify', run_id: 'run-old', attempt: 1, started_at: '2026-02-21T12:13:13Z' },
+        ],
+        log_id: 'run-new',
+        stdout_chunk_start: 0,
+        stderr_chunk_start: 0,
+      }
+    })
+
+    render(<App />)
+    await openTaskLogsTab()
+
+    await waitFor(() => {
+      const selector = screen.getByLabelText('Attempt') as HTMLSelectElement
+      const options = Array.from(selector.options).map((opt) => opt.textContent || '')
+      expect(options[0]).toContain('Attempt 1')
+      expect(options[1]).toContain('Attempt 2')
     })
   }, 20_000)
 })

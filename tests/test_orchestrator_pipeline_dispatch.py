@@ -36,7 +36,6 @@ def test_feature_runs_full_pipeline(tmp_path: Path) -> None:
         title="Feature task",
         task_type="feature",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -88,7 +87,6 @@ def test_feature_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Feature workdoc write test",
         task_type="feature",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -122,7 +120,6 @@ def test_bug_fix_runs_correct_steps(tmp_path: Path) -> None:
         title="Bug fix task",
         task_type="bug",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -180,7 +177,6 @@ def test_bug_fix_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Bug-fix workdoc write test",
         task_type="bug",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -248,7 +244,6 @@ def test_refactor_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Refactor workdoc write test",
         task_type="refactor",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -284,7 +279,6 @@ def test_research_runs_without_review_or_commit(tmp_path: Path) -> None:
         title="Research task",
         task_type="research",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -331,7 +325,6 @@ def test_research_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Research workdoc write test",
         task_type="research",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -358,7 +351,6 @@ def test_security_audit_runs_scan_steps(tmp_path: Path) -> None:
         title="Security audit task",
         task_type="security",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -408,7 +400,6 @@ def test_security_audit_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Security workdoc write test",
         task_type="security",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -439,7 +430,6 @@ def test_repo_review_skips_review_and_commit(tmp_path: Path) -> None:
         title="Repo review task",
         task_type="repo_review",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -486,7 +476,6 @@ def test_repo_review_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Repo review workdoc write test",
         task_type="repo_review",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -515,7 +504,6 @@ def test_review_pipeline_has_review_but_no_commit(tmp_path: Path) -> None:
         title="Code review task",
         task_type="review",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -568,7 +556,6 @@ def test_review_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Review workdoc write test",
         task_type="review",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -598,7 +585,6 @@ def test_performance_pipeline(tmp_path: Path) -> None:
         title="Performance task",
         task_type="performance",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -655,7 +641,6 @@ def test_performance_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Performance workdoc write test",
         task_type="performance",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -723,7 +708,6 @@ def test_test_pipeline_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Test pipeline workdoc write test",
         task_type="test",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -752,7 +736,6 @@ def test_docs_pipeline_runs_with_verify(tmp_path: Path) -> None:
         title="Docs task",
         task_type="docs",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -799,7 +782,6 @@ def test_docs_pipeline_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Docs workdoc write test",
         task_type="docs",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -828,7 +810,6 @@ def test_unknown_type_falls_back_to_feature(tmp_path: Path) -> None:
         title="Unknown type task",
         task_type="unknown_thing",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -852,7 +833,6 @@ def test_custom_pipeline_template_honored(tmp_path: Path) -> None:
         title="Custom pipeline task",
         task_type="feature",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
         pipeline_template=["plan", "implement", "commit"],
     )
@@ -876,7 +856,6 @@ def test_pipeline_template_stored_on_task(tmp_path: Path) -> None:
         title="Template storage test",
         task_type="bug",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     # pipeline_template starts empty — should be resolved from registry
@@ -922,7 +901,6 @@ def test_review_findings_passed_to_implement_fix(tmp_path: Path) -> None:
         title="Fix findings task",
         task_type="feature",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
         metadata={
             "scripted_findings": [
@@ -963,7 +941,6 @@ def test_generate_tasks_creates_child_tasks(tmp_path: Path) -> None:
         title="Security audit parent",
         task_type="security",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
         metadata={
             "scripted_generated_tasks": [
@@ -1014,7 +991,6 @@ def test_generate_tasks_no_output_no_children(tmp_path: Path) -> None:
         title="Clean repo review",
         task_type="repo_review",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1036,7 +1012,6 @@ def test_hotfix_skips_diagnosis(tmp_path: Path) -> None:
         title="Urgent fix",
         task_type="hotfix",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1080,7 +1055,6 @@ def test_hotfix_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Hotfix workdoc write test",
         task_type="hotfix",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1112,7 +1086,6 @@ def test_spike_runs_without_commit(tmp_path: Path) -> None:
         title="Explore caching options",
         task_type="spike",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1156,7 +1129,6 @@ def test_spike_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Spike workdoc write test",
         task_type="spike",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1185,7 +1157,6 @@ def test_chore_skips_plan_and_review(tmp_path: Path) -> None:
         title="Run formatter",
         task_type="chore",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1226,7 +1197,6 @@ def test_chore_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Chore workdoc write test",
         task_type="chore",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1253,7 +1223,6 @@ def test_plan_only_produces_report_no_code(tmp_path: Path) -> None:
         title="Design auth system",
         task_type="plan_only",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1302,7 +1271,6 @@ def test_plan_only_writes_sections_to_workdoc(tmp_path: Path) -> None:
         title="Plan-only workdoc write test",
         task_type="plan_only",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1331,7 +1299,6 @@ def test_decompose_task_type_uses_plan_only_pipeline(tmp_path: Path) -> None:
         title="Break down auth epic",
         task_type="decompose",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
         metadata={
             "scripted_generated_tasks": [
@@ -1367,7 +1334,6 @@ def test_verify_only_runs_checks_no_changes(tmp_path: Path) -> None:
         title="Check CI status",
         task_type="verify_only",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1413,7 +1379,6 @@ def test_verify_only_writes_verify_and_report_to_workdoc(tmp_path: Path) -> None
         title="Verify-only workdoc write test",
         task_type="verify_only",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1458,7 +1423,6 @@ def test_plan_output_stored_in_revisions(tmp_path: Path) -> None:
         title="Plan storage test",
         task_type="feature",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1644,7 +1608,6 @@ def test_step_outputs_populated_after_successful_step(tmp_path: Path) -> None:
         title="Feature task",
         task_type="feature",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1681,7 +1644,6 @@ def test_step_outputs_cleaned_up_on_completion(tmp_path: Path) -> None:
         title="Refactor task",
         task_type="refactor",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1719,7 +1681,6 @@ def test_step_outputs_preserved_on_blocked(tmp_path: Path) -> None:
         title="Feature that blocks",
         task_type="feature",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1770,7 +1731,6 @@ def test_feature_non_actionable_verify_failure_skips_fix_loop_and_completes(tmp_
         title="Feature with missing verify tooling",
         task_type="feature",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1823,7 +1783,6 @@ def test_review_loop_non_actionable_verify_failure_skips_extra_fix_loop(tmp_path
         title="Feature with review change and degraded verify",
         task_type="feature",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)
@@ -1869,7 +1828,6 @@ def test_feature_review_loop_post_fix_validation_uses_verify(tmp_path: Path) -> 
         title="Feature with review fix validation",
         task_type="feature",
         status="queued",
-        approval_mode="auto_approve",
         hitl_mode="autopilot",
     )
     container.tasks.upsert(task)

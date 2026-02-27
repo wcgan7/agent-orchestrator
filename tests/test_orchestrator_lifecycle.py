@@ -37,7 +37,6 @@ def test_in_progress_tasks_recover_on_worker_start(tmp_path: Path) -> None:
         title="Recover me",
         task_type="feature",
         status="in_progress",
-        approval_mode="auto_approve",
     )
     container.tasks.upsert(task)
     run = RunRecord(task_id=task.id, status="in_progress", started_at=now_iso())

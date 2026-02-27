@@ -13,10 +13,9 @@ from typing import Any
 
 class HITLMode(str, Enum):
     """Supported human-in-the-loop execution modes."""
-    AUTOPILOT = "autopilot"         # agents run freely, humans review after
-    SUPERVISED = "supervised"       # agents propose, humans approve each step
-    COLLABORATIVE = "collaborative" # humans and agents take turns
-    REVIEW_ONLY = "review_only"     # agents implement, humans do all code review
+    AUTOPILOT = "autopilot"         # fully autonomous execution
+    SUPERVISED = "supervised"       # approve plan, then approve before commit
+    REVIEW_ONLY = "review_only"     # skip plan gate, review before commit
 
 
 @dataclass(frozen=True)
@@ -29,7 +28,9 @@ class ModeConfig:
     # Which approval gates are required
     approve_before_plan: bool = False
     approve_before_implement: bool = False
+    approve_before_generate_tasks: bool = False
     approve_before_commit: bool = False
+    approve_before_done: bool = False
     approve_after_implement: bool = False
 
     # Whether agent can proceed without human presence
@@ -50,7 +51,9 @@ class ModeConfig:
             "description": self.description,
             "approve_before_plan": self.approve_before_plan,
             "approve_before_implement": self.approve_before_implement,
+            "approve_before_generate_tasks": self.approve_before_generate_tasks,
             "approve_before_commit": self.approve_before_commit,
+            "approve_before_done": self.approve_before_done,
             "approve_after_implement": self.approve_after_implement,
             "allow_unattended": self.allow_unattended,
             "require_reasoning": self.require_reasoning,
@@ -65,7 +68,7 @@ MODE_CONFIGS: dict[str, ModeConfig] = {
     HITLMode.AUTOPILOT.value: ModeConfig(
         mode=HITLMode.AUTOPILOT,
         display_name="Autopilot",
-        description="Agents run freely. Review results when they finish.",
+        description="No approvals. Agents run end-to-end automatically.",
         allow_unattended=True,
         require_reasoning=False,
     ),
@@ -73,21 +76,13 @@ MODE_CONFIGS: dict[str, ModeConfig] = {
     HITLMode.SUPERVISED.value: ModeConfig(
         mode=HITLMode.SUPERVISED,
         display_name="Supervised",
-        description="Agents propose at each step. You approve before they continue.",
+        description="Approve the plan, then review implementation before commit.",
         approve_before_plan=False,
         approve_before_implement=True,
-        approve_after_implement=True,
+        approve_before_generate_tasks=True,
+        approve_after_implement=False,
         approve_before_commit=True,
-        allow_unattended=False,
-        require_reasoning=True,
-    ),
-
-    HITLMode.COLLABORATIVE.value: ModeConfig(
-        mode=HITLMode.COLLABORATIVE,
-        display_name="Collaborative",
-        description="You and agents work together. Review implementation before commit.",
-        approve_after_implement=True,
-        approve_before_commit=True,
+        approve_before_done=True,
         allow_unattended=False,
         require_reasoning=True,
     ),
@@ -95,13 +90,24 @@ MODE_CONFIGS: dict[str, ModeConfig] = {
     HITLMode.REVIEW_ONLY.value: ModeConfig(
         mode=HITLMode.REVIEW_ONLY,
         display_name="Review Only",
-        description="Agents implement. You review all changes before commit.",
-        approve_after_implement=True,
+        description="Skip plan approval. Review implementation before commit.",
+        approve_after_implement=False,
         approve_before_commit=True,
+        approve_before_done=True,
         allow_unattended=True,
         require_reasoning=False,
     ),
 }
+
+
+def normalize_hitl_mode(mode: str | None, *, default: str = HITLMode.AUTOPILOT.value) -> str:
+    """Normalize persisted/user mode values, including legacy aliases."""
+    raw = str(mode or "").strip().lower()
+    if raw == "collaborative":
+        raw = HITLMode.SUPERVISED.value
+    if raw in MODE_CONFIGS:
+        return raw
+    return default
 
 
 def get_mode_config(mode: str) -> ModeConfig:
@@ -109,17 +115,14 @@ def get_mode_config(mode: str) -> ModeConfig:
 
     Args:
         mode (str): Requested mode identifier. Supported values are
-            ``autopilot``, ``supervised``, ``collaborative``, and
-            ``review_only``.
+            ``autopilot``, ``supervised``, and ``review_only``.
 
     Returns:
         ModeConfig: Configuration that controls approval gates and
             unattended execution rules for the mode. Unknown values fall
             back to the ``autopilot`` configuration.
     """
-    if mode not in MODE_CONFIGS:
-        return MODE_CONFIGS[HITLMode.AUTOPILOT.value]
-    return MODE_CONFIGS[mode]
+    return MODE_CONFIGS[normalize_hitl_mode(mode)]
 
 
 def should_gate(mode: str, gate_name: str) -> bool:
@@ -129,8 +132,8 @@ def should_gate(mode: str, gate_name: str) -> bool:
         mode (str): Requested mode identifier. Unknown values use the
             ``autopilot`` defaults via :func:`get_mode_config`.
         gate_name (str): Gate name to evaluate. Supported values are
-            ``before_plan``, ``before_implement``, ``before_commit``, and
-            ``after_implement``.
+            ``before_plan``, ``before_implement``, ``before_generate_tasks``,
+            ``before_commit``, ``before_done``, and ``after_implement``.
 
     Returns:
         bool: ``True`` when the mode requires the named gate, otherwise
@@ -140,7 +143,9 @@ def should_gate(mode: str, gate_name: str) -> bool:
     mapping = {
         "before_plan": config.approve_before_plan,
         "before_implement": config.approve_before_implement,
+        "before_generate_tasks": config.approve_before_generate_tasks,
         "before_commit": config.approve_before_commit,
+        "before_done": config.approve_before_done,
         "after_implement": config.approve_after_implement,
     }
     return mapping.get(gate_name, False)

@@ -32,7 +32,6 @@ type TaskRecord = {
   priority: string
   status: string
   labels?: string[]
-  approval_mode?: 'human_review' | 'auto_approve'
   blocked_by?: string[]
   blocks?: string[]
   parent_id?: string | null
@@ -165,6 +164,7 @@ type TaskLogsSnapshot = {
   mode: 'active' | 'last' | 'history' | 'none'
   task_status?: string
   step?: string
+  run_id?: string
   stdout: string
   stderr: string
   stdout_offset?: number
@@ -179,6 +179,8 @@ type TaskLogsSnapshot = {
   progress?: Record<string, unknown>
   available_steps?: string[]
   step_execution_counts?: Record<string, number>
+  step_latest_run?: Record<string, string>
+  step_history?: Array<{ step: string; run_id: string; attempt?: number; started_at?: string | null; finished_at?: string | null }>
   current_step?: string
 }
 
@@ -264,6 +266,7 @@ type SystemSettings = {
       low: number
     }
     dependency_policy: string
+    hitl_mode: 'autopilot' | 'supervised' | 'review_only'
   }
   workers: {
     default: string
@@ -439,6 +442,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
       low: 0,
     },
     dependency_policy: 'prudent',
+    hitl_mode: 'autopilot',
   },
   workers: {
     default: 'codex',
@@ -512,10 +516,19 @@ function statusPillClass(status: string): string {
 }
 
 const GATE_DISPLAY_MAP: Record<string, string> = {
-  before_implement: 'Approve plan to start implementation',
-  after_implement: 'Approve review to continue',
-  before_commit: 'Approve before commit',
+  before_implement: 'Plan ready.',
+  before_generate_tasks: 'Plan ready to generate tasks.',
+  before_done: 'Work complete.',
+  after_implement: 'Implementation complete; approval required',
+  before_commit: 'Implementation completed.',
   human_intervention: 'Human intervention required',
+}
+
+function normalizeHitlMode(raw: string | null | undefined): 'autopilot' | 'supervised' | 'review_only' {
+  const value = String(raw || '').trim().toLowerCase()
+  if (value === 'collaborative') return 'supervised'
+  if (value === 'autopilot' || value === 'supervised' || value === 'review_only') return value
+  return 'autopilot'
 }
 
 function gateDisplayLabel(task: TaskRecord | null | undefined): string {
@@ -529,10 +542,54 @@ function gateDisplayLabel(task: TaskRecord | null | undefined): string {
 function gateApprovalButtonLabel(gate: string | null | undefined): string {
   const normalized = String(gate || '').trim()
   if (normalized === 'before_implement') return 'Approve plan'
-  if (normalized === 'after_implement') return 'Approve review'
-  if (normalized === 'before_commit') return 'Approve commit'
+  if (normalized === 'before_generate_tasks') return 'Generate tasks'
+  if (normalized === 'before_done') return 'Move to Done'
+  if (normalized === 'after_implement') return 'Approve implementation'
+  if (normalized === 'before_commit') return 'Approve'
   if (normalized === 'human_intervention') return 'Acknowledge'
   return 'Approve gate'
+}
+
+function orderLogStepsByPipeline(steps: string[], pipelineTemplate?: string[]): string[] {
+  const uniqueSteps: string[] = []
+  const seen = new Set<string>()
+  for (const raw of steps || []) {
+    const step = String(raw || '').trim()
+    if (!step || seen.has(step)) continue
+    seen.add(step)
+    uniqueSteps.push(step)
+  }
+  if (!Array.isArray(pipelineTemplate) || pipelineTemplate.length === 0) return uniqueSteps
+
+  const templateOrder = new Map<string, number>()
+  for (const [index, raw] of pipelineTemplate.entries()) {
+    const step = String(raw || '').trim()
+    if (!step || templateOrder.has(step)) continue
+    templateOrder.set(step, index)
+  }
+  const originalIndex = new Map<string, number>()
+  uniqueSteps.forEach((step, index) => originalIndex.set(step, index))
+
+  return [...uniqueSteps].sort((a, b) => {
+    const aOrder = templateOrder.has(a) ? templateOrder.get(a)! : Number.MAX_SAFE_INTEGER
+    const bOrder = templateOrder.has(b) ? templateOrder.get(b)! : Number.MAX_SAFE_INTEGER
+    if (aOrder !== bOrder) return aOrder - bOrder
+    return (originalIndex.get(a) ?? 0) - (originalIndex.get(b) ?? 0)
+  })
+}
+
+function orderLogAttempts(
+  attempts: Array<{ step: string; run_id: string; attempt?: number; started_at?: string | null; finished_at?: string | null }>,
+): Array<{ step: string; run_id: string; attempt?: number; started_at?: string | null; finished_at?: string | null }> {
+  return [...attempts].sort((a, b) => {
+    const aAttempt = Number(a.attempt || 0)
+    const bAttempt = Number(b.attempt || 0)
+    if (aAttempt > 0 && bAttempt > 0 && aAttempt !== bAttempt) return aAttempt - bAttempt
+    const aTs = String(a.started_at || '')
+    const bTs = String(b.started_at || '')
+    if (aTs && bTs && aTs !== bTs) return aTs.localeCompare(bTs)
+    return String(a.run_id || '').localeCompare(String(b.run_id || ''))
+  })
 }
 
 function routeFromHash(hash: string): RouteKey {
@@ -895,6 +952,7 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
         low: Number.isFinite(maybeLow) ? Math.max(0, Math.floor(maybeLow)) : DEFAULT_SETTINGS.defaults.quality_gate.low,
       },
       dependency_policy: ['permissive', 'prudent', 'strict'].includes(String(defaults.dependency_policy || '')) ? String(defaults.dependency_policy) : DEFAULT_SETTINGS.defaults.dependency_policy,
+      hitl_mode: normalizeHitlMode(String(defaults.hitl_mode || DEFAULT_SETTINGS.defaults.hitl_mode)),
     },
     workers,
     project: {
@@ -916,6 +974,21 @@ function describeTask(taskId: string, taskIndex: Map<string, TaskRecord>): { lab
     label: `${title} (${task.id})`,
     status: task.status || 'unknown',
   }
+}
+
+function normalizeTaskRecord(task: TaskRecord): TaskRecord {
+  return {
+    ...task,
+    hitl_mode: normalizeHitlMode(task.hitl_mode),
+  }
+}
+
+function normalizeBoard(board: BoardResponse): BoardResponse {
+  const columns: Record<string, TaskRecord[]> = {}
+  for (const [key, tasks] of Object.entries(board?.columns || {})) {
+    columns[key] = (tasks || []).map((task) => normalizeTaskRecord(task))
+  }
+  return { columns }
 }
 
 function normalizeHumanBlockingIssues(value: unknown): HumanBlockingIssue[] {
@@ -1509,7 +1582,7 @@ export default function App() {
   const [planActionMessage, setPlanActionMessage] = useState('')
   const [planActionError, setPlanActionError] = useState('')
   const [taskDetailTab, setTaskDetailTab] = useState<TaskDetailTab>('overview')
-  const [taskDiff, setTaskDiff] = useState<{ commit: string | null; files: { path: string; changes: string }[]; diff: string; stat: string } | null>(null)
+  const [taskDiff, setTaskDiff] = useState<{ mode?: 'working_tree' | 'committed' | 'preserved_branch' | 'none'; branch?: string | null; base_branch?: string | null; commit: string | null; files: { path: string; changes: string }[]; diff: string; stat: string } | null>(null)
   const [taskDiffLoading, setTaskDiffLoading] = useState(false)
   const [boardCompact, setBoardCompact] = useState(false)
   const [expandedSummarySteps, setExpandedSummarySteps] = useState<Set<string>>(new Set())
@@ -1519,17 +1592,30 @@ export default function App() {
     const timer = window.setTimeout(() => setPipelineHighlightStatus(''), 2500)
     return () => window.clearTimeout(timer)
   }, [pipelineHighlightStatus])
+
+  useEffect(() => {
+    if (!planActionMessage) return
+    const timer = window.setTimeout(() => setPlanActionMessage(''), 4000)
+    return () => window.clearTimeout(timer)
+  }, [planActionMessage])
+
   // taskEditMode removed — configLocked (status-based) controls editability
   const [taskActionPending, setTaskActionPending] = useState<TaskActionKey | null>(null)
   const [taskActionDetail, setTaskActionDetail] = useState('')
   const [taskActionMessage, setTaskActionMessage] = useState('')
   const [taskActionError, setTaskActionError] = useState('')
+  useEffect(() => {
+    if (!taskActionMessage) return
+    const timer = window.setTimeout(() => setTaskActionMessage(''), 4000)
+    return () => window.clearTimeout(timer)
+  }, [taskActionMessage])
+  const [gateRequestOpen, setGateRequestOpen] = useState(false)
+  const [gateRequestGuidance, setGateRequestGuidance] = useState('')
   const [editTaskTitle, setEditTaskTitle] = useState('')
   const [editTaskDescription, setEditTaskDescription] = useState('')
   const [editTaskType, setEditTaskType] = useState('feature')
   const [editTaskPriority, setEditTaskPriority] = useState('P2')
   const [editTaskLabels, setEditTaskLabels] = useState('')
-  const [editTaskApprovalMode, setEditTaskApprovalMode] = useState<'human_review' | 'auto_approve'>('human_review')
   const [editTaskHitlMode, setEditTaskHitlMode] = useState('autopilot')
   const [editTaskDependencyPolicy, setEditTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
   const [editTaskStepTimeout, setEditTaskStepTimeout] = useState('')
@@ -1549,7 +1635,6 @@ export default function App() {
   const [newTaskPriority, setNewTaskPriority] = useState('P2')
   const [newTaskLabels, setNewTaskLabels] = useState('')
   const [newTaskBlockedBy, setNewTaskBlockedBy] = useState('')
-  const [newTaskApprovalMode, setNewTaskApprovalMode] = useState<'human_review' | 'auto_approve'>('human_review')
   const [newTaskHitlMode, setNewTaskHitlMode] = useState('autopilot')
   const [newTaskDependencyPolicy, setNewTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
   const [newTaskParentId, setNewTaskParentId] = useState('')
@@ -1561,6 +1646,11 @@ export default function App() {
   const [newDependencyId, setNewDependencyId] = useState('')
   const [dependencyActionLoading, setDependencyActionLoading] = useState(false)
   const [dependencyActionMessage, setDependencyActionMessage] = useState('')
+  useEffect(() => {
+    if (!dependencyActionMessage) return
+    const timer = window.setTimeout(() => setDependencyActionMessage(''), 4000)
+    return () => window.clearTimeout(timer)
+  }, [dependencyActionMessage])
   const [taskExplorerQuery, _setTaskExplorerQuery] = useState('')
   const [taskExplorerStatus, _setTaskExplorerStatus] = useState('')
   const [taskExplorerType, _setTaskExplorerType] = useState('')
@@ -1615,6 +1705,8 @@ export default function App() {
   const [showAllActivity, setShowAllActivity] = useState(false)
   const [logViewStep, setLogViewStep] = useState('')
   const logViewStepRef = useRef('')
+  const [logViewRunId, setLogViewRunId] = useState('')
+  const logViewRunIdRef = useRef('')
 
   const [manualPinPath, setManualPinPath] = useState('')
   const [allowNonGit, setAllowNonGit] = useState(false)
@@ -1633,6 +1725,11 @@ export default function App() {
   const [settingsSaving, setSettingsSaving] = useState(false)
   const [settingsError, setSettingsError] = useState('')
   const [settingsSuccess, setSettingsSuccess] = useState('')
+  useEffect(() => {
+    if (!settingsSuccess) return
+    const timer = window.setTimeout(() => setSettingsSuccess(''), 4000)
+    return () => window.clearTimeout(timer)
+  }, [settingsSuccess])
   const [settingsConcurrency, setSettingsConcurrency] = useState(String(DEFAULT_SETTINGS.orchestrator.concurrency))
   const [settingsAutoDeps, setSettingsAutoDeps] = useState(DEFAULT_SETTINGS.orchestrator.auto_deps)
   const [settingsMaxReviewAttempts, setSettingsMaxReviewAttempts] = useState(String(DEFAULT_SETTINGS.orchestrator.max_review_attempts))
@@ -1668,6 +1765,7 @@ export default function App() {
   const [settingsGateMedium, setSettingsGateMedium] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.medium))
   const [settingsGateLow, setSettingsGateLow] = useState(String(DEFAULT_SETTINGS.defaults.quality_gate.low))
   const [settingsDependencyPolicy, setSettingsDependencyPolicy] = useState(DEFAULT_SETTINGS.defaults.dependency_policy)
+  const [settingsDefaultHitlMode, setSettingsDefaultHitlMode] = useState<SystemSettings['defaults']['hitl_mode']>(DEFAULT_SETTINGS.defaults.hitl_mode)
   const settingsLoadedRef = useRef(false)
   const shouldPrefillTaskProjectCommandsRef = useRef(false)
 
@@ -1691,9 +1789,11 @@ export default function App() {
   useEffect(() => {
     const explicitTab = taskSelectTabRef.current
     if (!explicitTab && selectedTaskId) {
-      // Auto-switch to plan tab when task is paused at before_implement gate
+      // Auto-switch to plan tab when task is paused at planning/decomposition gates.
       const matchedTask = Object.values(board.columns).flat().find((t) => t.id === selectedTaskId)
-      if (matchedTask?.pending_gate === 'before_implement' && !isPlanningTaskType(matchedTask.task_type)) {
+      if (
+        matchedTask?.pending_gate === 'before_implement' || matchedTask?.pending_gate === 'before_generate_tasks'
+      ) {
         setTaskDetailTab('plan')
       } else {
         setTaskDetailTab('overview')
@@ -1706,6 +1806,8 @@ export default function App() {
     setTaskActionDetail('')
     setTaskActionError('')
     setTaskActionMessage('')
+    setGateRequestOpen(false)
+    setGateRequestGuidance('')
     setNewDependencyId('')
     setDependencyActionMessage('')
     setPlanRefineFeedback('')
@@ -1948,6 +2050,7 @@ export default function App() {
     setSettingsGateMedium(String(payload.defaults.quality_gate.medium))
     setSettingsGateLow(String(payload.defaults.quality_gate.low))
     setSettingsDependencyPolicy(payload.defaults.dependency_policy || 'prudent')
+    setSettingsDefaultHitlMode(normalizeHitlMode(payload.defaults.hitl_mode))
   }
 
   async function loadSettings(): Promise<void> {
@@ -1998,7 +2101,10 @@ export default function App() {
       if (requestSeq !== taskDetailRequestSeqRef.current || selectedTaskIdRef.current !== taskId) {
         return
       }
-      const task = detail.task
+      const task = {
+        ...detail.task,
+        hitl_mode: normalizeHitlMode(detail.task.hitl_mode),
+      }
       setSelectedTaskDetail(task)
       void loadTaskPlan(taskId)
       void loadTaskWorkdoc(taskId)
@@ -2007,8 +2113,7 @@ export default function App() {
       setEditTaskType(task.task_type || 'feature')
       setEditTaskPriority(task.priority || 'P2')
       setEditTaskLabels((task.labels || []).join(', '))
-      setEditTaskApprovalMode(task.approval_mode || 'human_review')
-      setEditTaskHitlMode(task.hitl_mode || 'autopilot')
+      setEditTaskHitlMode(normalizeHitlMode(task.hitl_mode))
       setEditTaskDependencyPolicy(task.dependency_policy || 'prudent')
       const perTaskTimeout = Number(task.step_timeout_seconds)
       setEditTaskStepTimeout(Number.isFinite(perTaskTimeout) && perTaskTimeout > 0 ? String(Math.floor(perTaskTimeout)) : '')
@@ -2278,7 +2383,7 @@ export default function App() {
     }
   }
 
-  async function loadTaskLogs(taskId: string, quiet = false, stepOverride?: string): Promise<void> {
+  async function loadTaskLogs(taskId: string, quiet = false, stepOverride?: string, runIdOverride?: string): Promise<void> {
     if (!taskId) {
       setSelectedTaskLogs(null)
       setSelectedTaskLogsError('')
@@ -2298,8 +2403,12 @@ export default function App() {
       const params = new URLSearchParams()
       params.set('max_chars', String(LOG_CHUNK_CHARS))
       const viewStep = stepOverride !== undefined ? stepOverride : logViewStep
+      const viewRunId = runIdOverride !== undefined ? runIdOverride : logViewRunId
       if (viewStep) {
         params.set('step', viewStep)
+        if (viewRunId) {
+          params.set('run_id', viewRunId)
+        }
       }
       if (accum.phase === 'backfill') {
         params.set('backfill', 'true')
@@ -2341,7 +2450,7 @@ export default function App() {
         // to avoid a blank flash between step transitions.
         setPlanRefineStdout('')
         setPlanGenerateStdout('')
-        void loadTaskLogs(taskId, true, logViewStepRef.current || undefined)
+        void loadTaskLogs(taskId, true, logViewStepRef.current || undefined, logViewRunIdRef.current || undefined)
         return
       }
       if (!accum.logId && payloadLogId) {
@@ -2525,11 +2634,13 @@ export default function App() {
     }
     if (continueBackfill && requestSeq === taskLogsRequestSeqRef.current && selectedTaskIdRef.current === taskId) {
       // Drain historical backfill quickly so rendered text stabilizes sooner.
-      void loadTaskLogs(taskId, true)
+      void loadTaskLogs(taskId, true, logViewStepRef.current || undefined, logViewRunIdRef.current || undefined)
     }
   }
 
   useEffect(() => {
+    setGateRequestOpen(false)
+    setGateRequestGuidance('')
     if (!selectedTaskId) {
       setCollaborationTimeline([])
       setCollaborationError('')
@@ -2556,6 +2667,8 @@ export default function App() {
     }
     setLogViewStep('')
     logViewStepRef.current = ''
+    setLogViewRunId('')
+    logViewRunIdRef.current = ''
     void loadCollaboration(selectedTaskId)
     void loadTaskLogs(selectedTaskId)
   }, [selectedTaskId, projectDir])
@@ -2563,7 +2676,7 @@ export default function App() {
   useEffect(() => {
     if (!selectedTaskId) return
     const timer = window.setInterval(() => {
-      void loadTaskLogs(selectedTaskId, true, logViewStepRef.current || undefined)
+      void loadTaskLogs(selectedTaskId, true, logViewStepRef.current || undefined, logViewRunIdRef.current || undefined)
     }, 2_000)
     return () => window.clearInterval(timer)
   }, [selectedTaskId, projectDir])
@@ -2762,7 +2875,7 @@ export default function App() {
       if (refreshProjectDir !== projectDirRef.current) {
         return
       }
-      setBoard(boardData)
+      setBoard(normalizeBoard(boardData))
       setOrchestrator(orchestratorData)
       setExecutionBatches(executionOrderData.batches || [])
       setExecutionCompleted(executionOrderData.completed || [])
@@ -2835,7 +2948,7 @@ export default function App() {
       if (requestSeq !== reloadAllSeqRef.current) {
         return
       }
-      setBoard(boardData)
+      setBoard(normalizeBoard(boardData))
       setOrchestrator(orchestratorData)
       setAgents(agentData.agents || [])
       setProjects(projectData.projects || [])
@@ -3155,7 +3268,6 @@ export default function App() {
           priority: newTaskPriority,
           labels: newTaskLabels.split(',').map((item) => item.trim()).filter(Boolean),
           blocked_by: newTaskBlockedBy.split(',').map((item) => item.trim()).filter(Boolean),
-          approval_mode: newTaskApprovalMode,
           hitl_mode: newTaskHitlMode,
           dependency_policy: newTaskDependencyPolicy,
           worker_model: newTaskWorkerModel.trim() || undefined,
@@ -3184,8 +3296,7 @@ export default function App() {
     setNewTaskPriority('P2')
     setNewTaskLabels('')
     setNewTaskBlockedBy('')
-    setNewTaskApprovalMode('human_review')
-    setNewTaskHitlMode('autopilot')
+    setNewTaskHitlMode(settingsDefaultHitlMode)
     setNewTaskDependencyPolicy('prudent')
     setNewTaskParentId('')
     setNewTaskPipelineTemplate('')
@@ -3322,23 +3433,63 @@ export default function App() {
     const effective = step || ''
     setLogViewStep(effective)
     logViewStepRef.current = effective
+    const effectiveRunId = ''
+    setLogViewRunId(effectiveRunId)
+    logViewRunIdRef.current = effectiveRunId
     // Reset accumulator so we fetch the full log for the new step.
     // Don't clear display state here — let loadTaskLogs replace it when
     // the fetch completes, avoiding a blank flash between steps.
     logAccumRef.current = createEmptyLogAccum(selectedTaskId)
     snapshotLogScrollOps('reset', 'reset')
     if (selectedTaskId) {
-      void loadTaskLogs(selectedTaskId, false, effective)
+      void loadTaskLogs(selectedTaskId, false, effective, effectiveRunId || undefined)
+    }
+  }
+
+  function switchLogStepAttempt(step: string, runId: string): void {
+    const normalizedStep = step || ''
+    const normalizedRunId = runId || ''
+    setLogViewStep(normalizedStep)
+    logViewStepRef.current = normalizedStep
+    setLogViewRunId(normalizedRunId)
+    logViewRunIdRef.current = normalizedRunId
+    logAccumRef.current = createEmptyLogAccum(selectedTaskId)
+    snapshotLogScrollOps('reset', 'reset')
+    if (selectedTaskId) {
+      void loadTaskLogs(selectedTaskId, false, normalizedStep || undefined, normalizedRunId || undefined)
     }
   }
 
   async function fetchTaskDiff(taskId: string): Promise<void> {
     setTaskDiffLoading(true)
     try {
-      const data = await requestJson<{ commit: string | null; files: { path: string; changes: string }[]; diff: string; stat: string }>(
-        buildApiUrl(`/api/tasks/${taskId}/diff`, projectDir),
-      )
-      setTaskDiff(data)
+      try {
+        const data = await requestJson<{ mode?: 'working_tree' | 'committed' | 'preserved_branch' | 'none'; branch?: string | null; base_branch?: string | null; commit: string | null; files: { path: string; changes: string }[]; diff: string; stat: string }>(
+          buildApiUrl(`/api/tasks/${taskId}/changes`, projectDir),
+        )
+        setTaskDiff({
+          mode: data.mode,
+          branch: data.branch ?? null,
+          base_branch: data.base_branch ?? null,
+          commit: data.commit ?? null,
+          files: Array.isArray(data.files) ? data.files : [],
+          diff: typeof data.diff === 'string' ? data.diff : '',
+          stat: typeof data.stat === 'string' ? data.stat : '',
+        })
+      } catch {
+        const legacy = await requestJson<{ commit: string | null; files: { path: string; changes: string }[]; diff: string; stat: string }>(
+          buildApiUrl(`/api/tasks/${taskId}/diff`, projectDir),
+        )
+        setTaskDiff({
+          mode: legacy.commit ? 'committed' : 'none',
+          branch: null,
+          base_branch: null,
+          commit: legacy.commit ?? null,
+          files: Array.isArray(legacy.files) ? legacy.files : [],
+          diff: typeof legacy.diff === 'string' ? legacy.diff : '',
+          stat: typeof legacy.stat === 'string' ? legacy.stat : '',
+        })
+      }
     } catch {
       setTaskDiff(null)
     } finally {
@@ -3425,7 +3576,7 @@ export default function App() {
     const previousSelectedTask = selectedTaskDetail && selectedTaskDetail.id === taskId ? selectedTaskDetail : null
 
     setTaskActionPending('approve_gate')
-    setTaskActionDetail(String(gate || ''))
+    setTaskActionDetail(`approve:${String(gate || '')}`)
     setTaskActionError('')
     try {
       setBoard((prev) => {
@@ -3457,11 +3608,14 @@ export default function App() {
           : prev
       ))
 
-      await requestJson<{ task: TaskRecord; message?: string }>(buildApiUrl(`/api/tasks/${taskId}/approve-gate`, projectDir), {
+      const response = await requestJson<{ task: TaskRecord; message?: string }>(buildApiUrl(`/api/tasks/${taskId}/approve-gate`, projectDir), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gate: gate || undefined }),
+        body: JSON.stringify({ gate: gate || undefined, action: 'approve' }),
       })
+      if (response.message) {
+        setTaskActionMessage(response.message)
+      }
       await reloadAll()
       if (selectedTaskIdRef.current === taskId) {
         await loadTaskDetail(taskId)
@@ -3631,7 +3785,7 @@ export default function App() {
       setPlanActionMessage(`Generated ${result.created_task_ids?.length || 0} task(s) from plan.`)
       try {
         const boardData = await requestJson<BoardResponse>(buildApiUrl('/api/tasks/board', projectDir))
-        setBoard(boardData)
+        setBoard(normalizeBoard(boardData))
       } catch {
         // Keep user-facing flow resilient even if ancillary reloads fail.
       }
@@ -3676,7 +3830,6 @@ export default function App() {
             task_type: editTaskType,
             priority: editTaskPriority,
             labels: editTaskLabels.split(',').map((item) => item.trim()).filter(Boolean),
-            approval_mode: editTaskApprovalMode,
             hitl_mode: editTaskHitlMode,
             dependency_policy: editTaskDependencyPolicy,
             step_timeout_seconds: parsedStepTimeout,
@@ -3834,6 +3987,7 @@ export default function App() {
             low: parseNonNegativeInt(settingsGateLow, 0),
           },
           dependency_policy: settingsDependencyPolicy,
+          hitl_mode: settingsDefaultHitlMode,
         },
         workers: {
           default: (settingsWorkerDefault === 'ollama' || settingsWorkerDefault === 'claude') ? settingsWorkerDefault : 'codex',
@@ -4022,6 +4176,38 @@ export default function App() {
     )
   }
 
+  async function requestGateChanges(taskId: string, gate?: string | null): Promise<void> {
+    const guidance = gateRequestGuidance.trim()
+    setTaskActionPending('approve_gate')
+    setTaskActionDetail(`request:${String(gate || '')}`)
+    setTaskActionError('')
+    try {
+      const response = await requestJson<{ task: TaskRecord; message?: string }>(buildApiUrl(`/api/tasks/${taskId}/approve-gate`, projectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          gate: gate || undefined,
+          action: 'request_changes',
+          guidance,
+        }),
+      })
+      setGateRequestGuidance('')
+      setGateRequestOpen(false)
+      if (response.message) {
+        setTaskActionMessage(response.message)
+      }
+      await reloadAll()
+      if (selectedTaskIdRef.current === taskId) {
+        await loadTaskDetail(taskId)
+      }
+    } catch (err) {
+      setTaskActionError(toErrorMessage('Failed to request changes', err))
+    } finally {
+      setTaskActionPending(null)
+      setTaskActionDetail('')
+    }
+  }
+
   async function pinProjectPath(path: string, allowNonGitValue: boolean): Promise<void> {
     try {
       const pinned = await requestJson<{ project: ProjectRef }>(buildApiUrl('/api/projects/pinned', projectDir), {
@@ -4123,16 +4309,33 @@ export default function App() {
   })
   const hasUnresolvedBlockers = unresolvedBlockers.length > 0
   const showViewPlan = isPlanTask && selectedTaskView?.status === 'done'
-  const selectedTaskStep = String(selectedTaskView?.current_step || selectedTaskView?.metadata?.pipeline_phase || '').trim().toLowerCase()
-  const isPreImplementationStep = !selectedTaskStep || ['plan', 'analyze', 'generate_tasks'].includes(selectedTaskStep)
-  const showBeforeImplementGate = !!(
+  const showPlanGate = !!(
     selectedTaskView
-    && selectedTaskView.pending_gate === 'before_implement'
-    && isPreImplementationStep
+    && selectedTaskView.status !== 'cancelled'
+    && (selectedTaskView.pending_gate === 'before_implement' || selectedTaskView.pending_gate === 'before_generate_tasks')
   )
-  const showPlanTab = selectedTaskView && !isPlanningTaskType(selectedTaskView.task_type) && (
+  const showTopLevelGateBanner = !!(
+    selectedTaskView
+    && selectedTaskView.status !== 'cancelled'
+    && selectedTaskView.pending_gate
+    && selectedTaskView.pending_gate !== 'before_implement'
+    && selectedTaskView.pending_gate !== 'before_generate_tasks'
+  )
+  const showChangesTab = !!(
+    selectedTaskView
+    && !isPlanningTaskType(selectedTaskView.task_type)
+    && (
+      selectedTaskView.status === 'in_review'
+      || selectedTaskView.status === 'done'
+      || selectedTaskView.status === 'blocked'
+      || selectedTaskView.pending_gate === 'before_implement'
+      || selectedTaskView.pending_gate === 'before_commit'
+      || selectedTaskView.pending_gate === 'before_done'
+    )
+  )
+  const showPlanTab = !!selectedTaskView && (
     (selectedTaskPlan?.revisions?.length ?? 0) > 0 ||
-    showBeforeImplementGate
+    showPlanGate
   )
   // Guard: if the Plan tab is selected but no longer visible, fall back to overview.
   const effectiveTaskDetailTab = (taskDetailTab === 'plan' && !showPlanTab) ? 'overview' : taskDetailTab
@@ -4149,12 +4352,66 @@ export default function App() {
   const taskDetailContent = selectedTaskView ? (
       <div className="detail-card">
         {selectedTaskDetailLoading ? <p className="field-label">Loading full task detail...</p> : null}
-        <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}</p>
+        <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {humanizeLabel(normalizeHitlMode(selectedTaskView.hitl_mode || 'autopilot'))} · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}</p>
         {selectedTaskTotalSeconds != null ? (
           <p className="task-meta">
             Total time taken: {formatDuration(selectedTaskTotalSeconds) || '0s'}
             {selectedTaskView.timing_summary?.is_running ? ' · running' : ''}
           </p>
+        ) : null}
+        {showTopLevelGateBanner ? (
+          <div className="preview-box plan-gate-banner">
+            <p className="field-label">Pending gate: <strong>{gateDisplayLabel(selectedTaskView)}</strong></p>
+            <div className="inline-actions">
+              <button
+                className="button button-primary"
+                onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}
+                disabled={taskActionPending === 'approve_gate'}
+              >
+                {taskActionPending === 'approve_gate' && taskActionDetail.startsWith('approve:')
+                  ? 'Approving...'
+                  : gateApprovalButtonLabel(selectedTaskView.pending_gate)}
+              </button>
+              {!gateRequestOpen ? (
+                <button
+                  className="button"
+                  onClick={() => setGateRequestOpen(true)}
+                  disabled={taskActionPending !== null}
+                >
+                  Request changes
+                </button>
+              ) : (
+                <>
+                  <input
+                    className="review-guidance-input"
+                    value={gateRequestGuidance}
+                    onChange={(event) => setGateRequestGuidance(event.target.value)}
+                    placeholder="Guidance for changes..."
+                    disabled={taskActionPending !== null}
+                  />
+                  <button
+                    className="button"
+                    onClick={() => void requestGateChanges(selectedTaskView.id, selectedTaskView.pending_gate)}
+                    disabled={taskActionPending !== null}
+                  >
+                    {taskActionPending === 'approve_gate' && taskActionDetail === `request:${String(selectedTaskView.pending_gate || '')}`
+                      ? 'Requesting...'
+                      : 'Submit'}
+                  </button>
+                  <button
+                    className="button button-ghost"
+                    onClick={() => {
+                      setGateRequestOpen(false)
+                      setGateRequestGuidance('')
+                    }}
+                    disabled={taskActionPending !== null}
+                  >
+                    Cancel
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
         ) : null}
         <div className="detail-tabs" role="tablist" aria-label="Task detail sections">
           <button
@@ -4208,7 +4465,7 @@ export default function App() {
           >
             Configuration
           </button>
-          {(selectedTaskView.status === 'in_review' || selectedTaskView.status === 'done' || selectedTaskView.status === 'blocked') && !isPlanningTaskType(selectedTaskView.task_type) ? (
+          {showChangesTab ? (
             <button
               className={`detail-tab ${taskDetailTab === 'changes' ? 'is-active' : ''}`}
               aria-pressed={taskDetailTab === 'changes'}
@@ -4369,22 +4626,6 @@ export default function App() {
                 </div>
               )
             })() : null}
-            {selectedTaskView.pending_gate && selectedTaskView.pending_gate !== 'before_implement' ? (
-              <div className="preview-box">
-                <p className="field-label">
-                  Pending gate: <strong>{gateDisplayLabel(selectedTaskView)}</strong>
-                </p>
-                <button
-                  className="button button-primary"
-                  onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}
-                  disabled={taskActionPending === 'approve_gate'}
-                >
-                  {taskActionPending === 'approve_gate'
-                    ? 'Approving...'
-                    : gateApprovalButtonLabel(selectedTaskView.pending_gate)}
-                </button>
-              </div>
-            ) : null}
             {Array.isArray(selectedTaskView.human_blocking_issues) && selectedTaskView.human_blocking_issues.length > 0 ? (
               <div className="preview-box">
                 <p className="field-label">Human blocking issues</p>
@@ -4446,18 +4687,58 @@ export default function App() {
           )
           return (
             <div className="task-detail-section-body">
-              {showBeforeImplementGate ? (
+              {showPlanGate ? (
                 <div className="preview-box plan-gate-banner">
-                  <p className="field-label">Approve plan to continue.</p>
-                  <button
-                    className="button button-primary"
-                    onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}
-                    disabled={taskActionPending === 'approve_gate'}
-                  >
-                    {taskActionPending === 'approve_gate'
-                      ? 'Approving...'
-                      : gateApprovalButtonLabel(selectedTaskView.pending_gate)}
-                  </button>
+                  <p className="field-label">{gateDisplayLabel(selectedTaskView)}</p>
+                  <div className="inline-actions">
+                    <button
+                      className="button button-primary"
+                      onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}
+                      disabled={taskActionPending === 'approve_gate'}
+                    >
+                      {taskActionPending === 'approve_gate' && taskActionDetail.startsWith('approve:')
+                        ? 'Approving...'
+                        : gateApprovalButtonLabel(selectedTaskView.pending_gate)}
+                    </button>
+                    {!gateRequestOpen ? (
+                      <button
+                        className="button"
+                        onClick={() => setGateRequestOpen(true)}
+                        disabled={taskActionPending !== null}
+                      >
+                        Request changes
+                      </button>
+                    ) : (
+                      <>
+                        <input
+                          className="review-guidance-input"
+                          value={gateRequestGuidance}
+                          onChange={(event) => setGateRequestGuidance(event.target.value)}
+                          placeholder="Guidance for changes..."
+                          disabled={taskActionPending !== null}
+                        />
+                        <button
+                          className="button"
+                          onClick={() => void requestGateChanges(selectedTaskView.id, selectedTaskView.pending_gate)}
+                          disabled={taskActionPending !== null}
+                        >
+                          {taskActionPending === 'approve_gate' && taskActionDetail === `request:${String(selectedTaskView.pending_gate || '')}`
+                            ? 'Requesting...'
+                            : 'Submit'}
+                        </button>
+                        <button
+                          className="button button-ghost"
+                          onClick={() => {
+                            setGateRequestOpen(false)
+                            setGateRequestGuidance('')
+                          }}
+                          disabled={taskActionPending !== null}
+                        >
+                          Cancel
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
               ) : null}
               {planActionMessage ? <p className="field-label" style={{ color: 'var(--color-success, #5cb85c)' }}>{planActionMessage}</p> : null}
@@ -4597,16 +4878,6 @@ export default function App() {
         {taskDetailTab === 'configuration' ? (
           <div className="task-detail-section-body">
               <div className="form-stack">
-                <label className="field-label" htmlFor="edit-task-approval-mode">Approval mode</label>
-                <select
-                  id="edit-task-approval-mode"
-                  value={configLocked ? (selectedTaskView.approval_mode || 'human_review') : editTaskApprovalMode}
-                  onChange={(event) => setEditTaskApprovalMode(event.target.value as 'human_review' | 'auto_approve')}
-                  disabled={configLocked || taskActionPending === 'save'}
-                >
-                  <option value="human_review">{humanizeLabel('human_review')}</option>
-                  <option value="auto_approve">{humanizeLabel('auto_approve')}</option>
-                </select>
                 <label className="field-label" htmlFor="edit-task-labels">Labels (comma-separated)</label>
                 <input
                   id="edit-task-labels"
@@ -4616,7 +4887,7 @@ export default function App() {
                 />
                 <label className="field-label">HITL mode</label>
                 {configLocked ? (
-                  <p className="task-meta">{humanizeLabel(selectedTaskView.hitl_mode || 'default')}</p>
+                  <p className="task-meta">{humanizeLabel(normalizeHitlMode(selectedTaskView.hitl_mode || 'autopilot'))}</p>
                 ) : (
                   <HITLModeSelector
                     currentMode={editTaskHitlMode}
@@ -4843,17 +5114,25 @@ export default function App() {
           const hasTaskLogs = !!(stdoutHistory || stderrHistory || stdoutRawHistory || stderrRawHistory) || (!!selectedTaskLogs && (selectedTaskLogs.mode !== 'none' || !!selectedTaskLogs.stdout || !!selectedTaskLogs.stderr))
           const progressEntries = formatProgressEntries(selectedTaskLogs?.progress)
           const availableSteps = selectedTaskLogs?.available_steps || []
+          const orderedSteps = orderLogStepsByPipeline(availableSteps, selectedTaskView.pipeline_template)
           const stepCounts = selectedTaskLogs?.step_execution_counts || {}
+          const stepLatestRun = selectedTaskLogs?.step_latest_run || {}
+          const stepHistory = selectedTaskLogs?.step_history || []
           const activeLogStep = logViewStep || selectedTaskLogs?.step || ''
+          const activeLogRun = logViewRunId || selectedTaskLogs?.run_id || ''
           const latestStep = selectedTaskLogs?.current_step || selectedTaskView.current_step || ''
           const taskIsRunning = selectedTaskView.status === 'in_progress' || selectedTaskView.status === 'queued'
           const totalExecutions = Object.values(stepCounts).reduce((a, b) => a + b, 0)
           const extraSteps = totalExecutions - Object.keys(stepCounts).length
+          const attemptsForActiveStep = activeLogStep
+            ? stepHistory.filter((item) => item.step === activeLogStep)
+            : []
+          const orderedAttemptsForActiveStep = orderLogAttempts(attemptsForActiveStep)
           return (
             <div className="task-detail-section-body">
-              {availableSteps.length > 1 ? (
+              {orderedSteps.length > 1 ? (
                 <div className="log-step-selector">
-                  {availableSteps.map((s) => {
+                  {orderedSteps.map((s) => {
                     const isViewed = s === activeLogStep
                     const isLatest = s === latestStep
                     const count = stepCounts[s] || 0
@@ -4862,7 +5141,7 @@ export default function App() {
                       <button
                         key={s}
                         className={cls}
-                        onClick={() => switchLogStep(s === activeLogStep ? '' : s)}
+                        onClick={() => switchLogStepAttempt(s === activeLogStep ? '' : s, s === activeLogStep ? '' : (stepLatestRun[s] || ''))}
                       >
                         {humanizeLabel(s)}{count > 1 ? <span className="log-step-count">{'\u00d7'}{count}</span> : null}{isLatest && taskIsRunning ? <span className="log-step-live-dot" /> : null}
                       </button>
@@ -4876,9 +5155,27 @@ export default function App() {
                   ) : null}
                 </div>
               ) : null}
+              {orderedAttemptsForActiveStep.length > 1 ? (
+                <>
+                  <label className="field-label" htmlFor="log-attempt-selector">Attempt</label>
+                  <select
+                    id="log-attempt-selector"
+                    value={activeLogRun}
+                    onChange={(event) => switchLogStepAttempt(activeLogStep, event.target.value)}
+                  >
+                    {orderedAttemptsForActiveStep.map((item) => (
+                      <option key={`${item.step}-${item.run_id}-${item.attempt || 0}`} value={item.run_id}>
+                        {item.attempt ? `Attempt ${item.attempt}` : item.run_id} · {item.run_id.slice(0, 12)}
+                        {item.started_at ? ` · ${toLocaleTimestamp(item.started_at) || item.started_at}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </>
+              ) : null}
               <p className="task-meta">
                 Source: {humanizeLabel(selectedTaskLogs?.mode || 'none')}
                 {selectedTaskLogs?.step ? ` · step: ${selectedTaskLogs.step}` : ''}
+                {selectedTaskLogs?.run_id ? ` · run: ${selectedTaskLogs.run_id.slice(0, 12)}` : ''}
                 {selectedTaskLogs?.started_at ? ` · started: ${toLocaleTimestamp(selectedTaskLogs.started_at) || selectedTaskLogs.started_at}` : ''}
                 {selectedTaskLogs?.finished_at ? ` · finished: ${toLocaleTimestamp(selectedTaskLogs.finished_at) || selectedTaskLogs.finished_at}` : ''}
               </p>
@@ -4917,10 +5214,10 @@ export default function App() {
         {taskDetailTab === 'changes' ? (
           <div className="task-detail-section-body">
             {taskDiffLoading ? <p className="field-label">Loading diff...</p> : null}
-            {!taskDiffLoading && taskDiff && !taskDiff.commit ? (
-              <p className="empty">No commit found for this task.</p>
+            {!taskDiffLoading && taskDiff && (taskDiff.mode === 'none' || (!taskDiff.commit && !taskDiff.diff && (taskDiff.files?.length || 0) === 0)) ? (
+              <p className="empty">No changes found for this task.</p>
             ) : null}
-            {!taskDiffLoading && taskDiff && taskDiff.commit ? (() => {
+            {!taskDiffLoading && taskDiff && (taskDiff.mode === 'working_tree' || taskDiff.mode === 'committed' || taskDiff.mode === 'preserved_branch' || taskDiff.commit || taskDiff.diff || (taskDiff.files?.length || 0) > 0) ? (() => {
               // Split unified diff into per-file chunks
               const fileChunks: { path: string; additions: number; deletions: number; lines: string[] }[] = []
               if (taskDiff.diff) {
@@ -4943,7 +5240,14 @@ export default function App() {
               return (
                 <>
                   <p className="task-meta">
-                    Commit: <code>{taskDiff.commit.slice(0, 12)}</code> · {taskDiff.files.length} file{taskDiff.files.length !== 1 ? 's' : ''} changed
+                    {taskDiff.mode === 'working_tree'
+                      ? 'Working tree changes'
+                      : taskDiff.mode === 'preserved_branch'
+                        ? `Branch changes${taskDiff.branch ? ` (${taskDiff.branch}` : ''}${taskDiff.base_branch ? ` vs ${taskDiff.base_branch}` : ''}${taskDiff.branch ? ')' : ''}`
+                      : taskDiff.commit
+                        ? <>Commit: <code>{taskDiff.commit.slice(0, 12)}</code></>
+                        : 'Changes'}
+                    {' · '}{taskDiff.files.length} file{taskDiff.files.length !== 1 ? 's' : ''} changed
                     {fileChunks.length > 0 ? (
                       <>
                         {' · '}
@@ -5014,15 +5318,15 @@ export default function App() {
               <div className="card-list">
                 {(board.columns[column] || []).map((task) => (
                   <button
-                    className={`task-card task-card-button${boardCompact ? ' task-card-compact' : ''}${task.pending_gate ? ' task-card-awaiting-gate' : ''}`}
+                    className={`task-card task-card-button${boardCompact ? ' task-card-compact' : ''}${task.status !== 'cancelled' && task.pending_gate ? ' task-card-awaiting-gate' : ''}`}
                     key={task.id}
-                    onClick={() => handleTaskSelect(task.id, task.pending_gate === 'before_implement' ? 'plan' : undefined)}
+                    onClick={() => handleTaskSelect(task.id, (task.pending_gate === 'before_implement' || task.pending_gate === 'before_generate_tasks') ? 'plan' : undefined)}
                   >
                     <p className="task-title">{task.title}</p>
                     {!boardCompact && <p className="task-meta">{task.priority} · {task.id.replace(/^task-/, '')}{task.parent_id ? ' · from plan' : ''}</p>}
-                    {!boardCompact && task.pending_gate ? (
+                    {!boardCompact && task.status !== 'cancelled' && task.pending_gate ? (
                       <p className="task-meta">
-                        <span className="status-pill status-pill-inline status-review">Awaiting approval</span>
+                        <span className="status-pill status-pill-inline status-pill-no-offset status-review">Awaiting approval</span>
                       </p>
                     ) : null}
                     {!boardCompact && task.description ? <p className="task-desc">{task.description}</p> : null}
@@ -5928,6 +6232,23 @@ export default function App() {
                 {settingsDependencyPolicy === 'prudent' && 'Workers will prefer existing dependencies but may install new ones when manual implementation would be unreliable or disproportionately complex.'}
                 {settingsDependencyPolicy === 'strict' && 'Workers must not install any new dependencies. All solutions must use only what is already in the project.'}
               </p>
+              <p className="settings-subheading">Default HITL Mode</p>
+              <p className="field-label">
+                Applies to newly created tasks. You can still override per task.
+              </p>
+              <div className="toggle-group" role="group" aria-label="Default HITL mode">
+                {(['autopilot', 'supervised', 'review_only'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    className={`toggle-button ${settingsDefaultHitlMode === mode ? 'is-active' : ''}`}
+                    aria-pressed={settingsDefaultHitlMode === mode}
+                    onClick={() => setSettingsDefaultHitlMode(mode)}
+                  >
+                    {humanizeLabel(mode)}
+                  </button>
+                ))}
+              </div>
             </form>
           </article>
         </div>
@@ -5951,6 +6272,7 @@ export default function App() {
     setCreateTab(tab)
     if (tab === 'task') {
       shouldPrefillTaskProjectCommandsRef.current = true
+      setNewTaskHitlMode(settingsDefaultHitlMode)
       if (taskTypeOverride) {
         setNewTaskType(taskTypeOverride)
       }
@@ -6488,6 +6810,12 @@ export default function App() {
                   <details className="advanced-fields">
                     <summary>Advanced</summary>
                     <div className="form-stack advanced-fields-body">
+                      <label className="field-label">HITL mode</label>
+                      <HITLModeSelector
+                        currentMode={newTaskHitlMode}
+                        onModeChange={setNewTaskHitlMode}
+                        projectDir={projectDir}
+                      />
                       <label className="field-label">Priority</label>
                       <div className="toggle-group" role="group" aria-label="Task priority">
                         {['P0', 'P1', 'P2', 'P3'].map((priority) => (
@@ -6502,31 +6830,6 @@ export default function App() {
                           </button>
                         ))}
                       </div>
-                      <label className="field-label">Approval mode</label>
-                      <div className="toggle-group" role="group" aria-label="Task approval mode">
-                        <button
-                          type="button"
-                          className={`toggle-button ${newTaskApprovalMode === 'human_review' ? 'is-active' : ''}`}
-                          aria-pressed={newTaskApprovalMode === 'human_review'}
-                          onClick={() => setNewTaskApprovalMode('human_review')}
-                        >
-                          {humanizeLabel('human_review')}
-                        </button>
-                        <button
-                          type="button"
-                          className={`toggle-button ${newTaskApprovalMode === 'auto_approve' ? 'is-active' : ''}`}
-                          aria-pressed={newTaskApprovalMode === 'auto_approve'}
-                          onClick={() => setNewTaskApprovalMode('auto_approve')}
-                        >
-                          {humanizeLabel('auto_approve')}
-                        </button>
-                      </div>
-                      <label className="field-label">HITL mode</label>
-                      <HITLModeSelector
-                        currentMode={newTaskHitlMode}
-                        onModeChange={setNewTaskHitlMode}
-                        projectDir={projectDir}
-                      />
                       <label className="field-label">Dependency policy</label>
                       <div className="toggle-group" role="group" aria-label="Dependency policy">
                         {(['permissive', 'prudent', 'strict'] as const).map((level) => (

@@ -193,10 +193,8 @@ def test_prd_import_tasks_skipped(tmp_path: Path) -> None:
 
 def test_tick_once_integrates_dep_analysis(tmp_path: Path) -> None:
     container, service, _ = _service(tmp_path)
-    t1 = Task(title="Foundation", status="queued", task_type="chore",
-              approval_mode="auto_approve", hitl_mode="autopilot")
-    t2 = Task(title="Dependent", status="queued", task_type="chore",
-              approval_mode="auto_approve", hitl_mode="autopilot")
+    t1 = Task(title="Foundation", status="queued", task_type="chore", hitl_mode="autopilot")
+    t2 = Task(title="Dependent", status="queued", task_type="chore", hitl_mode="autopilot")
     container.tasks.upsert(t1)
     container.tasks.upsert(t2)
 

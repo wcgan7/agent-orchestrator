@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -74,6 +75,10 @@ def _create_plan_revision(client: TestClient, task_id: str, content: str, *, par
     return str(resp.json()["revision"]["id"])
 
 
+def _git(args: list[str], cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
 def test_cutover_archives_legacy_state(tmp_path: Path) -> None:
     legacy_root = tmp_path / ".agent_orchestrator"
     legacy_root.mkdir(parents=True)
@@ -120,7 +125,7 @@ def test_task_dependency_guard_blocks_ready_transition(tmp_path: Path) -> None:
     with TestClient(app) as client:
         blocker = client.post(
             "/api/tasks",
-            json={"title": "Blocker", "status": "backlog", "approval_mode": "auto_approve", "metadata": {"scripted_findings": [[]]}},
+            json={"title": "Blocker", "status": "backlog", "metadata": {"scripted_findings": [[]]}},
         ).json()["task"]
         blocked = client.post("/api/tasks", json={"title": "Blocked", "status": "backlog"}).json()["task"]
 
@@ -867,7 +872,7 @@ def test_task_payload_includes_gate_context(tmp_path: Path) -> None:
         gate_context = loaded.json()["task"]["gate_context"]
         assert gate_context["is_waiting"] is True
         assert gate_context["gate"] == "before_implement"
-        assert gate_context["display"] == "Approve plan to start implementation"
+        assert gate_context["display"] == "Plan ready."
         assert gate_context["step"] == "plan"
         assert gate_context["status_kind"] == "approval_wait"
 
@@ -1096,6 +1101,109 @@ def test_task_logs_step_query_reads_active_logs_for_requested_step(tmp_path: Pat
         assert body["step"] == "implement"
         assert body["stdout"] == "implement output\n"
         assert body["available_steps"] == ["implement"]
+
+
+def test_task_logs_include_steps_from_all_runs_and_support_run_id_selection(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Log continuity"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        logs_dir = container.state_root / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        verify_old = logs_dir / "verify.old.stdout.log"
+        verify_old.write_text("verify old\n", encoding="utf-8")
+        verify_new = logs_dir / "verify.new.stdout.log"
+        verify_new.write_text("verify new\n", encoding="utf-8")
+        plan_old = logs_dir / "plan.old.stdout.log"
+        plan_old.write_text("plan old\n", encoding="utf-8")
+
+        run_old = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at=now_iso(),
+            finished_at=now_iso(),
+            steps=[
+                {"step": "plan", "status": "ok", "stdout_path": str(plan_old), "started_at": now_iso(), "ts": now_iso()},
+                {"step": "verify", "status": "ok", "stdout_path": str(verify_old), "started_at": now_iso(), "ts": now_iso()},
+            ],
+        )
+        run_new = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at=now_iso(),
+            finished_at=now_iso(),
+            steps=[
+                {"step": "verify", "status": "ok", "stdout_path": str(verify_new), "started_at": now_iso(), "ts": now_iso()},
+            ],
+        )
+        container.runs.upsert(run_old)
+        container.runs.upsert(run_new)
+        task.run_ids = [run_old.id, run_new.id]
+        task.status = "in_progress"
+        task.current_step = "verify"
+        task.metadata["active_logs"] = {"step": "verify", "stdout_path": str(verify_new), "run_id": run_new.id}
+        container.tasks.upsert(task)
+
+        merged = client.get(f"/api/tasks/{task.id}/logs")
+        assert merged.status_code == 200
+        merged_body = merged.json()
+        assert "verify" in merged_body["available_steps"]
+        assert "plan" in merged_body["available_steps"]
+        assert merged_body["step_execution_counts"]["verify"] == 2
+        assert merged_body["step_latest_run"]["verify"] == run_new.id
+        assert any(item["step"] == "verify" and item["run_id"] == run_old.id for item in merged_body["step_history"])
+        assert any(item["step"] == "verify" and item["run_id"] == run_new.id for item in merged_body["step_history"])
+
+        scoped_old = client.get(f"/api/tasks/{task.id}/logs?step=verify&run_id={run_old.id}")
+        assert scoped_old.status_code == 200
+        old_body = scoped_old.json()
+        assert old_body["mode"] == "history"
+        assert old_body["run_id"] == run_old.id
+        assert old_body["stdout"] == "verify old\n"
+
+        scoped_new = client.get(f"/api/tasks/{task.id}/logs?step=verify&run_id={run_new.id}")
+        assert scoped_new.status_code == 200
+        new_body = scoped_new.json()
+        assert new_body["mode"] == "history"
+        assert new_body["run_id"] == run_new.id
+        assert new_body["stdout"] == "verify new\n"
+
+        strict_miss = client.get(f"/api/tasks/{task.id}/logs?step=verify&run_id=run_missing")
+        assert strict_miss.status_code == 200
+        strict_miss_body = strict_miss.json()
+        assert strict_miss_body["mode"] == "none"
+        assert strict_miss_body["run_id"] is None
+        assert strict_miss_body["stdout"] == ""
+
+
+def test_cancel_task_clears_pending_gate_and_checkpoint(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Cancel clears gate"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+        task.status = "in_progress"
+        task.pending_gate = "before_implement"
+        task.current_agent_id = "agent-1"
+        task.metadata = dict(task.metadata or {})
+        task.metadata["execution_checkpoint"] = {"gate": "before_implement", "resume_step": "implement"}
+        container.tasks.upsert(task)
+
+        resp = client.post(f"/api/tasks/{task.id}/cancel")
+        assert resp.status_code == 200
+        body = resp.json()["task"]
+        assert body["status"] == "cancelled"
+        assert body["pending_gate"] is None
+
+        updated = container.tasks.get(task.id)
+        assert updated is not None
+        assert updated.pending_gate is None
+        assert updated.current_agent_id is None
+        assert "execution_checkpoint" not in (updated.metadata or {})
 
 
 def test_get_task_timing_summary_prefers_earliest_active_run(tmp_path: Path) -> None:
@@ -1411,7 +1519,6 @@ def test_api_surfaces_human_blocking_issues_on_task_and_timeline(tmp_path: Path)
             json={
                 "title": "Needs credentials",
                 "status": "backlog",
-                "approval_mode": "auto_approve",
                 "metadata": {
                     "scripted_steps": {
                         "plan": {
@@ -1452,7 +1559,6 @@ def test_retry_clears_pending_gate_and_human_blockers(tmp_path: Path) -> None:
             json={
                 "title": "Needs credentials",
                 "status": "backlog",
-                "approval_mode": "auto_approve",
                 "metadata": {
                     "scripted_steps": {
                         "plan": {
@@ -1491,7 +1597,6 @@ def test_retry_preserves_existing_workdoc_content(tmp_path: Path) -> None:
             json={
                 "title": "Retry keeps context",
                 "status": "backlog",
-                "approval_mode": "auto_approve",
                 "metadata": {
                     "scripted_steps": {
                         "plan": {"status": "ok", "summary": "Original plan context"},
@@ -1529,7 +1634,6 @@ def test_retry_run_blocks_when_prior_workdoc_missing(tmp_path: Path) -> None:
             json={
                 "title": "Retry missing workdoc",
                 "status": "backlog",
-                "approval_mode": "auto_approve",
                 "metadata": {
                     "scripted_steps": {
                         "plan": {"status": "ok", "summary": "Plan before failure"},
@@ -1568,7 +1672,6 @@ def test_retry_run_blocks_when_prior_workdoc_invalid_encoding(tmp_path: Path) ->
             json={
                 "title": "Retry invalid workdoc",
                 "status": "backlog",
-                "approval_mode": "auto_approve",
                 "metadata": {
                     "scripted_steps": {
                         "plan": {"status": "ok", "summary": "Plan before failure"},
@@ -1639,7 +1742,6 @@ def test_retry_run_appends_attempt_marker_to_workdoc(tmp_path: Path) -> None:
             json={
                 "title": "Retry attempt marker",
                 "status": "backlog",
-                "approval_mode": "auto_approve",
                 "metadata": {
                     "scripted_steps": {
                         "plan": {"status": "ok", "summary": "Initial attempt plan"},
@@ -1693,7 +1795,7 @@ def test_retry_event_payload_includes_lifecycle_metadata(tmp_path: Path) -> None
     with TestClient(app) as client:
         created = client.post(
             "/api/tasks",
-            json={"title": "Retry event payload", "status": "backlog", "approval_mode": "auto_approve"},
+            json={"title": "Retry event payload", "status": "backlog", },
         ).json()["task"]
         task_id = created["id"]
 
@@ -1732,7 +1834,6 @@ def test_retry_run_task_started_event_includes_retry_metadata(tmp_path: Path) ->
             json={
                 "title": "Retry started payload",
                 "status": "backlog",
-                "approval_mode": "auto_approve",
                 "metadata": {
                     "scripted_steps": {
                         "plan": {"status": "ok", "summary": "Plan one"},
@@ -1778,7 +1879,12 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
     with TestClient(app) as client:
         task = client.post(
             "/api/tasks",
-            json={"title": "Needs review", "status": "backlog", "approval_mode": "human_review", "metadata": {"scripted_findings": [[]]}},
+            json={
+                "title": "Needs review",
+                "status": "backlog",
+                "hitl_mode": "review_only",
+                "metadata": {"scripted_findings": [[]]},
+            },
         ).json()["task"]
         ran = client.post(f"/api/tasks/{task['id']}/run")
         assert ran.status_code == 200
@@ -1798,19 +1904,26 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
         assert len(actions_after_changes) == 1
         assert actions_after_changes[0]["action"] == "request_changes"
         assert actions_after_changes[0]["guidance"] == "Please adjust tests"
+        container = app.state.containers[str(tmp_path.resolve())]
+        task_after_changes = container.tasks.get(task["id"])
+        assert task_after_changes is not None
+        run_after_changes = container.runs.get(task_after_changes.run_ids[-1]) if task_after_changes.run_ids else None
+        assert run_after_changes is not None
+        assert run_after_changes.status == "interrupted"
 
         client.post(f"/api/tasks/{task['id']}/run")
         approved = client.post(f"/api/review/{task['id']}/approve", json={})
         assert approved.status_code == 200
-        assert approved.json()["task"]["status"] == "done"
-        execution_summary = approved.json()["task"].get("execution_summary") or {}
-        assert execution_summary.get("run_status") == "done"
+        assert approved.json()["task"]["status"] == "queued"
         actions_after_approve = approved.json()["task"]["human_review_actions"]
         assert len(actions_after_approve) == 2
         assert actions_after_approve[0]["action"] == "request_changes"
         assert actions_after_approve[1]["action"] == "approve"
 
-        container = app.state.containers[str(tmp_path.resolve())]
+        reran = client.post(f"/api/tasks/{task['id']}/run")
+        assert reran.status_code == 200
+        assert reran.json()["task"]["status"] == "done"
+
         latest_run = None
         task_after = container.tasks.get(task["id"])
         assert task_after is not None
@@ -1823,12 +1936,252 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
         assert latest_run.finished_at is not None
 
 
+def test_task_changes_endpoint_handles_unborn_head(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Unborn head changes"}).json()["task"]
+        (tmp_path / "new-file.txt").write_text("draft\n", encoding="utf-8")
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "working_tree"
+        assert payload["commit"] is None
+        assert any(item.get("path") == "new-file.txt" for item in payload["files"])
+        assert "?? new-file.txt" in payload["stat"]
+
+
+def test_task_changes_endpoint_ignores_out_of_scope_worktree_dir(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        tmp_path,
+    )
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Scoped changes"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+
+        outside = tmp_path.parent / "outside-worktree"
+        outside.mkdir(parents=True, exist_ok=True)
+        metadata = dict(stored.metadata or {})
+        metadata["worktree_dir"] = str(outside)
+        stored.metadata = metadata
+        container.tasks.upsert(stored)
+
+        (tmp_path / "tracked.txt").write_text("base\nupdate\n", encoding="utf-8")
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "working_tree"
+        assert payload["commit"] is None
+        assert any(item.get("path") == "tracked.txt" for item in payload["files"])
+        assert "+update" in payload["diff"]
+
+
+def test_task_changes_endpoint_falls_back_when_commit_diff_errors(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        tmp_path,
+    )
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Fallback changes"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+
+        bad_run = RunRecord(
+            task_id=stored.id,
+            status="done",
+            started_at=now_iso(),
+            finished_at=now_iso(),
+            steps=[{"step": "commit", "status": "ok", "commit": "deadbeef"}],
+        )
+        container.runs.upsert(bad_run)
+        stored.run_ids.append(bad_run.id)
+        container.tasks.upsert(stored)
+
+        (tmp_path / "tracked.txt").write_text("base\nupdate\n", encoding="utf-8")
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "working_tree"
+        assert payload["commit"] is None
+        assert any(item.get("path") == "tracked.txt" for item in payload["files"])
+        assert "+update" in payload["diff"]
+
+
+def test_task_changes_endpoint_uses_preserved_branch_when_worktree_is_empty(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / ".gitignore").write_text(
+        ".agent_orchestrator/\n\n# Agent Orchestrator runtime data\n.agent_orchestrator_archive/\n.workdoc.md\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", ".gitignore", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    preserved_branch = "task-task-preserved"
+    _git(["checkout", "-b", preserved_branch], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\nbranch change\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "branch work",
+        ],
+        tmp_path,
+    )
+    _git(["checkout", base_branch], tmp_path)
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Preserved branch changes"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        metadata = dict(stored.metadata or {})
+        metadata["preserved_branch"] = preserved_branch
+        stored.metadata = metadata
+        container.tasks.upsert(stored)
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "preserved_branch"
+        assert payload["commit"] is None
+        assert payload["branch"] == preserved_branch
+        assert payload["base_branch"] == base_branch
+        assert any(item.get("path") == "tracked.txt" for item in payload["files"])
+        assert "+branch change" in payload["diff"]
+
+
+def test_task_changes_endpoint_prefers_working_tree_over_preserved_branch(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / ".gitignore").write_text(
+        ".agent_orchestrator/\n\n# Agent Orchestrator runtime data\n.agent_orchestrator_archive/\n.workdoc.md\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", ".gitignore", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    preserved_branch = "task-task-preserved"
+    _git(["checkout", "-b", preserved_branch], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\nbranch change\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "branch work",
+        ],
+        tmp_path,
+    )
+    _git(["checkout", base_branch], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\nworking change\n", encoding="utf-8")
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Prefer working tree"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        metadata = dict(stored.metadata or {})
+        metadata["preserved_branch"] = preserved_branch
+        stored.metadata = metadata
+        container.tasks.upsert(stored)
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "working_tree"
+        assert payload["commit"] is None
+        assert any(item.get("path") == "tracked.txt" for item in payload["files"])
+        assert "+working change" in payload["diff"]
+
+
 def test_task_execution_summary_prefers_terminal_run_for_done_task(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         created = client.post(
             "/api/tasks",
-            json={"title": "Summary run selection", "status": "backlog", "approval_mode": "auto_approve"},
+            json={"title": "Summary run selection", "status": "backlog", },
         ).json()["task"]
         run_resp = client.post(f"/api/tasks/{created['id']}/run")
         assert run_resp.status_code == 200
@@ -1866,7 +2219,7 @@ def test_task_execution_summary_reconciles_single_stale_run_for_done_task(tmp_pa
     with TestClient(app) as client:
         created = client.post(
             "/api/tasks",
-            json={"title": "Single stale run", "status": "done", "approval_mode": "auto_approve"},
+            json={"title": "Single stale run", "status": "done", },
         ).json()["task"]
 
         container = app.state.containers[str(tmp_path.resolve())]
