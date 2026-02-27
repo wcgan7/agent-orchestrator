@@ -116,6 +116,8 @@ type OrchestratorStatus = {
   in_progress: number
   draining: boolean
   run_branch?: string | null
+  scheduler_attached?: boolean
+  scheduler_stale?: boolean
 }
 
 type AgentRecord = {
@@ -2969,6 +2971,31 @@ export default function App() {
       if (requestSeq === reloadAllSeqRef.current) {
         setLoading(false)
       }
+    }
+  }
+
+  function isSchedulerStale(status: OrchestratorStatus): boolean {
+    if (typeof status.scheduler_stale === 'boolean') return status.scheduler_stale
+    return status.status === 'running'
+      && status.scheduler_attached === false
+      && ((Number(status.queue_depth) || 0) > 0 || (Number(status.in_progress) || 0) > 0)
+  }
+
+  async function refreshWithSchedulerRepair(): Promise<void> {
+    await reloadAll()
+    const refreshProjectDir = projectDirRef.current
+    try {
+      const status = await requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/status', refreshProjectDir))
+      if (!isSchedulerStale(status)) return
+      await requestJson<OrchestratorStatus>(buildApiUrl('/api/orchestrator/control', refreshProjectDir), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reset' }),
+      })
+      await reloadAll()
+      setTaskActionMessage('Scheduler reattached.')
+    } catch (err) {
+      setError(toErrorMessage('Failed to repair scheduler', err))
     }
   }
 
@@ -6590,7 +6617,7 @@ export default function App() {
             ))}
             <option value={ADD_REPO_VALUE}>Add repo...</option>
           </select>
-          <button className="button" onClick={() => void reloadAll()} disabled={loading}>Refresh</button>
+          <button className="button" onClick={() => void refreshWithSchedulerRepair()} disabled={loading}>Refresh</button>
           <button className="button button-primary" onClick={() => openCreateWorkModal()}>Create Work</button>
         </div>
       </header>

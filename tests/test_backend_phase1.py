@@ -1510,6 +1510,10 @@ def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> N
         fresh_tasks = (tmp_path / ".agent_orchestrator" / "tasks.yaml").read_text(encoding="utf-8")
         assert created["id"] not in fresh_tasks
 
+        status_resp = client.get("/api/orchestrator/status")
+        assert status_resp.status_code == 200
+        assert status_resp.json().get("scheduler_attached") is True
+
 
 def test_api_surfaces_human_blocking_issues_on_task_and_timeline(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())

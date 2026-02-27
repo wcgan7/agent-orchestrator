@@ -890,4 +890,86 @@ describe('App action coverage', () => {
     })
     expect(screen.getByRole('button', { name: /^Approve$/i })).toBeInTheDocument()
   })
+
+  it('refresh reattaches scheduler when status reports stale attachment', async () => {
+    const jsonResponse = (payload: unknown) => Promise.resolve({ ok: true, json: async () => payload })
+    let repaired = false
+    const mockedFetch = vi.fn().mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      if (u === '/' || u.startsWith('/?')) return jsonResponse({ project_id: 'repo-alpha' })
+      if (u.includes('/api/collaboration/modes')) return jsonResponse({ modes: [] })
+      if (u.includes('/api/tasks/board')) {
+        return jsonResponse({
+          columns: { backlog: [], queued: [], in_progress: [], in_review: [], blocked: [], done: [], cancelled: [] },
+        })
+      }
+      if (u.includes('/api/tasks/execution-order')) return jsonResponse({ batches: [], completed: [] })
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) return jsonResponse({ tasks: [] })
+      if (u.includes('/api/orchestrator/status')) {
+        return jsonResponse({
+          status: 'running',
+          queue_depth: 1,
+          in_progress: 0,
+          draining: false,
+          run_branch: null,
+          scheduler_attached: repaired,
+          scheduler_stale: !repaired,
+        })
+      }
+      if (u.includes('/api/orchestrator/control') && method === 'POST') {
+        const body = JSON.parse(String((init as RequestInit).body || '{}'))
+        if (body.action === 'reset') repaired = true
+        return jsonResponse({
+          status: 'running',
+          queue_depth: 1,
+          in_progress: 0,
+          draining: false,
+          run_branch: null,
+          scheduler_attached: true,
+          scheduler_stale: false,
+        })
+      }
+      if (u.includes('/api/agents')) return jsonResponse({ agents: [] })
+      if (u.includes('/api/projects/pinned')) return jsonResponse({ items: [] })
+      if (u.includes('/api/projects')) return jsonResponse({ projects: [] })
+      if (u.includes('/api/workers/health')) return jsonResponse({ providers: [] })
+      if (u.includes('/api/workers/routing')) return jsonResponse({ default: 'codex', rows: [] })
+      if (u.includes('/api/review-queue')) return jsonResponse({ tasks: [] })
+      if (u.includes('/api/phases')) return jsonResponse([])
+      if (u.includes('/api/collaboration/presence')) return jsonResponse({ users: [] })
+      if (u.includes('/api/metrics')) return jsonResponse({})
+      if (u.includes('/api/settings')) {
+        return jsonResponse({
+          orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10, step_timeout_seconds: 600 },
+          agent_routing: { default_role: 'general', task_type_roles: {}, role_provider_overrides: {} },
+          defaults: { quality_gate: { critical: 0, high: 0, medium: 0, low: 0 }, dependency_policy: 'prudent' },
+          workers: { default: 'codex', default_model: '', routing: {}, providers: { codex: { type: 'codex', command: 'codex exec' } } },
+          project: { commands: {}, prompt_overrides: {}, prompt_injections: {}, prompt_defaults: {} },
+        })
+      }
+      return jsonResponse({})
+    })
+    global.fetch = mockedFetch as unknown as typeof fetch
+
+    render(<App />)
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Refresh$/i })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Refresh$/i }))
+
+    await waitFor(() => {
+      expect(
+        mockedFetch.mock.calls.some(([url, init]) => {
+          if (!String(url).includes('/api/orchestrator/control')) return false
+          if ((init as RequestInit | undefined)?.method !== 'POST') return false
+          const body = JSON.parse(String((init as RequestInit).body || '{}'))
+          return body.action === 'reset'
+        }),
+      ).toBe(true)
+    })
+    await waitFor(() => {
+      expect(screen.getByText('Scheduler reattached.')).toBeInTheDocument()
+    })
+  })
 })

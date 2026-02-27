@@ -637,6 +637,9 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         archived_to = archive_state_root(container.project_dir)
         ensure_state_root(container.project_dir)
         deps.job_store.clear()
+        # Clearing state recreates config defaults; reattach the scheduler loop
+        # immediately so a subsequent queued task cannot get stranded.
+        orchestrator.ensure_worker()
         archive_path = str(archived_to) if archived_to else ""
         message = (
             f"Cleared all tasks. Archived previous runtime state to {archive_path}."
