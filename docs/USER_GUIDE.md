@@ -174,7 +174,7 @@ Routing behavior:
 Define explicit commands workers should run during implement/verify steps.
 
 ```yaml
-# .agent_orchestrator/config.yaml
+# Conceptual settings payload (persisted in `.agent_orchestrator/runtime.db`)
 project:
   commands:
     python:
@@ -264,15 +264,9 @@ curl -X PATCH http://localhost:8080/api/settings \
 ## Runtime Storage
 
 State root in each selected project:
-- `.agent_orchestrator/tasks.yaml`
-- `.agent_orchestrator/runs.yaml`
-- `.agent_orchestrator/review_cycles.yaml`
-- `.agent_orchestrator/agents.yaml`
-- `.agent_orchestrator/terminal_sessions.yaml`
-- `.agent_orchestrator/plan_revisions.yaml`
-- `.agent_orchestrator/plan_refine_jobs.yaml`
-- `.agent_orchestrator/events.jsonl`
-- `.agent_orchestrator/config.yaml`
+- `.agent_orchestrator/runtime.db` (canonical runtime state store)
+- `.agent_orchestrator/workdocs/<task_id>.md` (canonical task workdocs)
+- `.agent_orchestrator_archive/state_<timestamp>/` (archived snapshots from clear/reset operations)
 
 Legacy migration behavior:
 - incompatible old state is archived to `.agent_orchestrator_legacy_<timestamp>/`

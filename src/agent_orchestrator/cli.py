@@ -178,7 +178,7 @@ def build_parser() -> argparse.ArgumentParser:
     ostatus = orch_sub.add_parser('status', help='Show orchestrator status')
     ostatus.set_defaults(func=_orchestrator_status)
     ocontrol = orch_sub.add_parser('control', help='Control orchestrator')
-    ocontrol.add_argument('action', choices=['pause', 'resume', 'drain', 'stop'])
+    ocontrol.add_argument('action', choices=['pause', 'resume', 'drain', 'stop', 'reset', 'reconcile'])
     ocontrol.set_defaults(func=_orchestrator_control)
 
     return parser

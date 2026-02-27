@@ -831,6 +831,78 @@ def test_review_cap_preserves_branch(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 16b. Pre-commit review requires preserved task-scoped context
+# ---------------------------------------------------------------------------
+
+
+def test_precommit_review_blocks_when_context_preserve_fails(tmp_path: Path) -> None:
+    """Pre-commit pause must fail closed if task-scoped context cannot be preserved."""
+
+    class ReviewOnlyAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / "feature.py").write_text("# staged change\n")
+            if step == "review":
+                return StepResult(status="ok", findings=[])
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=ReviewOnlyAdapter())
+    service._preserve_worktree_work = lambda task, worktree_dir: False  # type: ignore[method-assign]
+
+    task = Task(
+        title="Fail preserve before pre-commit review",
+        task_type="feature",
+        status="queued",
+        hitl_mode="review_only",
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "blocked"
+    assert "Failed to preserve task-scoped changes for pre-commit review" in (result.error or "")
+    assert not result.metadata.get("pending_precommit_approval")
+    assert not result.metadata.get("preserved_branch")
+
+
+def test_precommit_review_requires_preserved_branch_context(tmp_path: Path) -> None:
+    """Pre-commit in_review tasks must carry preserved branch context for change review."""
+
+    class ReviewOnlyAdapter:
+        def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
+            wt = task.metadata.get("worktree_dir")
+            if wt and step == "implement":
+                (Path(wt) / "feature.py").write_text("# staged change\n")
+            if step == "review":
+                return StepResult(status="ok", findings=[])
+            return StepResult(status="ok")
+
+    container, service, _ = _service(tmp_path, adapter=ReviewOnlyAdapter())
+    task = Task(
+        title="Pre-commit context task",
+        task_type="feature",
+        status="queued",
+        hitl_mode="review_only",
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+    assert result.status == "in_review"
+    assert result.metadata.get("pending_precommit_approval") is True
+    preserved_branch = str(result.metadata.get("preserved_branch") or "").strip()
+    assert preserved_branch == f"task-{task.id}"
+    assert "worktree_dir" not in result.metadata
+    branches = subprocess.run(
+        ["git", "branch", "--list", preserved_branch],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert preserved_branch in branches
+
+
+# ---------------------------------------------------------------------------
 # 17. approve_and_merge merges preserved branch to run branch
 # ---------------------------------------------------------------------------
 

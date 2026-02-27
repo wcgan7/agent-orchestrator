@@ -511,8 +511,14 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             task.metadata["classifier_reason"] = classifier_reason
             task.metadata["was_user_override"] = bool(body.was_user_override)
         task.metadata["final_pipeline_id"] = final_pipeline_id
-        if body.status in ("backlog", "queued"):
-            task.status = cast(TaskStatus, body.status)
+        requested_status = str(body.status or "").strip()
+        valid_statuses = {"backlog", "queued", "in_progress", "in_review", "done", "blocked", "cancelled"}
+        if requested_status in valid_statuses:
+            task.status = cast(TaskStatus, requested_status)
+        elif not requested_status:
+            # Keep API create deterministic by default; callers can opt into
+            # immediate scheduler pickup by explicitly passing status=queued.
+            task.status = "backlog"
         if task.parent_id:
             parent = container.tasks.get(task.parent_id)
             if parent and task.id not in parent.children_ids:
@@ -637,9 +643,9 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         archived_to = archive_state_root(container.project_dir)
         ensure_state_root(container.project_dir)
         deps.job_store.clear()
-        # Clearing state recreates config defaults; reattach the scheduler loop
-        # immediately so a subsequent queued task cannot get stranded.
-        orchestrator.ensure_worker()
+        # Clearing state recreates config defaults; ensure queue intake returns
+        # to running mode so queued tasks cannot get stranded in paused mode.
+        orchestrator.control("resume")
         archive_path = str(archived_to) if archived_to else ""
         message = (
             f"Cleared all tasks. Archived previous runtime state to {archive_path}."
@@ -810,11 +816,13 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
 
         task_metadata = task.metadata if isinstance(task.metadata, dict) else {}
         worktree_dir = None
+        worktree_candidate_present = False
         if isinstance(task_metadata, dict):
             candidate = str(task_metadata.get("worktree_dir") or "").strip()
             if candidate:
+                worktree_candidate_present = True
                 worktree_dir = candidate
-        git_dir = container.project_dir
+        git_dir: Path | None = None
         project_root = container.project_dir
         has_task_worktree = False
         if worktree_dir:
@@ -831,70 +839,80 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 git_dir = worktree_path
                 has_task_worktree = True
 
-        try:
-            status_result = subprocess.run(
-                ["git", "status", "--short"],
-                cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
-            )
-            has_head = (
-                subprocess.run(
-                    ["git", "rev-parse", "--verify", "HEAD"],
-                    cwd=git_dir,
-                    capture_output=True,
-                    text=True,
-                    check=False,
-                    timeout=10,
-                ).returncode
-                == 0
-            )
-            stat_cmd = ["git", "diff", "--stat", "HEAD"] if has_head else ["git", "diff", "--stat"]
-            diff_cmd = ["git", "diff", "HEAD"] if has_head else ["git", "diff"]
-            stat_result = subprocess.run(
-                stat_cmd,
-                cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
-            )
-            diff_result = subprocess.run(
-                diff_cmd,
-                cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
-            )
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-            raise HTTPException(status_code=500, detail=f"Failed to read working-tree changes: {exc}") from exc
+        if has_task_worktree and git_dir is not None:
+            try:
+                status_result = subprocess.run(
+                    ["git", "status", "--short"],
+                    cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
+                )
+                has_head = (
+                    subprocess.run(
+                        ["git", "rev-parse", "--verify", "HEAD"],
+                        cwd=git_dir,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=10,
+                    ).returncode
+                    == 0
+                )
+                stat_cmd = ["git", "diff", "--stat", "HEAD"] if has_head else ["git", "diff", "--stat"]
+                diff_cmd = ["git", "diff", "HEAD"] if has_head else ["git", "diff"]
+                stat_result = subprocess.run(
+                    stat_cmd,
+                    cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
+                )
+                diff_result = subprocess.run(
+                    diff_cmd,
+                    cwd=git_dir, capture_output=True, text=True, check=True, timeout=10,
+                )
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+                raise HTTPException(status_code=500, detail=f"Failed to read working-tree changes: {exc}") from exc
 
-        raw_status_lines = [line.rstrip() for line in status_result.stdout.splitlines() if line.strip()]
-        status_entries: list[dict[str, str]] = []
-        for line in raw_status_lines:
-            code = line[:2].strip() or "??"
-            path_fragment = line[3:].strip() if len(line) > 3 else line.strip()
-            logical_paths = [path_fragment]
-            if " -> " in path_fragment:
-                logical_paths = [p.strip() for p in path_fragment.split(" -> ", 1)]
-            if logical_paths and all(_is_runtime_state_path(p) for p in logical_paths):
-                continue
-            status_entries.append({"code": code, "path": path_fragment})
-        status_lines = [f"{entry['code']} {entry['path']}".strip() for entry in status_entries]
+            raw_status_lines = [line.rstrip() for line in status_result.stdout.splitlines() if line.strip()]
+            status_entries: list[dict[str, str]] = []
+            for line in raw_status_lines:
+                code = line[:2].strip() or "??"
+                path_fragment = line[3:].strip() if len(line) > 3 else line.strip()
+                logical_paths = [path_fragment]
+                if " -> " in path_fragment:
+                    logical_paths = [p.strip() for p in path_fragment.split(" -> ", 1)]
+                if logical_paths and all(_is_runtime_state_path(p) for p in logical_paths):
+                    continue
+                status_entries.append({"code": code, "path": path_fragment})
+            status_lines = [f"{entry['code']} {entry['path']}".strip() for entry in status_entries]
 
-        files = [entry for entry in _parse_stat_files(stat_result.stdout) if not _is_runtime_state_path(entry.get("path", ""))]
-        if not files and status_entries:
-            parsed: list[dict[str, str]] = []
-            for entry in status_entries:
-                parsed.append({"path": entry["path"], "changes": entry["code"]})
-            files = parsed
+            files = [entry for entry in _parse_stat_files(stat_result.stdout) if not _is_runtime_state_path(entry.get("path", ""))]
+            if not files and status_entries:
+                parsed: list[dict[str, str]] = []
+                for entry in status_entries:
+                    parsed.append({"path": entry["path"], "changes": entry["code"]})
+                files = parsed
 
-        diff_text = diff_result.stdout or ""
-        if not files and not status_lines:
-            preserved_payload = _preserved_branch_changes(metadata=task_metadata, git_dir=container.project_dir)
-            if preserved_payload:
-                return preserved_payload
+            diff_text = diff_result.stdout or ""
+            if files or status_lines:
+                stat_text = stat_result.stdout or ("\n".join(status_lines) if status_lines else "")
+                return {
+                    "mode": "working_tree",
+                    "commit": None,
+                    "files": files,
+                    "diff": diff_text,
+                    "stat": stat_text,
+                }
+
+        preserved_payload = _preserved_branch_changes(metadata=task_metadata, git_dir=container.project_dir)
+        if preserved_payload:
+            return preserved_payload
+
+        if has_task_worktree:
             return {"mode": "none", "commit": None, "files": [], "diff": "", "stat": ""}
 
-        stat_text = stat_result.stdout or ("\n".join(status_lines) if status_lines else "")
-        return {
-            "mode": "working_tree",
-            "commit": None,
-            "files": files,
-            "diff": diff_text,
-            "stat": stat_text,
-        }
+        reason = "task_context_missing"
+        if worktree_candidate_present and not has_task_worktree:
+            reason = "invalid_worktree_context"
+        elif str(task_metadata.get("preserved_branch") or "").strip():
+            reason = "preserved_branch_missing"
+        return {"mode": "none", "reason": reason, "commit": None, "files": [], "diff": "", "stat": ""}
 
     @router.get("/tasks/{task_id}/logs")
     async def get_task_logs(
@@ -1158,6 +1176,31 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 status_code=400,
                 detail="Task status cannot be changed via PATCH. Use /transition, /retry, /cancel, or review actions.",
             )
+        if "metadata" in updates:
+            incoming_metadata = updates.get("metadata")
+            if not isinstance(incoming_metadata, dict):
+                raise HTTPException(status_code=400, detail="Task metadata must be an object.")
+            invalid_keys = [
+                str(key)
+                for key in incoming_metadata.keys()
+                if str(key) != "user" and not str(key).startswith("user.")
+            ]
+            if invalid_keys:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Only metadata.user.* keys are mutable via PATCH. "
+                        f"Unsupported keys: {', '.join(sorted(invalid_keys))}"
+                    ),
+                )
+            existing_metadata = task.metadata if isinstance(task.metadata, dict) else {}
+            merged_metadata = dict(existing_metadata)
+            for key in list(merged_metadata.keys()):
+                if str(key) == "user" or str(key).startswith("user."):
+                    merged_metadata.pop(key, None)
+            for key, value in incoming_metadata.items():
+                merged_metadata[str(key)] = value
+            updates["metadata"] = merged_metadata
         if "project_commands" in updates and not updates["project_commands"]:
             updates["project_commands"] = None
         for key, value in updates.items():

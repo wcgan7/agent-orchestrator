@@ -181,7 +181,7 @@ class ApproveGateRequest(BaseModel):
 
 class OrchestratorControlRequest(BaseModel):
     """Request body for runtime control actions such as pause/resume/stop."""
-    action: str
+    action: Literal["pause", "resume", "drain", "stop", "reset", "reconcile"]
 
 
 class OrchestratorSettingsRequest(BaseModel):
@@ -194,6 +194,11 @@ class OrchestratorSettingsRequest(BaseModel):
     gate_stale_minutes: int = Field(0, ge=0, le=10080)
     gate_max_wait_minutes: int = Field(0, ge=0, le=43200)
     gate_timeout_action: Literal["none", "block"] = "none"
+    reliability_mode: Literal["strict", "balanced", "availability"] = "strict"
+    reconcile_interval_seconds: int = Field(30, ge=1, le=3600)
+    lease_ttl_seconds: int = Field(120, ge=15, le=86400)
+    tick_stale_seconds: int = Field(15, ge=5, le=3600)
+    tick_failure_threshold: int = Field(5, ge=1, le=1000)
 
 
 class AgentRoutingSettingsRequest(BaseModel):
@@ -893,7 +898,13 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     prompt_overrides = _normalize_prompt_overrides(project_cfg.get("prompt_overrides"))
     prompt_injections = _normalize_prompt_injections(project_cfg.get("prompt_injections"))
     default_hitl_mode = normalize_hitl_mode(str(defaults.get("hitl_mode") or "autopilot"))
+    raw_storage_backend = str(cfg.get("storage_backend") or "sqlite").strip().lower()
+    storage_backend = raw_storage_backend if raw_storage_backend == "sqlite" else "sqlite"
     return {
+        "runtime": {
+            "schema_version": _coerce_int(cfg.get("schema_version"), 4, minimum=4),
+            "storage_backend": storage_backend,
+        },
         "orchestrator": {
             "concurrency": _coerce_int(orchestrator.get("concurrency"), 2, minimum=1, maximum=128),
             "auto_deps": _coerce_bool(orchestrator.get("auto_deps"), True),
@@ -914,6 +925,24 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
                 str(orchestrator.get("gate_timeout_action") or "none").strip().lower()
                 if str(orchestrator.get("gate_timeout_action") or "none").strip().lower() in {"none", "block"}
                 else "none"
+            ),
+            "reliability_mode": (
+                str(orchestrator.get("reliability_mode") or "strict").strip().lower()
+                if str(orchestrator.get("reliability_mode") or "strict").strip().lower()
+                in {"strict", "balanced", "availability"}
+                else "strict"
+            ),
+            "reconcile_interval_seconds": _coerce_int(
+                orchestrator.get("reconcile_interval_seconds"), 30, minimum=1, maximum=3600
+            ),
+            "lease_ttl_seconds": _coerce_int(
+                orchestrator.get("lease_ttl_seconds"), 120, minimum=15, maximum=86400
+            ),
+            "tick_stale_seconds": _coerce_int(
+                orchestrator.get("tick_stale_seconds"), 15, minimum=5, maximum=3600
+            ),
+            "tick_failure_threshold": _coerce_int(
+                orchestrator.get("tick_failure_threshold"), 5, minimum=1, maximum=1000
             ),
         },
         "agent_routing": {

@@ -483,7 +483,10 @@ Return orchestrator state (queue, in-progress, control mode, etc.).
 Control orchestrator state.
 
 Request:
-- `action`: `pause|resume|drain|stop`
+- `action`: `pause|resume|drain|stop|reset|reconcile`
+
+### `POST /api/orchestrator/reconcile`
+Run one explicit runtime reconciliation pass and return repair summary + status.
 
 ### `GET /api/metrics`
 Aggregated runtime metrics (API calls, wall time, queue depth, progress counters).

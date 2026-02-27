@@ -1,19 +1,74 @@
 from __future__ import annotations
 
+import json
+import sqlite3
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-import yaml
+import pytest
 
 from agent_orchestrator.server.api import create_app
 from agent_orchestrator.runtime.orchestrator import DefaultWorkerAdapter
-from agent_orchestrator.runtime.domain.models import RunRecord, Task, now_iso
+from agent_orchestrator.runtime.domain.models import (
+    AgentRecord,
+    PlanRefineJob,
+    PlanRevision,
+    ReviewCycle,
+    RunRecord,
+    Task,
+    TerminalSession,
+    now_iso,
+)
 from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 from agent_orchestrator.runtime.storage.bootstrap import ensure_state_root
 from agent_orchestrator.runtime.storage.container import Container
+from agent_orchestrator.runtime.storage.file_repos import (
+    FileAgentRepository,
+    FileConfigRepository,
+    FileEventRepository,
+    FilePlanRefineJobRepository,
+    FilePlanRevisionRepository,
+    FileReviewRepository,
+    FileRunRepository,
+    FileTaskRepository,
+    FileTerminalSessionRepository,
+)
+from agent_orchestrator.runtime.storage.sqlite_db import SQLiteDB
+
+
+def _patch_task_record(container: Container, task_id: str, fields: dict[str, object]) -> None:
+    with container.transaction() as conn:
+        row = conn.execute("SELECT payload FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        assert row is not None
+        payload = json.loads(str(row["payload"]))
+        assert isinstance(payload, dict)
+        payload.update(fields)
+        conn.execute(
+            """
+            UPDATE tasks
+            SET status = ?,
+                priority = ?,
+                retry_count = ?,
+                created_at = ?,
+                updated_at = ?,
+                pending_gate = ?,
+                payload = ?
+            WHERE id = ?
+            """,
+            (
+                str(payload.get("status") or "queued"),
+                str(payload.get("priority") or "P2"),
+                int(payload.get("retry_count") or 0),
+                str(payload.get("created_at") or now_iso()),
+                str(payload.get("updated_at") or now_iso()),
+                str(payload.get("pending_gate")) if payload.get("pending_gate") else None,
+                json.dumps(payload, separators=(",", ":"), sort_keys=False),
+                task_id,
+            ),
+        )
 
 
 class _ClassifierWorkerAdapter(DefaultWorkerAdapter):
@@ -88,9 +143,10 @@ def test_cutover_archives_legacy_state(tmp_path: Path) -> None:
     state_root = ensure_state_root(tmp_path)
 
     assert state_root == tmp_path / ".agent_orchestrator"
-    assert (state_root / "config.yaml").exists()
-    config = (state_root / "config.yaml").read_text(encoding="utf-8")
-    assert "schema_version: 3" in config
+    assert (state_root / "runtime.db").exists()
+    config = Container(tmp_path).config.load()
+    assert int(config.get("schema_version") or 0) == 4
+    assert str(config.get("storage_backend") or "") == "sqlite"
 
     archives = sorted(tmp_path.glob(".agent_orchestrator_legacy_*"))
     assert len(archives) == 1
@@ -109,15 +165,121 @@ def test_cutover_archives_any_non_runtime_state(tmp_path: Path) -> None:
     assert (archives[0] / "custom_legacy_blob.yaml").exists()
 
 
-def test_cutover_forces_schema_version_3(tmp_path: Path) -> None:
+def test_cutover_forces_schema_version_4(tmp_path: Path) -> None:
     state_root = tmp_path / ".agent_orchestrator"
     state_root.mkdir(parents=True)
     (state_root / "config.yaml").write_text("schema_version: 2\n", encoding="utf-8")
 
     ensure_state_root(tmp_path)
 
-    config_text = (tmp_path / ".agent_orchestrator" / "config.yaml").read_text(encoding="utf-8")
-    assert "schema_version: 3" in config_text
+    config = Container(tmp_path).config.load()
+    assert int(config.get("schema_version") or 0) == 4
+    assert str(config.get("storage_backend") or "") == "sqlite"
+
+
+def test_yaml_cutover_migrates_all_collections_with_parity(tmp_path: Path) -> None:
+    state_root = tmp_path / ".agent_orchestrator"
+    state_root.mkdir(parents=True)
+
+    task = Task(title="Legacy task", status="queued")
+    FileTaskRepository(state_root / "tasks.yaml", state_root / "tasks.lock").upsert(task)
+
+    run = RunRecord(task_id=task.id, status="done", started_at=now_iso(), finished_at=now_iso())
+    FileRunRepository(state_root / "runs.yaml", state_root / "runs.lock").upsert(run)
+
+    review = ReviewCycle(task_id=task.id, decision="approved")
+    FileReviewRepository(state_root / "review_cycles.yaml", state_root / "review_cycles.lock").append(review)
+
+    agent = AgentRecord(role="general", status="running")
+    FileAgentRepository(state_root / "agents.yaml", state_root / "agents.lock").upsert(agent)
+
+    session = TerminalSession(project_id=tmp_path.name, status="running", shell="zsh", cwd=str(tmp_path))
+    FileTerminalSessionRepository(
+        state_root / "terminal_sessions.yaml",
+        state_root / "terminal_sessions.lock",
+    ).upsert(session)
+
+    revision = PlanRevision(task_id=task.id, source="human_edit", content="Legacy plan", status="draft")
+    FilePlanRevisionRepository(
+        state_root / "plan_revisions.yaml",
+        state_root / "plan_revisions.lock",
+    ).upsert(revision)
+
+    refine_job = PlanRefineJob(task_id=task.id, base_revision_id=revision.id, feedback="Adjust scope")
+    FilePlanRefineJobRepository(
+        state_root / "plan_refine_jobs.yaml",
+        state_root / "plan_refine_jobs.lock",
+    ).upsert(refine_job)
+
+    FileConfigRepository(state_root / "config.yaml", state_root / "config.lock").save(
+        {"schema_version": 3, "defaults": {"hitl_mode": "autopilot"}}
+    )
+    event = FileEventRepository(state_root / "events.jsonl", state_root / "events.lock").append(
+        channel="tasks",
+        event_type="task.created",
+        entity_id=task.id,
+        payload={"title": task.title},
+        project_id=tmp_path.name,
+    )
+
+    ensure_state_root(tmp_path)
+
+    assert (state_root / "runtime.db").exists()
+    assert not (state_root / "tasks.yaml").exists()
+    assert not (state_root / "events.jsonl").exists()
+
+    container = Container(tmp_path)
+    assert {item.id for item in container.tasks.list()} == {task.id}
+    assert {item.id for item in container.runs.list()} == {run.id}
+    assert {item.id for item in container.reviews.list()} == {review.id}
+    assert {item.id for item in container.agents.list()} == {agent.id}
+    assert {item.id for item in container.terminal_sessions.list()} == {session.id}
+    assert {item.id for item in container.plan_revisions.list()} == {revision.id}
+    assert {item.id for item in container.plan_refine_jobs.list()} == {refine_job.id}
+    assert {evt["id"] for evt in container.events.list_recent(limit=10)} == {event["id"]}
+
+    config = container.config.load()
+    assert int(config.get("schema_version") or 0) == 4
+    assert str(config.get("storage_backend") or "") == "sqlite"
+
+
+def test_yaml_cutover_rolls_back_on_migration_failure(tmp_path: Path) -> None:
+    state_root = tmp_path / ".agent_orchestrator"
+    state_root.mkdir(parents=True)
+
+    FileTaskRepository(state_root / "tasks.yaml", state_root / "tasks.lock").upsert(Task(title="Rollback task"))
+    FileConfigRepository(state_root / "config.yaml", state_root / "config.lock").save({"schema_version": 3})
+
+    duplicate_event = {
+        "id": "evt-duplicate",
+        "ts": now_iso(),
+        "channel": "tasks",
+        "type": "task.created",
+        "entity_id": "task-dup",
+        "payload": {"x": 1},
+        "project_id": tmp_path.name,
+    }
+    events_path = state_root / "events.jsonl"
+    events_path.write_text(
+        json.dumps(duplicate_event) + "\n" + json.dumps(duplicate_event) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="Failed to migrate runtime state from YAML to SQLite"):
+        ensure_state_root(tmp_path)
+
+    assert (state_root / "tasks.yaml").exists()
+    assert (state_root / "events.jsonl").exists()
+    assert not (state_root / "runtime.db").exists()
+
+
+def test_ensure_state_root_fails_closed_on_sqlite_integrity_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise_integrity(self: SQLiteDB) -> None:
+        raise RuntimeError("corrupt")
+
+    monkeypatch.setattr(SQLiteDB, "verify_integrity", _raise_integrity)
+    with pytest.raises(RuntimeError, match="Runtime SQLite integrity check failed"):
+        ensure_state_root(tmp_path)
 
 
 def test_task_dependency_guard_blocks_ready_transition(tmp_path: Path) -> None:
@@ -155,6 +317,61 @@ def test_task_dependency_guard_blocks_ready_transition(tmp_path: Path) -> None:
         assert ok_transition.json()["task"]["status"] == "queued"
 
 
+def test_execution_leases_use_dedicated_sqlite_table(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Lease table task", "status": "queued"}).json()["task"]
+        status = client.get("/api/orchestrator/status")
+        assert status.status_code == 200
+
+        key = str(tmp_path.resolve())
+        container = app.state.containers[key]
+        orchestrator = app.state.orchestrators[key]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        orchestrator._acquire_execution_lease(task)
+        lease_row = container.db.fetch_one(
+            "SELECT task_id FROM execution_leases WHERE task_id = ?",
+            (task.id,),
+        )
+        assert lease_row is not None
+        assert "execution_lease" not in (task.metadata or {})
+        assert orchestrator._execution_lease_active(task) is True
+
+        removed = orchestrator._release_execution_lease(task)
+        assert removed is True
+        lease_row_after = container.db.fetch_one(
+            "SELECT task_id FROM execution_leases WHERE task_id = ?",
+            (task.id,),
+        )
+        assert lease_row_after is None
+
+
+def test_runtime_state_uses_dedicated_sqlite_table(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        status = client.get("/api/orchestrator/status")
+        assert status.status_code == 200
+
+        key = str(tmp_path.resolve())
+        container = app.state.containers[key]
+        orchestrator = app.state.orchestrators[key]
+
+        orchestrator._last_tick_at = now_iso()
+        orchestrator._consecutive_tick_failures = 2
+        orchestrator._persist_runtime_state(force=True)
+
+        config = container.config.load()
+        assert "orchestrator_state" not in config
+        row = container.db.fetch_one(
+            "SELECT value FROM orchestrator_state WHERE key = ?",
+            ("consecutive_tick_failures",),
+        )
+        assert row is not None
+        assert json.loads(str(row["value"])) == 2
+
+
 def test_patch_rejects_direct_status_changes(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
@@ -162,6 +379,32 @@ def test_patch_rejects_direct_status_changes(tmp_path: Path) -> None:
         response = client.patch(f"/api/tasks/{task['id']}", json={"status": "done"})
         assert response.status_code == 400
         assert "cannot be changed via PATCH" in response.text
+
+
+def test_patch_rejects_internal_metadata_keys(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Metadata guarded"}).json()["task"]
+        response = client.patch(
+            f"/api/tasks/{task['id']}",
+            json={"metadata": {"execution_checkpoint": {"gate": "before_implement"}}},
+        )
+        assert response.status_code == 400
+        assert "Only metadata.user.* keys are mutable via PATCH" in str(response.json().get("detail") or "")
+
+
+def test_patch_allows_user_metadata_namespace(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "User metadata patch"}).json()["task"]
+        response = client.patch(
+            f"/api/tasks/{task['id']}",
+            json={"metadata": {"user": {"owner": "ops"}, "user.note": "do not deploy on friday"}},
+        )
+        assert response.status_code == 200
+        metadata = response.json()["task"].get("metadata") or {}
+        assert metadata.get("user", {}).get("owner") == "ops"
+        assert metadata.get("user.note") == "do not deploy on friday"
 
 
 def test_review_actions_require_in_review_state(tmp_path: Path) -> None:
@@ -172,6 +415,31 @@ def test_review_actions_require_in_review_state(tmp_path: Path) -> None:
         assert approve.status_code == 400
         changes = client.post(f"/api/review/{task['id']}/request-changes", json={"guidance": "x"})
         assert changes.status_code == 400
+
+
+def test_manual_reconcile_repairs_invalid_queued_gate_state(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        pause = client.post("/api/orchestrator/control", json={"action": "pause"})
+        assert pause.status_code == 200
+        created = client.post("/api/tasks", json={"title": "Invalid queued gate", "status": "queued"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+        task.status = "queued"
+        task.pending_gate = "before_implement"
+        container.tasks.upsert(task)
+
+        resp = client.post("/api/orchestrator/reconcile")
+        assert resp.status_code == 200
+        body = resp.json()
+        summary = body.get("reconcile") or {}
+        assert int(summary.get("repairs") or 0) >= 1
+
+        updated = container.tasks.get(created["id"])
+        assert updated is not None
+        assert updated.status == "blocked"
+        assert updated.pending_gate is None
 
 
 def test_classify_pipeline_endpoint_high_confidence(tmp_path: Path) -> None:
@@ -285,10 +553,7 @@ def test_tasks_board_uses_status_aware_ordering(tmp_path: Path) -> None:
             "cancelled_old": client.post("/api/tasks", json={"title": "Cancelled old", "priority": "P1", "status": "backlog"}).json()["task"]["id"],
             "cancelled_new": client.post("/api/tasks", json={"title": "Cancelled new", "priority": "P1", "status": "backlog"}).json()["task"]["id"],
         }
-        tasks_path = tmp_path / ".agent_orchestrator" / "tasks.yaml"
-        payload = yaml.safe_load(tasks_path.read_text(encoding="utf-8")) or {}
-        records = payload.get("tasks") or []
-        by_id = {str(item.get("id")): item for item in records if isinstance(item, dict)}
+        container = app.state.containers[str(tmp_path.resolve())]
 
         for task_id, fields in {
             seeded["backlog_high"]: {
@@ -362,10 +627,7 @@ def test_tasks_board_uses_status_aware_ordering(tmp_path: Path) -> None:
                 "updated_at": "2026-01-03T00:00:00+00:00",
             },
         }.items():
-            assert task_id in by_id
-            by_id[task_id].update(fields)
-
-        tasks_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+            _patch_task_record(container, task_id, fields)
 
         board = client.get("/api/tasks/board")
         assert board.status_code == 200
@@ -398,10 +660,7 @@ def test_tasks_board_sorting_is_deterministic_for_ties_and_missing_timestamps(tm
         done_tie_ids = sorted([done_bad_a, done_bad_b])
         backlog_tie_ids = sorted([backlog_tie_a, backlog_tie_b])
 
-        tasks_path = tmp_path / ".agent_orchestrator" / "tasks.yaml"
-        payload = yaml.safe_load(tasks_path.read_text(encoding="utf-8")) or {}
-        records = payload.get("tasks") or []
-        by_id = {str(item.get("id")): item for item in records if isinstance(item, dict)}
+        container = app.state.containers[str(tmp_path.resolve())]
 
         for task_id, fields in {
             done_new: {
@@ -430,10 +689,7 @@ def test_tasks_board_sorting_is_deterministic_for_ties_and_missing_timestamps(tm
                 "updated_at": "2026-01-01T00:00:00+00:00",
             },
         }.items():
-            assert task_id in by_id
-            by_id[task_id].update(fields)
-
-        tasks_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+            _patch_task_record(container, task_id, fields)
 
         board = client.get("/api/tasks/board")
         assert board.status_code == 200
@@ -1493,8 +1749,12 @@ def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> N
         archived_path = Path(archived_to)
         assert archived_path.exists()
         assert archived_path.parent == tmp_path / ".agent_orchestrator_archive"
-        archived_tasks = (archived_path / "tasks.yaml").read_text(encoding="utf-8")
-        assert created["id"] in archived_tasks
+        archived_db = archived_path / "runtime.db"
+        assert archived_db.exists()
+        with sqlite3.connect(archived_db) as conn:
+            row = conn.execute("SELECT COUNT(*) FROM tasks WHERE id = ?", (created["id"],)).fetchone()
+            assert row is not None
+            assert int(row[0]) == 1
 
         board = client.get("/api/tasks/board")
         assert board.status_code == 200
@@ -1507,8 +1767,9 @@ def test_clear_tasks_archives_state_and_reinitializes_board(tmp_path: Path) -> N
         assert columns["done"] == []
         assert columns["cancelled"] == []
 
-        fresh_tasks = (tmp_path / ".agent_orchestrator" / "tasks.yaml").read_text(encoding="utf-8")
-        assert created["id"] not in fresh_tasks
+        fresh_container = Container(tmp_path)
+        assert fresh_container.tasks.get(created["id"]) is None
+        assert (tmp_path / ".agent_orchestrator" / "runtime.db").exists()
 
         status_resp = client.get("/api/orchestrator/status")
         assert status_resp.status_code == 200
@@ -1951,12 +2212,40 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
         assert latest_run.finished_at is not None
 
 
+def test_precommit_review_approve_rejects_missing_context(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        client.get("/api/tasks")
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = Task(
+            title="Missing precommit context",
+            status="in_review",
+            task_type="feature",
+            hitl_mode="review_only",
+            metadata={"pending_precommit_approval": True, "review_stage": "pre_commit"},
+        )
+        container.tasks.upsert(task)
+
+        resp = client.post(f"/api/review/{task.id}/approve", json={})
+        assert resp.status_code == 409
+        assert "Pre-commit context missing" in str(resp.json().get("detail") or "")
+
+
 def test_task_changes_endpoint_handles_unborn_head(tmp_path: Path) -> None:
     _git(["init"], tmp_path)
 
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
         task = client.post("/api/tasks", json={"title": "Unborn head changes"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        metadata = dict(stored.metadata or {})
+        metadata["worktree_dir"] = str(tmp_path)
+        stored.metadata = metadata
+        container.tasks.upsert(stored)
         (tmp_path / "new-file.txt").write_text("draft\n", encoding="utf-8")
 
         resp = client.get(f"/api/tasks/{task['id']}/changes")
@@ -2004,10 +2293,43 @@ def test_task_changes_endpoint_ignores_out_of_scope_worktree_dir(tmp_path: Path)
         resp = client.get(f"/api/tasks/{task['id']}/changes")
         assert resp.status_code == 200
         payload = resp.json()
-        assert payload["mode"] == "working_tree"
+        assert payload["mode"] == "none"
+        assert payload["reason"] == "invalid_worktree_context"
         assert payload["commit"] is None
-        assert any(item.get("path") == "tracked.txt" for item in payload["files"])
-        assert "+update" in payload["diff"]
+        assert payload["files"] == []
+        assert payload["diff"] == ""
+
+
+def test_task_changes_endpoint_does_not_fallback_to_repo_root_without_context(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        tmp_path,
+    )
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "No context"}).json()["task"]
+        (tmp_path / "tracked.txt").write_text("base\nunrelated root change\n", encoding="utf-8")
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "none"
+        assert payload["reason"] == "task_context_missing"
+        assert payload["commit"] is None
+        assert payload["files"] == []
+        assert payload["diff"] == ""
 
 
 def test_task_changes_endpoint_falls_back_when_commit_diff_errors(tmp_path: Path) -> None:
@@ -2033,6 +2355,9 @@ def test_task_changes_endpoint_falls_back_when_commit_diff_errors(tmp_path: Path
         container = app.state.containers[str(tmp_path.resolve())]
         stored = container.tasks.get(task["id"])
         assert stored is not None
+        metadata = dict(stored.metadata or {})
+        metadata["worktree_dir"] = str(tmp_path)
+        stored.metadata = metadata
 
         bad_run = RunRecord(
             task_id=stored.id,
@@ -2124,7 +2449,7 @@ def test_task_changes_endpoint_uses_preserved_branch_when_worktree_is_empty(tmp_
         assert "+branch change" in payload["diff"]
 
 
-def test_task_changes_endpoint_prefers_working_tree_over_preserved_branch(tmp_path: Path) -> None:
+def test_task_changes_endpoint_prefers_preserved_branch_without_task_worktree_context(tmp_path: Path) -> None:
     _git(["init"], tmp_path)
     (tmp_path / ".gitignore").write_text(
         ".agent_orchestrator/\n\n# Agent Orchestrator runtime data\n.agent_orchestrator_archive/\n.workdoc.md\n",
@@ -2173,7 +2498,7 @@ def test_task_changes_endpoint_prefers_working_tree_over_preserved_branch(tmp_pa
 
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
-        task = client.post("/api/tasks", json={"title": "Prefer working tree"}).json()["task"]
+        task = client.post("/api/tasks", json={"title": "Prefer preserved branch"}).json()["task"]
         container = app.state.containers[str(tmp_path.resolve())]
         stored = container.tasks.get(task["id"])
         assert stored is not None
@@ -2185,10 +2510,13 @@ def test_task_changes_endpoint_prefers_working_tree_over_preserved_branch(tmp_pa
         resp = client.get(f"/api/tasks/{task['id']}/changes")
         assert resp.status_code == 200
         payload = resp.json()
-        assert payload["mode"] == "working_tree"
+        assert payload["mode"] == "preserved_branch"
         assert payload["commit"] is None
+        assert payload["branch"] == preserved_branch
+        assert payload["base_branch"] == base_branch
         assert any(item.get("path") == "tracked.txt" for item in payload["files"])
-        assert "+working change" in payload["diff"]
+        assert "+branch change" in payload["diff"]
+        assert "+working change" not in payload["diff"]
 
 
 def test_task_execution_summary_prefers_terminal_run_for_done_task(tmp_path: Path) -> None:

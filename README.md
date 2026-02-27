@@ -156,16 +156,9 @@ agent-orchestrator project unpin <project_id>
 ## Configuration and Runtime Data
 
 Runtime state is stored in the selected project directory:
-- `.agent_orchestrator/tasks.yaml`
-- `.agent_orchestrator/runs.yaml`
-- `.agent_orchestrator/review_cycles.yaml`
-- `.agent_orchestrator/agents.yaml`
-- `.agent_orchestrator/terminal_sessions.yaml`
-- `.agent_orchestrator/plan_revisions.yaml`
-- `.agent_orchestrator/plan_refine_jobs.yaml`
-- `.agent_orchestrator/events.jsonl`
-- `.agent_orchestrator/config.yaml`
+- `.agent_orchestrator/runtime.db` (canonical runtime state store)
 - `.agent_orchestrator/workdocs/<task_id>.md` (canonical task workdocs synced with per-worktree `.workdoc.md`)
+- `.agent_orchestrator_archive/state_<timestamp>/` (archived runtime snapshots on clear)
 
 Execution metadata also records per-step log artifact locations (for example `stdout.log`, `stderr.log`, and `progress.json`) in task run details.
 

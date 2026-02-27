@@ -29,6 +29,7 @@ from ..events.bus import EventBus
 from ..storage.container import Container
 from ...worker import WorkerCancelledError
 from .dependency_manager import DependencyManager
+from .reconciler import OrchestratorReconciler
 from .live_worker_adapter import _VERIFY_STEPS
 from .plan_manager import PlanManager
 from .task_executor import TaskExecutor
@@ -91,6 +92,19 @@ class OrchestratorService:
         self._futures_lock = threading.Lock()
         self._merge_lock = threading.Lock()
         self._branch_lock = threading.Lock()
+        self._watchdog_thread: Optional[threading.Thread] = None
+        self._watchdog_stop = threading.Event()
+        self._last_tick_at: str | None = None
+        self._last_dispatch_at: str | None = None
+        self._last_tick_error: str | None = None
+        self._consecutive_tick_failures: int = 0
+        self._dispatch_blocked_reason: str | None = None
+        self._last_reconcile_at: str | None = None
+        self._last_reconcile_repairs: int = 0
+        self._last_reconcile_monotonic: float = 0.0
+        self._last_state_persist_monotonic: float = 0.0
+        self._manual_run_active: int = 0
+        self._reset_inflight: bool = False
         self._dependency_manager = DependencyManager(
             container,
             bus,
@@ -104,6 +118,58 @@ class OrchestratorService:
         self._plan_manager = PlanManager(self)
         self._worktree_manager = WorktreeManager(self)
         self._task_executor = TaskExecutor(self)
+        self._reconciler = OrchestratorReconciler(self)
+        self._load_runtime_state()
+
+    def _load_runtime_state(self) -> None:
+        """Hydrate scheduler/reconciler heartbeat state from persisted storage."""
+        state = self.container.db.load_orchestrator_state()
+        if not state:
+            # Backward compatibility: migrate legacy config blob into dedicated table once.
+            cfg = self.container.config.load()
+            raw = cfg.get("orchestrator_state")
+            if isinstance(raw, dict):
+                state = dict(raw)
+                self.container.db.save_orchestrator_state(state)
+                updater = getattr(self.container.config, "update", None)
+                if callable(updater):
+                    updater(lambda current: {k: v for k, v in current.items() if k != "orchestrator_state"})
+                else:
+                    cfg = dict(cfg)
+                    cfg.pop("orchestrator_state", None)
+                    self.container.config.save(cfg)
+        last_tick = str(state.get("last_tick_at") or "").strip()
+        last_dispatch = str(state.get("last_dispatch_at") or "").strip()
+        last_error = str(state.get("last_tick_error") or "").strip()
+        last_reconcile = str(state.get("last_reconcile_at") or "").strip()
+        self._last_tick_at = last_tick or None
+        self._last_dispatch_at = last_dispatch or None
+        self._last_tick_error = last_error or None
+        self._consecutive_tick_failures = self._coerce_nonnegative_int(
+            state.get("consecutive_tick_failures"), 0, maximum=1_000_000
+        )
+        self._dispatch_blocked_reason = str(state.get("dispatch_blocked_reason") or "").strip() or None
+        self._last_reconcile_at = last_reconcile or None
+        self._last_reconcile_repairs = self._coerce_nonnegative_int(
+            state.get("last_reconcile_repairs"), 0, maximum=1_000_000
+        )
+
+    def _persist_runtime_state(self, *, force: bool = False) -> None:
+        """Persist scheduler/reconciler heartbeat state to dedicated SQLite table."""
+        now_mono = time.monotonic()
+        if not force and (now_mono - self._last_state_persist_monotonic) < 10.0:
+            return
+        state_payload = {
+            "last_tick_at": self._last_tick_at,
+            "last_dispatch_at": self._last_dispatch_at,
+            "consecutive_tick_failures": int(self._consecutive_tick_failures),
+            "last_tick_error": self._last_tick_error,
+            "dispatch_blocked_reason": self._dispatch_blocked_reason,
+            "last_reconcile_at": self._last_reconcile_at,
+            "last_reconcile_repairs": int(self._last_reconcile_repairs),
+        }
+        self.container.db.save_orchestrator_state(state_payload)
+        self._last_state_persist_monotonic = now_mono
 
     @staticmethod
     def _execution_checkpoint(task: Task) -> dict[str, Any]:
@@ -236,6 +302,99 @@ class OrchestratorService:
             return maximum
         return parsed
 
+    def _reconcile_interval_seconds(self) -> int:
+        cfg = self.container.config.load()
+        orchestrator_cfg = dict(cfg.get("orchestrator") or {})
+        return self._coerce_nonnegative_int(
+            orchestrator_cfg.get("reconcile_interval_seconds"), 30, maximum=3600
+        )
+
+    def _tick_stale_seconds(self) -> int:
+        cfg = self.container.config.load()
+        orchestrator_cfg = dict(cfg.get("orchestrator") or {})
+        return self._coerce_nonnegative_int(orchestrator_cfg.get("tick_stale_seconds"), 15, maximum=3600)
+
+    def _tick_failure_threshold(self) -> int:
+        cfg = self.container.config.load()
+        orchestrator_cfg = dict(cfg.get("orchestrator") or {})
+        return max(1, self._coerce_nonnegative_int(orchestrator_cfg.get("tick_failure_threshold"), 5, maximum=1000))
+
+    def _lease_ttl_seconds(self) -> int:
+        cfg = self.container.config.load()
+        orchestrator_cfg = dict(cfg.get("orchestrator") or {})
+        return max(15, self._coerce_nonnegative_int(orchestrator_cfg.get("lease_ttl_seconds"), 120, maximum=86400))
+
+    def _acquire_execution_lease(self, task: Task) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        task.metadata.pop("execution_lease", None)
+        ttl = self._lease_ttl_seconds()
+        now_ts = now_iso()
+        expires_ts = datetime.now(timezone.utc).timestamp() + ttl
+        expires_at = datetime.fromtimestamp(expires_ts, tz=timezone.utc).isoformat()
+        lease = {
+            "owner": "orchestrator",
+            "acquired_at": now_ts,
+            "heartbeat_at": now_ts,
+            "expires_at": expires_at,
+            "ttl_seconds": ttl,
+        }
+        self.container.db.save_execution_lease(task.id, lease)
+
+    def _heartbeat_execution_lease(self, task: Task) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        task.metadata.pop("execution_lease", None)
+        raw = self.container.db.load_execution_lease(task.id)
+        lease = dict(raw) if isinstance(raw, dict) else {}
+        ttl = self._lease_ttl_seconds()
+        now_ts = now_iso()
+        expires_ts = datetime.now(timezone.utc).timestamp() + ttl
+        lease["owner"] = lease.get("owner") or "orchestrator"
+        lease["heartbeat_at"] = now_ts
+        lease["expires_at"] = datetime.fromtimestamp(expires_ts, tz=timezone.utc).isoformat()
+        lease["ttl_seconds"] = ttl
+        if not lease.get("acquired_at"):
+            lease["acquired_at"] = now_ts
+        self.container.db.save_execution_lease(task.id, lease)
+
+    def _release_execution_lease(self, task: Task) -> bool:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        legacy_removed = bool(task.metadata.pop("execution_lease", None))
+        lease_removed = self.container.db.delete_execution_lease(task.id)
+        return legacy_removed or lease_removed
+
+    def _execution_lease_active(self, task: Task, *, now_ts: float | None = None) -> bool:
+        raw = self.container.db.load_execution_lease(task.id)
+        if isinstance(raw, dict):
+            expires_epoch = self._parse_iso_epoch(raw.get("expires_at"))
+            if expires_epoch is not None:
+                return expires_epoch > (time.time() if now_ts is None else now_ts)
+
+        # Legacy fallback for upgraded tasks that still carry metadata lease.
+        if not isinstance(task.metadata, dict):
+            return False
+        legacy = task.metadata.get("execution_lease")
+        if not isinstance(legacy, dict):
+            return False
+        expires_epoch = self._parse_iso_epoch(legacy.get("expires_at"))
+        if expires_epoch is None:
+            return False
+        if expires_epoch > (time.time() if now_ts is None else now_ts):
+            self.container.db.save_execution_lease(task.id, dict(legacy))
+            task.metadata.pop("execution_lease", None)
+            return True
+        return False
+
+    def reconcile(self, *, source: Literal["startup", "automatic", "manual"] = "manual") -> dict[str, Any]:
+        """Apply runtime invariants and emit deterministic repair events."""
+        summary = self._reconciler.run_once(source=source)
+        self._last_reconcile_at = now_iso()
+        self._last_reconcile_repairs = int(summary.get("repairs") or 0)
+        self._persist_runtime_state(force=True)
+        return summary
+
     def _apply_gate_wait_policies(self, orchestrator_cfg: dict[str, Any]) -> None:
         reminder_minutes = self._coerce_nonnegative_int(
             orchestrator_cfg.get("gate_reminder_minutes"), 30, maximum=10080
@@ -353,11 +512,23 @@ class OrchestratorService:
         with self._futures_lock:
             active_workers = len(self._futures)
         orchestrator_status = str(orchestrator_cfg.get("status", "running") or "running")
-        scheduler_stale = bool(
+        tick_lag_seconds: int | None = None
+        if self._last_tick_at:
+            tick_epoch = self._parse_iso_epoch(self._last_tick_at)
+            if tick_epoch is not None:
+                tick_lag_seconds = max(0, int(time.time() - tick_epoch))
+        stale_by_tick = bool(
             orchestrator_status == "running"
-            and not scheduler_attached
+            and tick_lag_seconds is not None
+            and tick_lag_seconds > self._tick_stale_seconds()
             and (queue_depth > 0 or in_progress > 0)
         )
+        scheduler_stale = bool(
+            orchestrator_status == "running"
+            and (not scheduler_attached or stale_by_tick)
+            and (queue_depth > 0 or in_progress > 0)
+        )
+        dispatch_reason = self._dispatch_blocked_reason or ("scheduler_stale" if scheduler_stale else None)
         return {
             "status": orchestrator_status,
             "queue_depth": queue_depth,
@@ -367,6 +538,14 @@ class OrchestratorService:
             "run_branch": self._run_branch,
             "scheduler_attached": scheduler_attached,
             "scheduler_stale": scheduler_stale,
+            "last_tick_at": self._last_tick_at,
+            "last_dispatch_at": self._last_dispatch_at,
+            "tick_lag_seconds": tick_lag_seconds,
+            "consecutive_tick_failures": int(self._consecutive_tick_failures),
+            "last_tick_error": self._last_tick_error,
+            "dispatch_blocked_reason": dispatch_reason,
+            "last_reconcile_at": self._last_reconcile_at,
+            "reconcile_repairs": int(self._last_reconcile_repairs),
         }
 
     def control(self, action: str) -> dict[str, Any]:
@@ -381,6 +560,7 @@ class OrchestratorService:
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         ensure_worker = False
+        reset_worker = False
         if action == "pause":
             orchestrator_cfg["status"] = "paused"
         elif action == "resume":
@@ -395,16 +575,25 @@ class OrchestratorService:
             self._drain = False
             orchestrator_cfg["status"] = "stopped"
         elif action == "reset":
-            # Non-destructive scheduler reattach: keep lifecycle status as-is.
-            ensure_worker = True
+            # Non-destructive scheduler reset/reattach: keep lifecycle status as-is.
+            reset_worker = True
+        elif action == "reconcile":
+            summary = self.reconcile(source="manual")
+            payload = self.status()
+            payload["reconcile"] = summary
+            return payload
         else:
             raise ValueError(f"Unsupported control action: {action}")
         cfg["orchestrator"] = orchestrator_cfg
         self.container.config.save(cfg)
         self.bus.emit(channel="system", event_type="orchestrator.control", entity_id=self.container.project_id, payload={"action": action})
-        if ensure_worker:
+        if reset_worker:
+            self._reset_scheduler_thread(timeout=2.0)
+        elif ensure_worker:
             self.ensure_worker()
-        return self.status()
+        status_payload = self.status()
+        self._persist_runtime_state(force=True)
+        return status_payload
 
     def ensure_worker(self) -> None:
         """Start the background scheduling loop when not already running."""
@@ -413,9 +602,23 @@ class OrchestratorService:
                 return
             self._recover_in_progress_tasks()
             self._cleanup_orphaned_worktrees()
-            self._stop.clear()
-            self._thread = threading.Thread(target=self._loop, daemon=True, name="orchestrator")
+            try:
+                self.reconcile(source="startup")
+            except Exception:
+                logger.exception("Startup reconcile failed; scheduler will continue")
+            self._last_reconcile_monotonic = time.monotonic()
+            stop_token = threading.Event()
+            self._stop = stop_token
+            self._thread = threading.Thread(target=self._loop, args=(stop_token,), daemon=True, name="orchestrator")
             self._thread.start()
+            if not self._watchdog_thread or not self._watchdog_thread.is_alive():
+                self._watchdog_stop.clear()
+                self._watchdog_thread = threading.Thread(
+                    target=self._watchdog_loop,
+                    daemon=True,
+                    name="orchestrator-watchdog",
+                )
+                self._watchdog_thread.start()
 
     def shutdown(self, *, timeout: float = 10.0) -> None:
         """Stop the scheduler and wait for in-flight work up to ``timeout``.
@@ -426,9 +629,13 @@ class OrchestratorService:
         with self._lock:
             self._stop.set()
             thread = self._thread
+            self._watchdog_stop.set()
+            watchdog = self._watchdog_thread
 
         if thread and thread.is_alive():
             thread.join(timeout=max(timeout, 0.0))
+        if watchdog and watchdog.is_alive():
+            watchdog.join(timeout=max(timeout, 0.0))
 
         with self._futures_lock:
             inflight = list(self._futures.values())
@@ -444,6 +651,53 @@ class OrchestratorService:
         with self._futures_lock:
             self._futures.clear()
         self._thread = None
+        self._watchdog_thread = None
+        self._persist_runtime_state(force=True)
+
+    def _reset_scheduler_thread(self, *, timeout: float = 2.0) -> None:
+        """Reset scheduler thread even if the old thread is still alive/stalled."""
+        with self._lock:
+            old_thread = self._thread
+            self._stop.set()
+        if old_thread and old_thread.is_alive():
+            old_thread.join(timeout=max(timeout, 0.0))
+        with self._lock:
+            self._thread = None
+        self.ensure_worker()
+
+    def _trigger_async_reset(self, *, reason: str) -> None:
+        """Schedule one background reset attempt at a time."""
+        with self._lock:
+            if self._reset_inflight:
+                return
+            self._reset_inflight = True
+
+        def _runner() -> None:
+            try:
+                self._reset_scheduler_thread(timeout=2.0)
+            except Exception:
+                logger.exception("Asynchronous scheduler reset failed (%s)", reason)
+            finally:
+                with self._lock:
+                    self._reset_inflight = False
+
+        threading.Thread(target=_runner, daemon=True, name="orchestrator-reset").start()
+
+    def _watchdog_loop(self) -> None:
+        """Auto-reattach scheduler when status indicates stale attachment."""
+        while not self._watchdog_stop.wait(5.0):
+            try:
+                snapshot = self.status()
+            except Exception:
+                continue
+            if snapshot.get("status") != "running":
+                continue
+            if not snapshot.get("scheduler_stale"):
+                continue
+            try:
+                self._reset_scheduler_thread(timeout=2.0)
+            except Exception:
+                logger.exception("Watchdog reset attempt failed")
 
     def _recover_in_progress_tasks(self) -> None:
         tasks = self.container.tasks.list()
@@ -517,15 +771,49 @@ class OrchestratorService:
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
         if orchestrator_cfg.get("status", "running") != "running":
+            self._dispatch_blocked_reason = "paused"
+            return False
+        if self._manual_run_active > 0:
+            self._dispatch_blocked_reason = "manual_run"
             return False
 
         self._apply_gate_wait_policies(orchestrator_cfg)
         self._maybe_analyze_dependencies()
 
         max_in_progress = int(orchestrator_cfg.get("concurrency", 2) or 2)
+        tasks_snapshot = self.container.tasks.list()
+        queued_tasks = [task for task in tasks_snapshot if task.status == "queued"]
+        running_tasks = [task for task in tasks_snapshot if task.status == "in_progress" and not task.pending_gate]
         claimed = self.container.tasks.claim_next_runnable(max_in_progress=max_in_progress)
         if not claimed:
+            if len(running_tasks) >= max_in_progress and queued_tasks:
+                self._dispatch_blocked_reason = "concurrency_limit"
+            elif queued_tasks:
+                waiting_gate = [task for task in queued_tasks if task.pending_gate]
+                if waiting_gate:
+                    self._dispatch_blocked_reason = "waiting_gate"
+                else:
+                    by_id = {task.id: task for task in tasks_snapshot}
+                    terminal = {"done", "cancelled"}
+                    has_dep_block = False
+                    for task in queued_tasks:
+                        unresolved = [
+                            dep_id
+                            for dep_id in task.blocked_by
+                            if (by_id.get(dep_id) is None) or (by_id[dep_id].status not in terminal)
+                        ]
+                        if unresolved:
+                            has_dep_block = True
+                            break
+                    self._dispatch_blocked_reason = "blocked_by_dependencies" if has_dep_block else "no_runnable_queued_tasks"
+            else:
+                self._dispatch_blocked_reason = None
             return False
+        self._dispatch_blocked_reason = None
+        fresh_claimed = self.container.tasks.get(claimed.id) or claimed
+        self._acquire_execution_lease(fresh_claimed)
+        self.container.tasks.upsert(fresh_claimed)
+        claimed = fresh_claimed
 
         self.bus.emit(channel="queue", event_type="task.claimed", entity_id=claimed.id, payload={"status": claimed.status})
         future = self._get_pool(desired_workers=max_in_progress).submit(self._execute_task, claimed)
@@ -543,6 +831,7 @@ class OrchestratorService:
             Task: Result produced by this call.
         """
         wait_existing = False
+        manual_run_active = False
         existing_future: Future[Any] | None = None
         with self._lock:
             task = self.container.tasks.get(task_id)
@@ -578,23 +867,43 @@ class OrchestratorService:
                 if task.status != "in_progress":
                     task.status = "queued"
                     self.container.tasks.upsert(task)
+                self._manual_run_active += 1
+                manual_run_active = True
 
         if wait_existing:
-            if existing_future:
-                existing_future.result()
+            future_to_wait = existing_future
+            wait_deadline = time.monotonic() + 5.0
+            while future_to_wait is None and time.monotonic() < wait_deadline:
+                with self._futures_lock:
+                    future_to_wait = self._futures.get(task_id)
+                if future_to_wait is not None:
+                    break
+                observed = self.container.tasks.get(task_id)
+                if not observed:
+                    raise ValueError(f"Task disappeared during execution: {task_id}")
+                if observed.status != "in_progress":
+                    return observed
+                time.sleep(0.05)
+            if future_to_wait:
+                future_to_wait.result()
             updated = self.container.tasks.get(task_id)
             if not updated:
                 raise ValueError(f"Task disappeared during execution: {task_id}")
             return updated
 
-        future = self._get_pool().submit(self._execute_task, task)
-        with self._futures_lock:
-            self._futures[task_id] = future
+        future: Future[Any] | None = None
         try:
+            future = self._get_pool().submit(self._execute_task, task)
+            with self._futures_lock:
+                self._futures[task_id] = future
             future.result()
         finally:
-            with self._futures_lock:
-                self._futures.pop(task_id, None)
+            if future is not None:
+                with self._futures_lock:
+                    self._futures.pop(task_id, None)
+            if manual_run_active:
+                with self._lock:
+                    self._manual_run_active = max(0, self._manual_run_active - 1)
         updated = self.container.tasks.get(task_id)
         if not updated:
             raise ValueError(f"Task disappeared during execution: {task_id}")
@@ -796,19 +1105,50 @@ class OrchestratorService:
         """Build concise objective context for merge-conflict resolution."""
         return self._worktree_manager.format_task_objective_summary(task, max_chars=max_chars)
 
-    def _loop(self) -> None:
-        while not self._stop.is_set():
+    def _loop(self, stop_token: threading.Event | None = None) -> None:
+        token = stop_token or self._stop
+        while not token.is_set():
+            self._last_tick_at = now_iso()
             try:
                 handled = self.tick_once()
+                self._consecutive_tick_failures = 0
+                self._last_tick_error = None
+                if handled:
+                    self._last_dispatch_at = now_iso()
             except Exception:
                 handled = False
+                self._consecutive_tick_failures += 1
+                self._last_tick_error = "Scheduler tick failed"
                 logger.exception("Scheduler loop tick failed; loop will continue")
+                if self._consecutive_tick_failures >= self._tick_failure_threshold():
+                    self.bus.emit(
+                        channel="system",
+                        event_type="orchestrator.critical",
+                        entity_id=self.container.project_id,
+                        payload={
+                            "reason": "tick_failures_exceeded",
+                            "consecutive_tick_failures": self._consecutive_tick_failures,
+                        },
+                    )
+                    # Auto-reset scheduler attachment on repeated tick failures.
+                    self._consecutive_tick_failures = 0
+                    self._trigger_async_reset(reason="tick_failures_exceeded")
+                    break
             with self._futures_lock:
                 has_inflight = bool(self._futures)
             if self._drain and not handled and not has_inflight:
                 self.control("pause")
                 self._drain = False
                 break
+            now_mono = time.monotonic()
+            interval = self._reconcile_interval_seconds()
+            if interval > 0 and (now_mono - self._last_reconcile_monotonic) >= interval:
+                try:
+                    self.reconcile(source="automatic")
+                except Exception:
+                    logger.exception("Automatic reconciler run failed")
+                self._last_reconcile_monotonic = now_mono
+            self._persist_runtime_state()
             time.sleep(1 if handled else 2)
 
     def _create_worktree(self, task: Task) -> Optional[Path]:
@@ -1265,6 +1605,8 @@ class OrchestratorService:
         attempt: int = 1,
         workdoc_attempt: int | None = None,
     ) -> bool:
+        self._heartbeat_execution_lease(task)
+        self.container.tasks.upsert(task)
         try:
             if self._validate_task_workdoc(task) is None:
                 self._block_for_missing_workdoc(task, run, step=step)
@@ -1371,6 +1713,8 @@ class OrchestratorService:
                 return True
             self._create_child_tasks(task, generated)
 
+        self._heartbeat_execution_lease(task)
+        self.container.tasks.upsert(task)
         return True
 
     def _create_child_tasks(
@@ -1481,6 +1825,7 @@ class OrchestratorService:
         task.pending_gate = gate_name
         task.status = "in_progress"
         task.current_agent_id = None
+        self._release_execution_lease(task)
         self._mark_gate_waiting(task, gate_name, resume_step=resume_step)
         task.updated_at = now_iso()
         self.container.tasks.upsert(task)

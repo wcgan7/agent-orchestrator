@@ -114,12 +114,20 @@ def create_app(
             A payload containing service metadata and project identity fields.
         """
         container = _resolve_container(project_dir)
+        cfg = container.config.load()
+        schema_version = cfg.get("schema_version")
+        try:
+            schema = int(schema_version) if schema_version is not None else 4
+        except (TypeError, ValueError):
+            schema = 4
+        storage_backend = str(cfg.get("storage_backend") or "sqlite")
         return {
             "name": "Agent Orchestrator",
             "version": "3.0.0",
             "project": str(container.project_dir),
             "project_id": container.project_id,
-            "schema_version": 3,
+            "schema_version": schema,
+            "storage_backend": storage_backend,
         }
 
     @app.get("/healthz")

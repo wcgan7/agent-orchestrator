@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import subprocess
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -160,26 +162,87 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         is_precommit_review = bool(task.metadata.get("pending_precommit_approval"))
 
         if is_precommit_review:
+            if (container.project_dir / ".git").exists():
+                preserved_branch = str(task.metadata.get("preserved_branch") or "").strip()
+                if not preserved_branch:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Pre-commit context missing; request changes to regenerate implementation context.",
+                    )
+                try:
+                    has_preserved_branch = (
+                        subprocess.run(
+                            ["git", "rev-parse", "--verify", f"refs/heads/{preserved_branch}"],
+                            cwd=container.project_dir,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            timeout=10,
+                        ).returncode
+                        == 0
+                    )
+                except Exception:
+                    has_preserved_branch = False
+                if not has_preserved_branch:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Pre-commit context missing; request changes to regenerate implementation context.",
+                    )
+                review_context = task.metadata.get("review_context") if isinstance(task.metadata, dict) else None
+                if not isinstance(review_context, dict):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Pre-commit context missing; request changes to regenerate implementation context.",
+                    )
+                context_branch = str(review_context.get("preserved_branch") or "").strip()
+                if context_branch != preserved_branch:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Pre-commit context missing; request changes to regenerate implementation context.",
+                    )
+                base_branch = str(review_context.get("base_branch") or "").strip() or "HEAD"
+                expected_fingerprint = str(review_context.get("diff_fingerprint") or "").strip()
+                try:
+                    diff_result = subprocess.run(
+                        ["git", "diff", "--binary", "--no-color", f"{base_branch}..{preserved_branch}"],
+                        cwd=container.project_dir,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=30,
+                    )
+                    actual_fingerprint = hashlib.sha256(
+                        (diff_result.stdout or "").encode("utf-8", errors="replace")
+                    ).hexdigest() if diff_result.returncode == 0 else ""
+                except Exception:
+                    actual_fingerprint = ""
+                if not expected_fingerprint or not actual_fingerprint or expected_fingerprint != actual_fingerprint:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="Pre-commit context missing; request changes to regenerate implementation context.",
+                    )
             ts = now_iso()
             task.status = "queued"
             task.error = None
             task.metadata.pop("pending_precommit_approval", None)
             task.metadata.pop("review_stage", None)
+            task.metadata.pop("review_context", None)
             task.metadata["retry_from_step"] = "commit"
             task.metadata["last_review_approval"] = {"ts": ts, "guidance": body.guidance}
             precommit_history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
             precommit_history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
-            latest_run = None
-            for run_id in reversed(task.run_ids):
-                latest_run = container.runs.get(run_id)
-                if latest_run:
-                    break
-            if latest_run and latest_run.status in {"in_review", "in_progress", "waiting_gate"}:
-                latest_run.status = "interrupted"
-                latest_run.finished_at = latest_run.finished_at or ts
-                latest_run.summary = latest_run.summary or "Approved pre-commit; queued to run commit"
-                container.runs.upsert(latest_run)
-            container.tasks.upsert(task)
+            with container.transaction():
+                latest_run = None
+                for run_id in reversed(task.run_ids):
+                    latest_run = container.runs.get(run_id)
+                    if latest_run:
+                        break
+                if latest_run and latest_run.status in {"in_review", "in_progress", "waiting_gate"}:
+                    latest_run.status = "interrupted"
+                    latest_run.finished_at = latest_run.finished_at or ts
+                    latest_run.summary = latest_run.summary or "Approved pre-commit; queued to run commit"
+                    container.runs.upsert(latest_run)
+                container.tasks.upsert(task)
             bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={"stage": "pre_commit", "guidance": body.guidance or ""})
             return {"task": _task_payload(task, container)}
 
@@ -200,19 +263,20 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         review_history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
         review_history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
 
-        latest_run = None
-        for run_id in reversed(task.run_ids):
-            latest_run = container.runs.get(run_id)
-            if latest_run:
-                break
-        if latest_run and (latest_run.status != "done" or not latest_run.finished_at):
-            latest_run.status = "done"
-            latest_run.finished_at = latest_run.finished_at or ts
-            if not latest_run.summary:
-                latest_run.summary = "Completed after human approval"
-            container.runs.upsert(latest_run)
+        with container.transaction():
+            latest_run = None
+            for run_id in reversed(task.run_ids):
+                latest_run = container.runs.get(run_id)
+                if latest_run:
+                    break
+            if latest_run and (latest_run.status != "done" or not latest_run.finished_at):
+                latest_run.status = "done"
+                latest_run.finished_at = latest_run.finished_at or ts
+                if not latest_run.summary:
+                    latest_run.summary = "Completed after human approval"
+                container.runs.upsert(latest_run)
 
-        container.tasks.upsert(task)
+            container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={"guidance": body.guidance or ""})
         return {"task": _task_payload(task, container)}
 
@@ -242,6 +306,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         ts = now_iso()
         task.metadata.pop("pending_precommit_approval", None)
         task.metadata.pop("review_stage", None)
+        task.metadata.pop("review_context", None)
         guidance = str(body.guidance or "").strip()
         task.metadata["requested_changes"] = {"ts": ts, "guidance": guidance}
         task.metadata["retry_from_step"] = "implement"
@@ -258,17 +323,18 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             clear_active_human_guidance(task, cleared_at=ts)
         history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
         history.append({"action": "request_changes", "ts": ts, "guidance": guidance})
-        latest_run = None
-        for run_id in reversed(task.run_ids):
-            latest_run = container.runs.get(run_id)
-            if latest_run:
-                break
-        if latest_run and latest_run.status in {"in_review", "in_progress", "waiting_gate"}:
-            latest_run.status = "interrupted"
-            latest_run.finished_at = latest_run.finished_at or ts
-            latest_run.summary = latest_run.summary or "Changes requested before commit"
-            container.runs.upsert(latest_run)
-        container.tasks.upsert(task)
+        with container.transaction():
+            latest_run = None
+            for run_id in reversed(task.run_ids):
+                latest_run = container.runs.get(run_id)
+                if latest_run:
+                    break
+            if latest_run and latest_run.status in {"in_review", "in_progress", "waiting_gate"}:
+                latest_run.status = "interrupted"
+                latest_run.finished_at = latest_run.finished_at or ts
+                latest_run.summary = latest_run.summary or "Changes requested before commit"
+                container.runs.upsert(latest_run)
+            container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.changes_requested", entity_id=task.id, payload={"guidance": guidance})
         return {"task": _task_payload(task, container)}
 
@@ -298,6 +364,15 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         """
         _, _, orchestrator = deps.ctx(project_dir)
         return orchestrator.control(body.action)
+
+    @router.post("/orchestrator/reconcile")
+    async def orchestrator_reconcile(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Run one manual runtime reconciliation pass and return summary + status."""
+        _, _, orchestrator = deps.ctx(project_dir)
+        summary = orchestrator.reconcile(source="manual")
+        payload = orchestrator.status()
+        payload["reconcile"] = summary
+        return payload
 
     @router.get("/settings")
     async def get_settings(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
