@@ -898,7 +898,13 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     prompt_overrides = _normalize_prompt_overrides(project_cfg.get("prompt_overrides"))
     prompt_injections = _normalize_prompt_injections(project_cfg.get("prompt_injections"))
     default_hitl_mode = normalize_hitl_mode(str(defaults.get("hitl_mode") or "autopilot"))
+    raw_storage_backend = str(cfg.get("storage_backend") or "sqlite").strip().lower()
+    storage_backend = raw_storage_backend if raw_storage_backend == "sqlite" else "sqlite"
     return {
+        "runtime": {
+            "schema_version": _coerce_int(cfg.get("schema_version"), 4, minimum=4),
+            "storage_backend": storage_backend,
+        },
         "orchestrator": {
             "concurrency": _coerce_int(orchestrator.get("concurrency"), 2, minimum=1, maximum=128),
             "auto_deps": _coerce_bool(orchestrator.get("auto_deps"), True),

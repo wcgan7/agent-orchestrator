@@ -231,17 +231,18 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             task.metadata["last_review_approval"] = {"ts": ts, "guidance": body.guidance}
             precommit_history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
             precommit_history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
-            latest_run = None
-            for run_id in reversed(task.run_ids):
-                latest_run = container.runs.get(run_id)
-                if latest_run:
-                    break
-            if latest_run and latest_run.status in {"in_review", "in_progress", "waiting_gate"}:
-                latest_run.status = "interrupted"
-                latest_run.finished_at = latest_run.finished_at or ts
-                latest_run.summary = latest_run.summary or "Approved pre-commit; queued to run commit"
-                container.runs.upsert(latest_run)
-            container.tasks.upsert(task)
+            with container.transaction():
+                latest_run = None
+                for run_id in reversed(task.run_ids):
+                    latest_run = container.runs.get(run_id)
+                    if latest_run:
+                        break
+                if latest_run and latest_run.status in {"in_review", "in_progress", "waiting_gate"}:
+                    latest_run.status = "interrupted"
+                    latest_run.finished_at = latest_run.finished_at or ts
+                    latest_run.summary = latest_run.summary or "Approved pre-commit; queued to run commit"
+                    container.runs.upsert(latest_run)
+                container.tasks.upsert(task)
             bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={"stage": "pre_commit", "guidance": body.guidance or ""})
             return {"task": _task_payload(task, container)}
 
@@ -262,19 +263,20 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         review_history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
         review_history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
 
-        latest_run = None
-        for run_id in reversed(task.run_ids):
-            latest_run = container.runs.get(run_id)
-            if latest_run:
-                break
-        if latest_run and (latest_run.status != "done" or not latest_run.finished_at):
-            latest_run.status = "done"
-            latest_run.finished_at = latest_run.finished_at or ts
-            if not latest_run.summary:
-                latest_run.summary = "Completed after human approval"
-            container.runs.upsert(latest_run)
+        with container.transaction():
+            latest_run = None
+            for run_id in reversed(task.run_ids):
+                latest_run = container.runs.get(run_id)
+                if latest_run:
+                    break
+            if latest_run and (latest_run.status != "done" or not latest_run.finished_at):
+                latest_run.status = "done"
+                latest_run.finished_at = latest_run.finished_at or ts
+                if not latest_run.summary:
+                    latest_run.summary = "Completed after human approval"
+                container.runs.upsert(latest_run)
 
-        container.tasks.upsert(task)
+            container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.approved", entity_id=task.id, payload={"guidance": body.guidance or ""})
         return {"task": _task_payload(task, container)}
 
@@ -321,17 +323,18 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             clear_active_human_guidance(task, cleared_at=ts)
         history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
         history.append({"action": "request_changes", "ts": ts, "guidance": guidance})
-        latest_run = None
-        for run_id in reversed(task.run_ids):
-            latest_run = container.runs.get(run_id)
-            if latest_run:
-                break
-        if latest_run and latest_run.status in {"in_review", "in_progress", "waiting_gate"}:
-            latest_run.status = "interrupted"
-            latest_run.finished_at = latest_run.finished_at or ts
-            latest_run.summary = latest_run.summary or "Changes requested before commit"
-            container.runs.upsert(latest_run)
-        container.tasks.upsert(task)
+        with container.transaction():
+            latest_run = None
+            for run_id in reversed(task.run_ids):
+                latest_run = container.runs.get(run_id)
+                if latest_run:
+                    break
+            if latest_run and latest_run.status in {"in_review", "in_progress", "waiting_gate"}:
+                latest_run.status = "interrupted"
+                latest_run.finished_at = latest_run.finished_at or ts
+                latest_run.summary = latest_run.summary or "Changes requested before commit"
+                container.runs.upsert(latest_run)
+            container.tasks.upsert(task)
         bus.emit(channel="review", event_type="task.changes_requested", entity_id=task.id, payload={"guidance": guidance})
         return {"task": _task_payload(task, container)}
 

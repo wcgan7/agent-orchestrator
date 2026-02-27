@@ -122,10 +122,22 @@ class OrchestratorService:
         self._load_runtime_state()
 
     def _load_runtime_state(self) -> None:
-        """Hydrate scheduler/reconciler heartbeat state from persisted config."""
-        cfg = self.container.config.load()
-        raw = cfg.get("orchestrator_state")
-        state = dict(raw) if isinstance(raw, dict) else {}
+        """Hydrate scheduler/reconciler heartbeat state from persisted storage."""
+        state = self.container.db.load_orchestrator_state()
+        if not state:
+            # Backward compatibility: migrate legacy config blob into dedicated table once.
+            cfg = self.container.config.load()
+            raw = cfg.get("orchestrator_state")
+            if isinstance(raw, dict):
+                state = dict(raw)
+                self.container.db.save_orchestrator_state(state)
+                updater = getattr(self.container.config, "update", None)
+                if callable(updater):
+                    updater(lambda current: {k: v for k, v in current.items() if k != "orchestrator_state"})
+                else:
+                    cfg = dict(cfg)
+                    cfg.pop("orchestrator_state", None)
+                    self.container.config.save(cfg)
         last_tick = str(state.get("last_tick_at") or "").strip()
         last_dispatch = str(state.get("last_dispatch_at") or "").strip()
         last_error = str(state.get("last_tick_error") or "").strip()
@@ -143,7 +155,7 @@ class OrchestratorService:
         )
 
     def _persist_runtime_state(self, *, force: bool = False) -> None:
-        """Persist scheduler/reconciler heartbeat state to config."""
+        """Persist scheduler/reconciler heartbeat state to dedicated SQLite table."""
         now_mono = time.monotonic()
         if not force and (now_mono - self._last_state_persist_monotonic) < 10.0:
             return
@@ -156,13 +168,7 @@ class OrchestratorService:
             "last_reconcile_at": self._last_reconcile_at,
             "last_reconcile_repairs": int(self._last_reconcile_repairs),
         }
-        updater = getattr(self.container.config, "update", None)
-        if callable(updater):
-            updater(lambda cfg: {**cfg, "orchestrator_state": state_payload})
-        else:
-            cfg = self.container.config.load()
-            cfg["orchestrator_state"] = state_payload
-            self.container.config.save(cfg)
+        self.container.db.save_orchestrator_state(state_payload)
         self._last_state_persist_monotonic = now_mono
 
     @staticmethod
@@ -321,22 +327,25 @@ class OrchestratorService:
     def _acquire_execution_lease(self, task: Task) -> None:
         if not isinstance(task.metadata, dict):
             task.metadata = {}
+        task.metadata.pop("execution_lease", None)
         ttl = self._lease_ttl_seconds()
         now_ts = now_iso()
         expires_ts = datetime.now(timezone.utc).timestamp() + ttl
         expires_at = datetime.fromtimestamp(expires_ts, tz=timezone.utc).isoformat()
-        task.metadata["execution_lease"] = {
+        lease = {
             "owner": "orchestrator",
             "acquired_at": now_ts,
             "heartbeat_at": now_ts,
             "expires_at": expires_at,
             "ttl_seconds": ttl,
         }
+        self.container.db.save_execution_lease(task.id, lease)
 
     def _heartbeat_execution_lease(self, task: Task) -> None:
         if not isinstance(task.metadata, dict):
             task.metadata = {}
-        raw = task.metadata.get("execution_lease")
+        task.metadata.pop("execution_lease", None)
+        raw = self.container.db.load_execution_lease(task.id)
         lease = dict(raw) if isinstance(raw, dict) else {}
         ttl = self._lease_ttl_seconds()
         now_ts = now_iso()
@@ -347,24 +356,36 @@ class OrchestratorService:
         lease["ttl_seconds"] = ttl
         if not lease.get("acquired_at"):
             lease["acquired_at"] = now_ts
-        task.metadata["execution_lease"] = lease
+        self.container.db.save_execution_lease(task.id, lease)
 
     def _release_execution_lease(self, task: Task) -> bool:
         if not isinstance(task.metadata, dict):
             task.metadata = {}
-        return bool(task.metadata.pop("execution_lease", None))
+        legacy_removed = bool(task.metadata.pop("execution_lease", None))
+        lease_removed = self.container.db.delete_execution_lease(task.id)
+        return legacy_removed or lease_removed
 
     def _execution_lease_active(self, task: Task, *, now_ts: float | None = None) -> bool:
+        raw = self.container.db.load_execution_lease(task.id)
+        if isinstance(raw, dict):
+            expires_epoch = self._parse_iso_epoch(raw.get("expires_at"))
+            if expires_epoch is not None:
+                return expires_epoch > (time.time() if now_ts is None else now_ts)
+
+        # Legacy fallback for upgraded tasks that still carry metadata lease.
         if not isinstance(task.metadata, dict):
             return False
-        raw = task.metadata.get("execution_lease")
-        if not isinstance(raw, dict):
+        legacy = task.metadata.get("execution_lease")
+        if not isinstance(legacy, dict):
             return False
-        expires_at = raw.get("expires_at")
-        expires_epoch = self._parse_iso_epoch(expires_at)
+        expires_epoch = self._parse_iso_epoch(legacy.get("expires_at"))
         if expires_epoch is None:
             return False
-        return expires_epoch > (time.time() if now_ts is None else now_ts)
+        if expires_epoch > (time.time() if now_ts is None else now_ts):
+            self.container.db.save_execution_lease(task.id, dict(legacy))
+            task.metadata.pop("execution_lease", None)
+            return True
+        return False
 
     def reconcile(self, *, source: Literal["startup", "automatic", "manual"] = "manual") -> dict[str, Any]:
         """Apply runtime invariants and emit deterministic repair events."""
