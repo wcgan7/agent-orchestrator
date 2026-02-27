@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, cast
 import uuid
 
 from fastapi import APIRouter, HTTPException, Query
 
-from ..domain.models import Task, now_iso
+from ..domain.models import Priority, Task, now_iso
 from ..storage.container import Container
 from .deps import RouteDeps
 from . import router_impl as impl
@@ -136,11 +136,14 @@ def register_import_routes(router: APIRouter, deps: RouteDeps) -> None:
             for item in generated_tasks:
                 if not isinstance(item, dict):
                     continue
+                raw_priority = str(item.get("priority") or "P2")
+                if raw_priority not in {"P0", "P1", "P2", "P3"}:
+                    raw_priority = "P2"
                 child = Task(
                     title=str(item.get("title") or "Imported PRD task"),
                     description=str(item.get("description") or ""),
                     task_type=str(item.get("task_type") or "feature"),
-                    priority=str(item.get("priority") or "P2"),
+                    priority=cast(Priority, raw_priority),
                     parent_id=prd_parent.id,
                     source="generated",
                     labels=list(item.get("labels") or []),
@@ -168,11 +171,11 @@ def register_import_routes(router: APIRouter, deps: RouteDeps) -> None:
                 container.tasks.upsert(parent)
         _apply_generated_dep_links(container, created)
         for child_id in created:
-            child = container.tasks.get(child_id)
-            if not child:
+            existing_child = container.tasks.get(child_id)
+            if not existing_child:
                 continue
-            child.source = "prd_import"
-            container.tasks.upsert(child)
+            existing_child.source = "prd_import"
+            container.tasks.upsert(existing_child)
 
         job["status"] = "committed"
         job["created_task_ids"] = created

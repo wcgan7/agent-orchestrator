@@ -637,8 +637,11 @@ def _task_payload(task: Task, container: Optional["Container"] = None) -> dict[s
         for key in ("implement", "implement_fix"):
             if key not in raw_step_timeouts:
                 continue
+            raw_candidate = raw_step_timeouts.get(key)
+            if raw_candidate is None:
+                continue
             try:
-                candidate = int(raw_step_timeouts.get(key))
+                candidate = int(raw_candidate)
             except (TypeError, ValueError):
                 continue
             if candidate > 0:

@@ -980,8 +980,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 if requested_run_id and str(item.get("run_id") or "") != requested_run_id:
                     continue
                 selected_run_id = str(item.get("run_id") or "") or None
-                entry = item.get("entry")
-                step_logs_meta = entry if isinstance(entry, dict) else None
+                history_entry = item.get("entry")
+                step_logs_meta = history_entry if isinstance(history_entry, dict) else None
                 if step_logs_meta:
                     break
 

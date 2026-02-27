@@ -163,8 +163,8 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             task.metadata.pop("review_stage", None)
             task.metadata["retry_from_step"] = "commit"
             task.metadata["last_review_approval"] = {"ts": ts, "guidance": body.guidance}
-            history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
-            history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
+            precommit_history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
+            precommit_history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
             latest_run = None
             for run_id in reversed(task.run_ids):
                 latest_run = container.runs.get(run_id)
@@ -193,8 +193,8 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.error = None
         ts = now_iso()
         task.metadata["last_review_approval"] = {"ts": ts, "guidance": body.guidance}
-        history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
-        history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
+        review_history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
+        review_history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
 
         latest_run = None
         for run_id in reversed(task.run_ids):
