@@ -1854,6 +1854,11 @@ def test_retry_run_task_started_event_includes_retry_metadata(tmp_path: Path) ->
             json={"guidance": "Continue from verify", "start_from_step": "verify"},
         )
         assert retry_resp.status_code == 200
+        retry_metadata = retry_resp.json()["task"].get("metadata") or {}
+        active_guidance = retry_metadata.get("active_human_guidance") or {}
+        assert active_guidance.get("source") == "retry"
+        assert active_guidance.get("target_step") == "verify"
+        assert active_guidance.get("guidance") == "Continue from verify"
 
         second = client.post(f"/api/tasks/{task_id}/run")
         assert second.status_code == 200
@@ -1907,6 +1912,12 @@ def test_review_queue_request_changes_and_approve(tmp_path: Path) -> None:
         container = app.state.containers[str(tmp_path.resolve())]
         task_after_changes = container.tasks.get(task["id"])
         assert task_after_changes is not None
+        active_guidance = task_after_changes.metadata.get("active_human_guidance")
+        assert isinstance(active_guidance, dict)
+        assert active_guidance.get("source") == "review_request_changes"
+        assert active_guidance.get("target_step") == "implement"
+        assert active_guidance.get("fallback_step") == "implement_fix"
+        assert active_guidance.get("guidance") == "Please adjust tests"
         run_after_changes = container.runs.get(task_after_changes.run_ids[-1]) if task_after_changes.run_ids else None
         assert run_after_changes is not None
         assert run_after_changes.status == "interrupted"

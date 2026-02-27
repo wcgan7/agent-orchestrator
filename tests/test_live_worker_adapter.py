@@ -1790,19 +1790,100 @@ class TestStepOutputInjection:
         assert "AssertionError" in prompt
 
     def test_fix_includes_retry_and_requested_guidance(self) -> None:
-        """Test that fix includes retry and requested guidance."""
+        """Test that fix includes previous error and unified human guidance."""
         task = _make_task(metadata={
             "retry_guidance": {"previous_error": "timed out", "guidance": "narrow scope"},
-            "requested_changes": {"guidance": "add edge-case test"},
+            "active_human_guidance": {
+                "id": "hg-1",
+                "source": "review_request_changes",
+                "guidance": "add edge-case test",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "target_step": "implement",
+                "fallback_step": "implement_fix",
+                "consumed": False,
+            },
         })
         prompt = build_step_prompt(task=task, step="implement_fix", attempt=2)
         assert "## Issues to fix" in prompt
         assert "### Previous attempt error" in prompt
         assert "timed out" in prompt
-        assert "### Feedback from previous attempt" in prompt
-        assert "narrow scope" in prompt
-        assert "### Requested changes from reviewer" in prompt
+        assert "## Human guidance" in prompt
+        assert "Source: review request changes." in prompt
         assert "edge-case test" in prompt
+
+    def test_human_guidance_injects_for_target_plan_step(self) -> None:
+        """Guidance targeted at plan should appear in plan prompt."""
+        task = _make_task(metadata={
+            "active_human_guidance": {
+                "id": "hg-plan",
+                "source": "gate_request_changes",
+                "guidance": "Tighten plan scope and split migration.",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "target_step": "plan",
+                "fallback_step": "implement_fix",
+                "gate": "before_implement",
+                "consumed": False,
+            }
+        })
+        prompt = build_step_prompt(task=task, step="plan", attempt=1)
+        assert "## Human guidance" in prompt
+        assert "Tighten plan scope and split migration." in prompt
+        assert "Gate: before_implement" in prompt
+
+    def test_human_guidance_injects_for_target_generate_tasks_step(self) -> None:
+        """Guidance targeted at generate_tasks should appear there."""
+        task = _make_task(
+            task_type="plan_only",
+            metadata={
+                "active_human_guidance": {
+                    "id": "hg-gen",
+                    "source": "gate_request_changes",
+                    "guidance": "Generate fewer but larger implementation tasks.",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "target_step": "generate_tasks",
+                    "fallback_step": None,
+                    "consumed": False,
+                }
+            },
+        )
+        prompt = build_step_prompt(task=task, step="generate_tasks", attempt=1)
+        assert "## Human guidance" in prompt
+        assert "Generate fewer but larger implementation tasks." in prompt
+
+    def test_human_guidance_not_injected_after_consumption(self) -> None:
+        """Consumed guidance should not be injected again."""
+        task = _make_task(metadata={
+            "active_human_guidance": {
+                "id": "hg-consumed",
+                "source": "retry",
+                "guidance": "Retry with smaller refactor chunks.",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "target_step": "implement",
+                "fallback_step": "implement_fix",
+                "consumed": True,
+                "consumed_at": "2026-01-01T00:01:00+00:00",
+                "consumed_step": "implement",
+            }
+        })
+        prompt = build_step_prompt(task=task, step="implement", attempt=2)
+        assert "## Human guidance" not in prompt
+        assert "Retry with smaller refactor chunks." not in prompt
+
+    def test_legacy_requested_changes_promoted_into_active_guidance(self) -> None:
+        """Legacy requested_changes should still inject via active guidance promotion."""
+        task = _make_task(metadata={
+            "requested_changes": {
+                "ts": "2026-01-01T00:00:00+00:00",
+                "guidance": "Start with test scaffolding before code changes.",
+            },
+            "retry_from_step": "implement",
+        })
+        prompt = build_step_prompt(task=task, step="implement", attempt=1)
+        assert "## Human guidance" in prompt
+        assert "Start with test scaffolding before code changes." in prompt
+        active = task.metadata.get("active_human_guidance") if isinstance(task.metadata, dict) else None
+        assert isinstance(active, dict)
+        assert active.get("source") == "review_request_changes"
 
 
 # ---------------------------------------------------------------------------

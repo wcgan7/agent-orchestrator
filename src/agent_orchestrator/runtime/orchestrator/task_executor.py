@@ -11,6 +11,7 @@ from ...collaboration.modes import normalize_hitl_mode
 from ...pipelines.registry import PipelineRegistry
 from ...worker import WorkerCancelledError
 from ..domain.models import RunRecord, ReviewCycle, ReviewFinding, Task, now_iso
+from .human_guidance import consume_human_guidance_for_step, promote_legacy_human_guidance
 from .live_worker_adapter import _VERIFY_STEPS
 from .worker_adapter import StepResult
 
@@ -205,6 +206,8 @@ class TaskExecutor:
                 retry_guidance = task.metadata.get("retry_guidance")
                 if isinstance(retry_guidance, dict):
                     has_retry_guidance = bool(str(retry_guidance.get("guidance") or "").strip())
+            if promote_legacy_human_guidance(task):
+                svc.container.tasks.upsert(task)
             if not retry_from and checkpoint_resume_step:
                 retry_from = checkpoint_resume_step
             run_attempt = max(1, len(task.run_ids))
@@ -256,6 +259,10 @@ class TaskExecutor:
                     "retry_count": int(task.retry_count),
                 },
             )
+
+            def _consume_human_guidance(step_name: str) -> None:
+                if consume_human_guidance_for_step(task, step=step_name, run_id=run.id):
+                    svc.container.tasks.upsert(task)
 
             mode = normalize_hitl_mode(getattr(task, "hitl_mode", "autopilot"))
             # Retry flows resumed from implement/review/commit should not require
@@ -321,12 +328,14 @@ class TaskExecutor:
                             svc.container.tasks.upsert(task)
                             if not svc._run_non_review_step(task, run, "implement_fix", attempt=fix_attempt + 1):
                                 return
+                            _consume_human_guidance("implement_fix")
                             task.metadata.pop("verify_failure", None)
                             task.metadata.pop("verify_output", None)
                             task.current_step = step
                             task.metadata["pipeline_phase"] = step
                             svc.container.tasks.upsert(task)
                             if svc._run_non_review_step(task, run, step, attempt=fix_attempt + 1):
+                                _consume_human_guidance(step)
                                 fixed = True
                                 break
                         if fixed:
@@ -345,6 +354,7 @@ class TaskExecutor:
                             payload={"error": task.error},
                         )
                     return
+                _consume_human_guidance(step)
                 last_phase1_step = step
 
             next_phase = "review" if has_review and retry_from != "commit" else "commit"
@@ -464,6 +474,7 @@ class TaskExecutor:
                         entity_id=task.id,
                         payload={"attempt": review_attempt, "decision": cycle.decision, "open_counts": open_counts},
                     )
+                    _consume_human_guidance("review")
 
                     if cycle.decision == "approved":
                         review_passed = True
@@ -482,6 +493,7 @@ class TaskExecutor:
                     svc.container.tasks.upsert(task)
                     if not svc._run_non_review_step(task, run, "implement_fix", attempt=review_attempt):
                         return
+                    _consume_human_guidance("implement_fix")
 
                     if post_fix_validation_step:
                         task.current_step = post_fix_validation_step
@@ -511,12 +523,14 @@ class TaskExecutor:
                                 svc.container.tasks.upsert(task)
                                 if not svc._run_non_review_step(task, run, "implement_fix", attempt=vfix + 1):
                                     return
+                                _consume_human_guidance("implement_fix")
                                 task.metadata.pop("verify_failure", None)
                                 task.metadata.pop("verify_output", None)
                                 task.current_step = post_fix_validation_step
                                 task.metadata["pipeline_phase"] = "review"
                                 svc.container.tasks.upsert(task)
                                 if svc._run_non_review_step(task, run, post_fix_validation_step, attempt=vfix + 1):
+                                    _consume_human_guidance(post_fix_validation_step)
                                     validation_fixed = True
                                     break
                             if not validation_fixed:
@@ -532,6 +546,8 @@ class TaskExecutor:
                                     payload={"error": task.error},
                                 )
                                 return
+                        else:
+                            _consume_human_guidance(post_fix_validation_step)
 
                     task.metadata.pop("review_findings", None)
                     task.metadata.pop("review_history", None)
@@ -630,6 +646,7 @@ class TaskExecutor:
                     }
                 )
                 svc.container.runs.upsert(run)
+                _consume_human_guidance("commit")
 
                 if worktree_dir:
                     svc._merge_and_cleanup(task, worktree_dir)

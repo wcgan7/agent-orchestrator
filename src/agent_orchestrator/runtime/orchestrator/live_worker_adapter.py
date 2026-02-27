@@ -19,6 +19,7 @@ from ...worker import WorkerCancelledError
 from ...workers.run import WorkerRunResult, run_worker
 from ..domain.models import RunRecord, Task, now_iso
 from ..storage.container import Container
+from .human_guidance import render_human_guidance_prompt
 from .worker_adapter import StepResult
 
 logger = logging.getLogger(__name__)
@@ -946,28 +947,12 @@ def build_step_prompt(
                 parts.append("### Previous attempt error")
                 parts.append(prev_error)
 
-    # Inject guidance/adjustments from previous review or retry.
-    if isinstance(task.metadata, dict):
-        retry_guidance = task.metadata.get("retry_guidance")
-        requested_changes = task.metadata.get("requested_changes")
-        if is_fix_step and (
-            (isinstance(retry_guidance, dict) and str(retry_guidance.get("guidance") or "").strip())
-            or (isinstance(requested_changes, dict) and str(requested_changes.get("guidance") or "").strip())
-        ):
-            parts.append("")
-            parts.append("## Requested adjustments")
-        if isinstance(retry_guidance, dict) and is_fix_step:
-            text = str(retry_guidance.get("guidance") or "").strip()
-            if text:
-                parts.append("")
-                parts.append("### Feedback from previous attempt")
-                parts.append(text)
-        if isinstance(requested_changes, dict) and is_fix_step:
-            text = str(requested_changes.get("guidance") or "").strip()
-            if text:
-                parts.append("")
-                parts.append("### Requested changes from reviewer")
-                parts.append(text)
+    # Inject one-shot human guidance selected by resume target step.
+    human_guidance_block = render_human_guidance_prompt(task, step)
+    if human_guidance_block:
+        parts.append("")
+        parts.append("## Human guidance")
+        parts.append(human_guidance_block)
 
     # Inject style guidelines and language defaults for implementation and review steps
     if category in ("implementation", "fix", "review"):

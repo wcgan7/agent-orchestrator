@@ -12,6 +12,10 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ...collaboration.modes import normalize_hitl_mode
 from ...pipelines.registry import PipelineRegistry
+from ..orchestrator.human_guidance import (
+    clear_active_human_guidance,
+    set_active_human_guidance,
+)
 from ..domain.models import (
     DependencyPolicy,
     Priority,
@@ -137,6 +141,24 @@ def _request_changes_step_for_gate(task: Task, gate: str | None) -> str | None:
     if normalized == "before_plan":
         return _previous_step(steps, "plan") or "plan"
     return task.current_step or None
+
+
+def _guidance_fallback_step(task: Task, *, target_step: str | None) -> str | None:
+    if str(target_step or "").strip() == "implement_fix":
+        return None
+    pipeline_steps = set(_pipeline_steps(task))
+    if any(step in pipeline_steps for step in {"implement", "prototype", "verify", "benchmark", "reproduce", "review", "commit"}):
+        return "implement_fix"
+    return None
+
+
+def _effective_retry_target_step(task: Task) -> str | None:
+    if isinstance(task.metadata, dict):
+        retry_from = str(task.metadata.get("retry_from_step") or "").strip()
+        if retry_from:
+            return retry_from
+    pipeline_steps = _pipeline_steps(task)
+    return pipeline_steps[0] if pipeline_steps else None
 
 
 def _mark_latest_run_interrupted(container: Any, task: Task, *, summary: str, ts: str) -> None:
@@ -1263,6 +1285,18 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 task.metadata.pop("retry_from_step", None)
         else:
             task.metadata.pop("retry_from_step", None)
+        target_step = _effective_retry_target_step(task)
+        if guidance.strip():
+            set_active_human_guidance(
+                task,
+                source="retry",
+                guidance=guidance.strip(),
+                created_at=ts,
+                target_step=target_step,
+                fallback_step=_guidance_fallback_step(task, target_step=target_step),
+            )
+        else:
+            clear_active_human_guidance(task, cleared_at=ts)
         task.updated_at = now_iso()
         container.tasks.upsert(task)
         bus.emit(
@@ -1357,6 +1391,18 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 "guidance": guidance,
                 "gate": cleared_gate,
             }
+            if guidance:
+                set_active_human_guidance(
+                    task,
+                    source="gate_request_changes",
+                    guidance=guidance,
+                    created_at=acted_at,
+                    target_step=start_from_step,
+                    fallback_step=_guidance_fallback_step(task, target_step=start_from_step),
+                    gate=cleared_gate,
+                )
+            else:
+                clear_active_human_guidance(task, cleared_at=acted_at)
             history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
             history.append(
                 {

@@ -92,6 +92,38 @@ def test_supervised_keeps_previous_step_visible_until_gate_pause(tmp_path: Path)
     assert phase == "plan"
 
 
+def test_supervised_consumes_targeted_human_guidance_once(tmp_path: Path) -> None:
+    """Guidance targeted at plan is consumed after successful plan execution."""
+    container, service, _ = _service(tmp_path)
+    task = Task(
+        title="Guided supervised task",
+        status="queued",
+        hitl_mode="supervised",
+        metadata={
+            "active_human_guidance": {
+                "id": "hg-plan",
+                "source": "gate_request_changes",
+                "guidance": "Refine scope before implementation.",
+                "created_at": now_iso(),
+                "target_step": "plan",
+                "fallback_step": "implement_fix",
+                "consumed": False,
+            }
+        },
+    )
+    container.tasks.upsert(task)
+
+    result = service.run_task(task.id)
+
+    assert result.status == "in_progress"
+    assert result.pending_gate == "before_implement"
+    guidance = result.metadata.get("active_human_guidance") if isinstance(result.metadata, dict) else None
+    assert isinstance(guidance, dict)
+    assert guidance.get("consumed") is True
+    assert guidance.get("consumed_step") == "plan"
+    assert guidance.get("consumed_run_id")
+
+
 def test_supervised_retry_from_implement_skips_plan_gate(tmp_path: Path) -> None:
     """Retrying from implement should not re-trigger before_implement approval."""
     container, service, _ = _service(tmp_path)
@@ -424,7 +456,61 @@ def test_gate_request_changes_api_requeues_from_prior_step(tmp_path: Path) -> No
     assert updated["status"] == "queued"
     assert updated["pending_gate"] is None
     assert updated["metadata"].get("retry_from_step") == "plan"
+    active_guidance = updated["metadata"].get("active_human_guidance") or {}
+    assert active_guidance.get("source") == "gate_request_changes"
+    assert active_guidance.get("target_step") == "plan"
+    assert active_guidance.get("fallback_step") == "implement_fix"
+    assert active_guidance.get("guidance") == "Please tighten scope."
     assert "changes requested" in str(payload.get("message") or "").lower()
+
+
+def test_retry_without_guidance_clears_active_human_guidance(tmp_path: Path) -> None:
+    """Retry requests with no guidance should clear stale active guidance envelope."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from agent_orchestrator.runtime.api.router import create_router
+
+    container = Container(tmp_path)
+
+    def resolve_container(_: Any = None) -> Container:
+        return container
+
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus)
+
+    def resolve_orchestrator(_: Any = None) -> OrchestratorService:
+        return service
+
+    router = create_router(resolve_container, resolve_orchestrator, {})
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    task = Task(
+        title="Retry clears stale guidance",
+        status="blocked",
+        error="Needs retry",
+        metadata={
+            "active_human_guidance": {
+                "id": "hg-stale",
+                "source": "retry",
+                "guidance": "Old retry guidance",
+                "created_at": now_iso(),
+                "target_step": "implement",
+                "fallback_step": "implement_fix",
+                "consumed": False,
+            }
+        },
+    )
+    container.tasks.upsert(task)
+
+    resp = client.post(f"/api/tasks/{task.id}/retry", json={})
+    assert resp.status_code == 200
+    updated = resp.json()["task"]
+    metadata = updated.get("metadata") or {}
+    assert metadata.get("active_human_guidance") in (None, {})
+    assert metadata.get("active_human_guidance_cleared_at")
 
 
 def test_gate_approve_human_intervention_keeps_blocked_status(tmp_path: Path) -> None:

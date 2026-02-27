@@ -161,6 +161,9 @@ def test_request_changes_reopens_task_with_feedback(tmp_path: Path) -> None:
         body = changed.json()['task']
         assert body['status'] == 'queued'
         assert body['metadata']['requested_changes']['guidance'] == 'Please add integration tests'
+        assert body['metadata']['active_human_guidance']['source'] == 'review_request_changes'
+        assert body['metadata']['active_human_guidance']['target_step'] == 'implement'
+        assert body['metadata']['active_human_guidance']['guidance'] == 'Please add integration tests'
         assert len(body['human_review_actions']) == 1
         assert body['human_review_actions'][0]['action'] == 'request_changes'
         assert body['human_review_actions'][0]['guidance'] == 'Please add integration tests'
