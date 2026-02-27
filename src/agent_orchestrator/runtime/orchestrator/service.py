@@ -349,15 +349,24 @@ class OrchestratorService:
         tasks = self.container.tasks.list()
         queue_depth = len([task for task in tasks if task.status == "queued"])
         in_progress = len([task for task in tasks if task.status == "in_progress"])
+        scheduler_attached = bool(self._thread and self._thread.is_alive())
         with self._futures_lock:
             active_workers = len(self._futures)
+        orchestrator_status = str(orchestrator_cfg.get("status", "running") or "running")
+        scheduler_stale = bool(
+            orchestrator_status == "running"
+            and not scheduler_attached
+            and (queue_depth > 0 or in_progress > 0)
+        )
         return {
-            "status": orchestrator_cfg.get("status", "running"),
+            "status": orchestrator_status,
             "queue_depth": queue_depth,
             "in_progress": in_progress,
             "active_workers": active_workers,
             "draining": self._drain,
             "run_branch": self._run_branch,
+            "scheduler_attached": scheduler_attached,
+            "scheduler_stale": scheduler_stale,
         }
 
     def control(self, action: str) -> dict[str, Any]:
@@ -371,21 +380,30 @@ class OrchestratorService:
         """
         cfg = self.container.config.load()
         orchestrator_cfg = dict(cfg.get("orchestrator") or {})
+        ensure_worker = False
         if action == "pause":
             orchestrator_cfg["status"] = "paused"
         elif action == "resume":
             orchestrator_cfg["status"] = "running"
+            ensure_worker = True
         elif action == "drain":
             self._drain = True
             orchestrator_cfg["status"] = "running"
+            ensure_worker = True
         elif action == "stop":
             self._stop.set()
+            self._drain = False
             orchestrator_cfg["status"] = "stopped"
+        elif action == "reset":
+            # Non-destructive scheduler reattach: keep lifecycle status as-is.
+            ensure_worker = True
         else:
             raise ValueError(f"Unsupported control action: {action}")
         cfg["orchestrator"] = orchestrator_cfg
         self.container.config.save(cfg)
         self.bus.emit(channel="system", event_type="orchestrator.control", entity_id=self.container.project_id, payload={"action": action})
+        if ensure_worker:
+            self.ensure_worker()
         return self.status()
 
     def ensure_worker(self) -> None:
@@ -780,7 +798,11 @@ class OrchestratorService:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            handled = self.tick_once()
+            try:
+                handled = self.tick_once()
+            except Exception:
+                handled = False
+                logger.exception("Scheduler loop tick failed; loop will continue")
             with self._futures_lock:
                 has_inflight = bool(self._futures)
             if self._drain and not handled and not has_inflight:

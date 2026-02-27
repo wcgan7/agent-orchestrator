@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -54,4 +55,40 @@ def test_in_progress_tasks_recover_on_worker_start(tmp_path: Path) -> None:
         assert recovered_run.status == "interrupted"
         assert recovered_run.finished_at is not None
     finally:
+        service.shutdown()
+
+
+def test_resume_reattaches_scheduler_after_shutdown(tmp_path: Path) -> None:
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=DefaultWorkerAdapter())
+    service.ensure_worker()
+    try:
+        assert service.status()["scheduler_attached"] is True
+        service.shutdown(timeout=1.0)
+        assert service.status()["scheduler_attached"] is False
+
+        resumed = service.control("resume")
+        assert resumed["status"] == "running"
+        assert resumed["scheduler_attached"] is True
+    finally:
+        service.shutdown()
+
+
+def test_reset_action_reattaches_scheduler_without_status_change(tmp_path: Path) -> None:
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=DefaultWorkerAdapter())
+    service.ensure_worker()
+    try:
+        service.control("pause")
+        service.shutdown(timeout=1.0)
+        assert service.status()["scheduler_attached"] is False
+
+        reset_status = service.control("reset")
+        assert reset_status["status"] == "paused"
+        assert reset_status["scheduler_attached"] is True
+    finally:
+        # Give the loop a beat to observe paused config before shutdown.
+        time.sleep(0.05)
         service.shutdown()
