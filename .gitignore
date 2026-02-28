@@ -33,8 +33,10 @@ htmlcov/
 
 .tmp/
 .vite/
+**/.vite/
 node_modules/
 .agent_orchestrator/
+.claude/
 
 .prd_runner/
 .prd_runner.bak-*/

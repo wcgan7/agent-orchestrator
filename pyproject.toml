@@ -17,6 +17,7 @@ dependencies = [
 [project.optional-dependencies]
 test = [
   "pytest>=7",
+  "pytest-asyncio>=0.24.0",
   "pytest-xdist>=3",
   "tomli>=2; python_version < '3.11'",
   "httpx>=0.24.0",  # Required for FastAPI TestClient
@@ -55,3 +56,4 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
+asyncio_default_fixture_loop_scope = "function"

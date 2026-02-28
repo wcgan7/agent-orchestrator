@@ -15,6 +15,7 @@ playwright-report
 test-results
 blob-report
 /.tmp
+/.vite
 
 # Editor directories and files
 .vscode/*

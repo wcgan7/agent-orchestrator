@@ -250,12 +250,16 @@ Notes:
 ## Verify Locally
 
 ```bash
+# Use Python 3.10+ and a local virtualenv
+python3 -m venv .venv
+.venv/bin/pip install -e ".[server,test,dev]"
+
 # Backend tests
-pytest
+.venv/bin/pytest -q
 
 # Optional integration tests (skipped by default and in CI)
-AGENT_ORCHESTRATOR_RUN_INTEGRATION=1 pytest tests/test_integration_worker_model_fallback.py
-AGENT_ORCHESTRATOR_RUN_INTEGRATION=1 pytest tests/test_integration_claude_provider.py
+AGENT_ORCHESTRATOR_RUN_INTEGRATION=1 .venv/bin/pytest tests/test_integration_worker_model_fallback.py
+AGENT_ORCHESTRATOR_RUN_INTEGRATION=1 .venv/bin/pytest tests/test_integration_claude_provider.py
 
 # Frontend checks
 npm --prefix web run check
