@@ -464,6 +464,61 @@ def test_gate_request_changes_api_requeues_from_prior_step(tmp_path: Path) -> No
     assert "changes requested" in str(payload.get("message") or "").lower()
 
 
+def test_gate_request_changes_rerun_does_not_fail_missing_context(tmp_path: Path) -> None:
+    """Request-changes at plan gate should re-run cleanly without retry-context failures."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from agent_orchestrator.runtime.api.router import create_router
+
+    container = Container(tmp_path)
+
+    def resolve_container(_: Any = None) -> Container:
+        return container
+
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus)
+
+    def resolve_orchestrator(_: Any = None) -> OrchestratorService:
+        return service
+
+    router = create_router(resolve_container, resolve_orchestrator, {})
+    app = FastAPI()
+    app.include_router(router)
+    client = TestClient(app)
+
+    task = Task(
+        title="Plan gate request changes rerun",
+        status="queued",
+        task_type="feature",
+        hitl_mode="supervised",
+        pipeline_template=["plan", "implement", "verify", "review", "commit"],
+    )
+    container.tasks.upsert(task)
+
+    parked = service.run_task(task.id)
+    assert parked.status == "in_progress"
+    assert parked.pending_gate == "before_implement"
+
+    resp = client.post(
+        f"/api/tasks/{task.id}/approve-gate",
+        json={"gate": "before_implement", "action": "request_changes", "guidance": "Adjust plan scope."},
+    )
+    assert resp.status_code == 200
+    queued = container.tasks.get(task.id)
+    assert queued is not None
+    assert queued.status == "queued"
+
+    # approve-gate(request_changes) starts the scheduler; pause it so this test
+    # exercises a deterministic manual rerun path.
+    service.control("pause")
+    rerun = service.run_task(task.id)
+    assert rerun.status == "in_progress"
+    assert rerun.pending_gate == "before_implement"
+    assert "Retained task context is missing" not in str(rerun.error or "")
+    assert "Retry context missing" not in str(rerun.error or "")
+
+
 def test_retry_without_guidance_clears_active_human_guidance(tmp_path: Path) -> None:
     """Retry requests with no guidance should clear stale active guidance envelope."""
     from fastapi import FastAPI

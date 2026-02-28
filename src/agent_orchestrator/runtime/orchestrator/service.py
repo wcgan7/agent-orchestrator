@@ -868,7 +868,12 @@ class OrchestratorService:
                     if dep is None or dep.status not in terminal:
                         raise ValueError(f"Task {task_id} has unresolved blocker {dep_id}")
                 if task.status != "in_progress":
-                    task.status = "queued"
+                    # Claim manual execution immediately to avoid a race where
+                    # the background scheduler grabs this queued task first.
+                    task.status = "in_progress"
+                    task.pending_gate = None
+                    task.current_agent_id = None
+                    self._acquire_execution_lease(task)
                     self.container.tasks.upsert(task)
                 self._manual_run_active += 1
                 manual_run_active = True

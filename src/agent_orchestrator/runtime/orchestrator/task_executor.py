@@ -261,7 +261,9 @@ class TaskExecutor:
 
             retained_path_raw = str(task_context.get("worktree_dir") or task.metadata.get("worktree_dir") or "").strip()
             retained_path = svc._resolve_retained_task_worktree(task, retained_path_raw)
-            context_expected = bool(expected_on_retry or retained_path_raw or old_preserved)
+            # Only fail closed when retry context was explicitly retained or preserved.
+            # Stale worktree metadata from prior gate cleanup should not block re-runs.
+            context_expected = bool(expected_on_retry or old_preserved)
 
             if retained_path is not None:
                 worktree_dir = retained_path
@@ -936,6 +938,11 @@ class TaskExecutor:
                         text=True,
                     )
                     worktree_removed = True
+                    if task.metadata.pop("worktree_dir", None):
+                        metadata_changed = True
+                    if isinstance(task.metadata.get("task_context"), dict):
+                        task.metadata.pop("task_context", None)
+                        metadata_changed = True
                     if task.status in {"done", "cancelled"}:
                         subprocess.run(
                             ["git", "branch", "-D", f"task-{task.id}"],
@@ -943,8 +950,6 @@ class TaskExecutor:
                             capture_output=True,
                             text=True,
                         )
-                        task.metadata.pop("task_context", None)
-                        metadata_changed = True
 
             if task.status in {"done", "cancelled"} and task.metadata.get("worktree_dir"):
                 task.metadata.pop("worktree_dir", None)

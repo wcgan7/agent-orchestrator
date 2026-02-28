@@ -34,3 +34,12 @@ jobs:
 
       - name: Test (pytest)
         run: uv run pytest -q
+
+      - name: Regression stress (critical run/gate paths)
+        run: |
+          for i in $(seq 1 20); do
+            echo "Regression stress iteration ${i}"
+            uv run pytest -q \
+              tests/test_backend_phase1.py::test_retry_clears_pending_gate_and_human_blockers \
+              tests/test_hitl_gate_enforcement.py::test_gate_request_changes_rerun_does_not_fail_missing_context
+          done
