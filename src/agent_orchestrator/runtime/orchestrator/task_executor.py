@@ -126,10 +126,41 @@ class TaskExecutor:
             return False, "missing preserved branch metadata"
         if not self._branch_exists(preserved_branch):
             return False, "preserved branch is not available"
-        base_branch = str(svc._run_branch or "HEAD").strip() or "HEAD"
+        base_branch = str(metadata.get("preserved_base_branch") or svc._run_branch or "HEAD").strip() or "HEAD"
+        base_sha = str(metadata.get("preserved_base_sha") or "").strip()
+        head_sha = str(metadata.get("preserved_head_sha") or "").strip()
+        if not base_sha:
+            try:
+                base_result = subprocess.run(
+                    ["git", "rev-parse", "--verify", f"{base_branch}^{{commit}}"],
+                    cwd=svc.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                if base_result.returncode == 0:
+                    base_sha = base_result.stdout.strip()
+            except Exception:
+                base_sha = ""
+        if not head_sha:
+            try:
+                head_result = subprocess.run(
+                    ["git", "rev-parse", "--verify", f"refs/heads/{preserved_branch}^{{commit}}"],
+                    cwd=svc.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                if head_result.returncode == 0:
+                    head_sha = head_result.stdout.strip()
+            except Exception:
+                head_sha = ""
+        diff_range = f"{base_sha}..{head_sha}" if base_sha and head_sha else f"{base_branch}..{preserved_branch}"
         try:
             diff_result = subprocess.run(
-                ["git", "diff", "--binary", "--no-color", f"{base_branch}..{preserved_branch}"],
+                ["git", "diff", "--binary", "--no-color", diff_range],
                 cwd=svc.container.project_dir,
                 capture_output=True,
                 text=True,
@@ -147,6 +178,8 @@ class TaskExecutor:
             "run_id": task.run_ids[-1] if task.run_ids else None,
             "preserved_branch": preserved_branch,
             "base_branch": base_branch,
+            "base_sha": base_sha or None,
+            "head_sha": head_sha or None,
             "prepared_at": now_iso(),
             "diff_fingerprint": fingerprint,
         }
@@ -230,7 +263,15 @@ class TaskExecutor:
                         )
                         worktree_dir = svc._create_worktree(task)
                 # Clear preserved metadata only after successful worktree creation
-                task.metadata.pop("preserved_branch", None)
+                for key in (
+                    "preserved_branch",
+                    "preserved_base_branch",
+                    "preserved_base_sha",
+                    "preserved_head_sha",
+                    "preserved_merge_base_sha",
+                    "preserved_at",
+                ):
+                    task.metadata.pop(key, None)
                 task.metadata.pop("merge_conflict", None)
                 svc.container.tasks.upsert(task)
             else:

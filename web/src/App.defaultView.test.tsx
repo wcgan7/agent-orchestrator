@@ -86,6 +86,7 @@ describe('App default route', () => {
       expect(screen.getAllByRole('button', { name: /Create Task/i }).length).toBeGreaterThan(0)
       expect(screen.getByRole('button', { name: /Import PRD/i })).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /Toggle terminal/i })).toBeInTheDocument()
+      expect(screen.getByText(/HITL mode/i)).toBeVisible()
     })
   })
 

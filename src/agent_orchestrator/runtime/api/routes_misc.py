@@ -201,10 +201,41 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
                         detail="Pre-commit context missing; request changes to regenerate implementation context.",
                     )
                 base_branch = str(review_context.get("base_branch") or "").strip() or "HEAD"
+                base_sha = str(review_context.get("base_sha") or "").strip()
+                head_sha = str(review_context.get("head_sha") or "").strip()
+                if not base_sha:
+                    try:
+                        base_result = subprocess.run(
+                            ["git", "rev-parse", "--verify", f"{base_branch}^{{commit}}"],
+                            cwd=container.project_dir,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            timeout=10,
+                        )
+                        if base_result.returncode == 0:
+                            base_sha = base_result.stdout.strip()
+                    except Exception:
+                        base_sha = ""
+                if not head_sha:
+                    try:
+                        head_result = subprocess.run(
+                            ["git", "rev-parse", "--verify", f"refs/heads/{preserved_branch}^{{commit}}"],
+                            cwd=container.project_dir,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                            timeout=10,
+                        )
+                        if head_result.returncode == 0:
+                            head_sha = head_result.stdout.strip()
+                    except Exception:
+                        head_sha = ""
+                diff_range = f"{base_sha}..{head_sha}" if base_sha and head_sha else f"{base_branch}..{preserved_branch}"
                 expected_fingerprint = str(review_context.get("diff_fingerprint") or "").strip()
                 try:
                     diff_result = subprocess.run(
-                        ["git", "diff", "--binary", "--no-color", f"{base_branch}..{preserved_branch}"],
+                        ["git", "diff", "--binary", "--no-color", diff_range],
                         cwd=container.project_dir,
                         capture_output=True,
                         text=True,

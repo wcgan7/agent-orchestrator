@@ -8,6 +8,8 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
+from ..domain.models import now_iso
+
 if TYPE_CHECKING:
     from .service import OrchestratorService
 
@@ -20,6 +22,21 @@ class WorktreeManager:
     def __init__(self, service: OrchestratorService) -> None:
         """Bind the manager to the owning orchestrator service state."""
         self._service = service
+
+    @staticmethod
+    def _clear_preserved_context_metadata(task: Any) -> None:
+        """Remove preserved-branch metadata keys after merge/reattach."""
+        if not isinstance(getattr(task, "metadata", None), dict):
+            return
+        for key in (
+            "preserved_branch",
+            "preserved_base_branch",
+            "preserved_base_sha",
+            "preserved_head_sha",
+            "preserved_merge_base_sha",
+            "preserved_at",
+        ):
+            task.metadata.pop(key, None)
 
     def create_worktree(self, task: Any) -> Optional[Path]:
         """Create a task-specific worktree and branch when git metadata exists.
@@ -127,7 +144,7 @@ class WorktreeManager:
             text=True,
         )
         if not result.stdout.strip():
-            task.metadata.pop("preserved_branch", None)
+            self._clear_preserved_context_metadata(task)
             svc.container.tasks.upsert(task)
             return {"status": "ok"}
 
@@ -168,7 +185,7 @@ class WorktreeManager:
             capture_output=True,
             text=True,
         )
-        task.metadata.pop("preserved_branch", None)
+        self._clear_preserved_context_metadata(task)
         task.metadata.pop("merge_conflict", None)
         svc.container.tasks.upsert(task)
         return {"status": "ok", "commit_sha": sha}
@@ -377,10 +394,29 @@ class WorktreeManager:
         svc = self._service
         branch = f"task-{task.id}"
         try:
+            if not isinstance(task.metadata, dict):
+                task.metadata = {}
             svc._cleanup_workdoc_for_commit(worktree_dir)
             self.commit_for_task(task, worktree_dir)
 
-            base_ref = svc._run_branch or "HEAD"
+            base_ref = str(svc._run_branch or "").strip()
+            if not base_ref:
+                try:
+                    current_branch_result = subprocess.run(
+                        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                        cwd=svc.container.project_dir,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=10,
+                    )
+                    candidate = current_branch_result.stdout.strip()
+                    if current_branch_result.returncode == 0 and candidate and candidate != "HEAD":
+                        base_ref = candidate
+                except Exception:
+                    base_ref = ""
+            if not base_ref:
+                base_ref = "HEAD"
             try:
                 result = subprocess.run(
                     ["git", "log", f"{base_ref}..{branch}", "--oneline"],
@@ -401,6 +437,68 @@ class WorktreeManager:
                 text=True,
             )
             task.metadata["preserved_branch"] = branch
+            if base_ref != "HEAD":
+                task.metadata["preserved_base_branch"] = str(base_ref)
+            else:
+                task.metadata.pop("preserved_base_branch", None)
+            task.metadata["preserved_at"] = now_iso()
+
+            try:
+                base_sha_result = subprocess.run(
+                    ["git", "rev-parse", "--verify", f"{base_ref}^{{commit}}"],
+                    cwd=svc.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                base_sha = base_sha_result.stdout.strip() if base_sha_result.returncode == 0 else ""
+                if base_sha:
+                    task.metadata["preserved_base_sha"] = base_sha
+                else:
+                    task.metadata.pop("preserved_base_sha", None)
+            except Exception:
+                task.metadata.pop("preserved_base_sha", None)
+
+            try:
+                head_sha_result = subprocess.run(
+                    ["git", "rev-parse", "--verify", f"refs/heads/{branch}^{{commit}}"],
+                    cwd=svc.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                head_sha = head_sha_result.stdout.strip() if head_sha_result.returncode == 0 else ""
+                if head_sha:
+                    task.metadata["preserved_head_sha"] = head_sha
+                else:
+                    task.metadata.pop("preserved_head_sha", None)
+            except Exception:
+                task.metadata.pop("preserved_head_sha", None)
+
+            base_sha_for_merge = str(task.metadata.get("preserved_base_sha") or "").strip()
+            head_sha_for_merge = str(task.metadata.get("preserved_head_sha") or "").strip()
+            if base_sha_for_merge and head_sha_for_merge:
+                try:
+                    merge_base_result = subprocess.run(
+                        ["git", "merge-base", base_sha_for_merge, head_sha_for_merge],
+                        cwd=svc.container.project_dir,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=10,
+                    )
+                    merge_base_sha = merge_base_result.stdout.strip() if merge_base_result.returncode == 0 else ""
+                    if merge_base_sha:
+                        task.metadata["preserved_merge_base_sha"] = merge_base_sha
+                    else:
+                        task.metadata.pop("preserved_merge_base_sha", None)
+                except Exception:
+                    task.metadata.pop("preserved_merge_base_sha", None)
+            else:
+                task.metadata.pop("preserved_merge_base_sha", None)
+
             svc.container.tasks.upsert(task)
             return True
         except Exception:

@@ -891,6 +891,16 @@ def test_precommit_review_requires_preserved_branch_context(tmp_path: Path) -> N
     assert result.metadata.get("pending_precommit_approval") is True
     preserved_branch = str(result.metadata.get("preserved_branch") or "").strip()
     assert preserved_branch == f"task-{task.id}"
+    preserved_base_branch = str(result.metadata.get("preserved_base_branch") or "").strip()
+    assert preserved_base_branch
+    assert preserved_base_branch != "HEAD"
+    assert str(result.metadata.get("preserved_base_sha") or "").strip()
+    assert str(result.metadata.get("preserved_head_sha") or "").strip()
+    assert str(result.metadata.get("preserved_at") or "").strip()
+    review_context = result.metadata.get("review_context")
+    assert isinstance(review_context, dict)
+    assert str(review_context.get("base_sha") or "").strip()
+    assert str(review_context.get("head_sha") or "").strip()
     assert "worktree_dir" not in result.metadata
     branches = subprocess.run(
         ["git", "branch", "--list", preserved_branch],

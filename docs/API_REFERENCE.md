@@ -319,7 +319,26 @@ Response:
 Return best-available task changes:
 - committed diff when commit evidence exists
 - otherwise working-tree changes (including pre-commit/unborn-HEAD states)
-- otherwise preserved-branch changes (`preserved_branch` vs base branch) when available
+- otherwise preserved-branch changes when available
+
+Additive response fields:
+- `base_ref` (`string|null`): base reference used for diff reconstruction.
+- `base_sha` (`string|null`): resolved base commit SHA.
+- `head_ref` (`string|null`): head reference used for diff reconstruction.
+- `head_sha` (`string|null`): resolved head commit SHA.
+- `base_source`:
+  - `metadata_sha`
+  - `metadata_branch`
+  - `review_context_sha`
+  - `review_context_branch`
+  - `heuristic`
+  - `none`
+- `confidence`: `high|medium|low`
+- `warnings[]`: machine-readable warning codes (for example `heuristic_base_inferred`, `large_file_count`, `large_line_churn`, `base_not_ancestor`)
+
+Notes:
+- Preserved-branch diffs are SHA-anchored when metadata/review context provides anchors.
+- Legacy tasks can fall back to inferred base resolution (`base_source=heuristic`) and may return `confidence=low` plus warnings.
 
 ### `GET /api/tasks/{task_id}/logs`
 Read current or historical step logs.

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional, cast
@@ -52,6 +54,12 @@ _read_from_offset = impl._read_from_offset
 _read_tail = impl._read_tail
 _safe_state_path = impl._safe_state_path
 _task_payload = impl._task_payload
+
+_CHANGES_TELEMETRY_RECENT: dict[tuple[str, str, str, str], float] = {}
+_CHANGES_TELEMETRY_TTL_SECONDS = 900.0
+_CHANGES_TELEMETRY_MAX_KEYS = 2048
+_LOW_CONFIDENCE_FILE_THRESHOLD = 120
+_LOW_CONFIDENCE_LINE_THRESHOLD = 4000
 
 
 def _gate_approved_message(gate: str | None, *, will_resume: bool) -> str:
@@ -201,6 +209,123 @@ def _is_runtime_state_path(path_text: str) -> bool:
     return normalized == ".agent_orchestrator" or normalized.startswith(".agent_orchestrator/")
 
 
+def _short_sha(value: str | None) -> str:
+    raw = str(value or "").strip()
+    return raw[:12] if raw else ""
+
+
+def _resolve_commit_sha(git_dir: Path, ref: str | None) -> str | None:
+    normalized = str(ref or "").strip()
+    if not normalized:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{normalized}^{{commit}}"],
+            cwd=git_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    sha = result.stdout.strip()
+    if result.returncode != 0 or not sha:
+        return None
+    return sha
+
+
+def _merge_base_sha(git_dir: Path, left_sha: str | None, right_sha: str | None) -> str | None:
+    left = str(left_sha or "").strip()
+    right = str(right_sha or "").strip()
+    if not left or not right:
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", left, right],
+            cwd=git_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except Exception:
+        return None
+    merge_sha = result.stdout.strip()
+    if result.returncode != 0 or not merge_sha:
+        return None
+    return merge_sha
+
+
+def _parse_shortstat_counts(text: str) -> tuple[int, int, int]:
+    raw = str(text or "").strip()
+    if not raw:
+        return 0, 0, 0
+    files = 0
+    additions = 0
+    deletions = 0
+    file_match = re.search(r"(\d+)\s+files?\s+changed", raw)
+    if file_match:
+        files = int(file_match.group(1))
+    add_match = re.search(r"(\d+)\s+insertions?\(\+\)", raw)
+    if add_match:
+        additions = int(add_match.group(1))
+    del_match = re.search(r"(\d+)\s+deletions?\(-\)", raw)
+    if del_match:
+        deletions = int(del_match.group(1))
+    return files, additions, deletions
+
+
+def _emit_changes_telemetry_once(
+    bus: Any,
+    *,
+    task_id: str,
+    event_type: str,
+    base_sha: str | None,
+    head_sha: str | None,
+    payload: dict[str, Any],
+) -> None:
+    if bus is None:
+        return
+    key = (
+        str(event_type).strip(),
+        str(task_id).strip(),
+        str(base_sha or "").strip(),
+        str(head_sha or "").strip(),
+    )
+    now_monotonic = time.monotonic()
+
+    if _CHANGES_TELEMETRY_RECENT:
+        stale_keys = [
+            existing
+            for existing, emitted_at in _CHANGES_TELEMETRY_RECENT.items()
+            if now_monotonic - emitted_at > _CHANGES_TELEMETRY_TTL_SECONDS
+        ]
+        for stale in stale_keys:
+            _CHANGES_TELEMETRY_RECENT.pop(stale, None)
+
+    existing_ts = _CHANGES_TELEMETRY_RECENT.get(key)
+    if existing_ts is not None and (now_monotonic - existing_ts) <= _CHANGES_TELEMETRY_TTL_SECONDS:
+        return
+
+    _CHANGES_TELEMETRY_RECENT[key] = now_monotonic
+    if len(_CHANGES_TELEMETRY_RECENT) > _CHANGES_TELEMETRY_MAX_KEYS:
+        oldest = sorted(_CHANGES_TELEMETRY_RECENT.items(), key=lambda item: item[1])[: max(1, _CHANGES_TELEMETRY_MAX_KEYS // 8)]
+        for old_key, _ in oldest:
+            _CHANGES_TELEMETRY_RECENT.pop(old_key, None)
+
+    try:
+        bus.emit(
+            channel="tasks",
+            event_type=event_type,
+            entity_id=task_id,
+            payload=payload,
+        )
+    except Exception:
+        # Telemetry must never fail the changes endpoint.
+        return
+
+
 def _resolve_base_branch(git_dir: Path, *, avoid_branch: str | None = None) -> str | None:
     candidates: list[str] = []
     try:
@@ -297,34 +422,80 @@ def _resolve_base_branch(git_dir: Path, *, avoid_branch: str | None = None) -> s
 
 def _preserved_branch_changes(
     *,
+    task_id: str,
     metadata: dict[str, Any] | None,
     git_dir: Path,
+    bus: Any,
 ) -> dict[str, Any] | None:
-    preserved_branch = str((metadata or {}).get("preserved_branch") or "").strip()
+    metadata_obj = metadata if isinstance(metadata, dict) else {}
+    review_context_raw = metadata_obj.get("review_context")
+    review_context: dict[str, Any] = review_context_raw if isinstance(review_context_raw, dict) else {}
+
+    preserved_branch = str((metadata_obj or {}).get("preserved_branch") or "").strip()
     if not preserved_branch:
         return None
-    try:
-        has_branch = (
-            subprocess.run(
-                ["git", "rev-parse", "--verify", f"refs/heads/{preserved_branch}"],
-                cwd=git_dir,
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=10,
-            ).returncode
-            == 0
-        )
-    except Exception:
-        has_branch = False
-    if not has_branch:
+
+    head_sha = _resolve_commit_sha(git_dir, str(metadata_obj.get("preserved_head_sha") or "").strip())
+    if not head_sha:
+        head_sha = _resolve_commit_sha(git_dir, f"refs/heads/{preserved_branch}")
+    if not head_sha:
         return None
-    base_branch = _resolve_base_branch(git_dir, avoid_branch=preserved_branch)
-    if not base_branch:
+
+    base_ref: str | None = None
+    base_sha: str | None = None
+    base_source = "none"
+    confidence: str = "low"
+
+    metadata_base_sha = _resolve_commit_sha(git_dir, str(metadata_obj.get("preserved_base_sha") or "").strip())
+    metadata_base_branch = str(metadata_obj.get("preserved_base_branch") or "").strip()
+    review_base_sha = _resolve_commit_sha(git_dir, str(review_context.get("base_sha") or "").strip())
+    review_base_branch = str(review_context.get("base_branch") or "").strip()
+
+    if metadata_base_sha:
+        base_sha = metadata_base_sha
+        base_ref = metadata_base_branch or metadata_base_sha
+        base_source = "metadata_sha"
+        confidence = "high"
+
+    if not base_sha and metadata_base_branch:
+        resolved = _resolve_commit_sha(git_dir, metadata_base_branch)
+        if resolved:
+            base_sha = resolved
+            base_ref = metadata_base_branch
+            base_source = "metadata_branch"
+            confidence = "high"
+
+    if not base_sha and review_base_sha:
+        base_sha = review_base_sha
+        base_ref = review_base_branch or review_base_sha
+        base_source = "review_context_sha"
+        confidence = "medium"
+
+    if not base_sha and review_base_branch:
+        resolved = _resolve_commit_sha(git_dir, review_base_branch)
+        if resolved:
+            base_sha = resolved
+            base_ref = review_base_branch
+            base_source = "review_context_branch"
+            confidence = "medium"
+
+    if not base_sha:
+        heuristic_base_branch = _resolve_base_branch(git_dir, avoid_branch=preserved_branch)
+        if heuristic_base_branch:
+            resolved = _resolve_commit_sha(git_dir, heuristic_base_branch)
+            if resolved:
+                base_sha = resolved
+                base_ref = heuristic_base_branch
+                base_source = "heuristic"
+                confidence = "low"
+
+    if not base_sha:
         return None
+
+    diff_range = f"{base_sha}..{head_sha}"
     try:
         branch_stat = subprocess.run(
-            ["git", "diff", "--stat", f"{base_branch}...{preserved_branch}"],
+            ["git", "diff", "--stat", diff_range],
             cwd=git_dir,
             capture_output=True,
             text=True,
@@ -332,11 +503,19 @@ def _preserved_branch_changes(
             timeout=10,
         )
         branch_diff = subprocess.run(
-            ["git", "diff", f"{base_branch}...{preserved_branch}"],
+            ["git", "diff", diff_range],
             cwd=git_dir,
             capture_output=True,
             text=True,
             check=True,
+            timeout=10,
+        )
+        shortstat_result = subprocess.run(
+            ["git", "diff", "--shortstat", diff_range],
+            cwd=git_dir,
+            capture_output=True,
+            text=True,
+            check=False,
             timeout=10,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
@@ -346,11 +525,71 @@ def _preserved_branch_changes(
     branch_stat_text = branch_stat.stdout or ""
     if not branch_diff_text and not branch_files and not branch_stat_text.strip():
         return None
+
+    warnings: list[str] = []
+    explicit_merge_base_sha = _resolve_commit_sha(git_dir, str(metadata_obj.get("preserved_merge_base_sha") or "").strip())
+    computed_merge_base_sha = explicit_merge_base_sha or _merge_base_sha(git_dir, base_sha, head_sha)
+
+    if base_source == "heuristic":
+        warnings.append("heuristic_base_inferred")
+        files_changed, additions, deletions = _parse_shortstat_counts(shortstat_result.stdout if shortstat_result else "")
+        if files_changed <= 0:
+            files_changed = len(branch_files)
+        if files_changed >= _LOW_CONFIDENCE_FILE_THRESHOLD:
+            warnings.append("large_file_count")
+        if (additions + deletions) >= _LOW_CONFIDENCE_LINE_THRESHOLD:
+            warnings.append("large_line_churn")
+        if computed_merge_base_sha and computed_merge_base_sha != base_sha:
+            warnings.append("base_not_ancestor")
+        confidence = "low"
+
+        _emit_changes_telemetry_once(
+            bus,
+            task_id=task_id,
+            event_type="task.changes_heuristic_base_used",
+            base_sha=base_sha,
+            head_sha=head_sha,
+            payload={
+                "base_source": base_source,
+                "base_ref": base_ref,
+                "base_sha": base_sha,
+                "head_ref": preserved_branch,
+                "head_sha": head_sha,
+                "warnings": list(warnings),
+            },
+        )
+
+    if warnings:
+        _emit_changes_telemetry_once(
+            bus,
+            task_id=task_id,
+            event_type="task.changes_low_confidence",
+            base_sha=base_sha,
+            head_sha=head_sha,
+            payload={
+                "base_source": base_source,
+                "confidence": confidence,
+                "warnings": list(warnings),
+                "base_ref": base_ref,
+                "base_sha": base_sha,
+                "head_ref": preserved_branch,
+                "head_sha": head_sha,
+            },
+        )
+
+    display_base_branch = str(base_ref or "").strip() or None
     return {
         "mode": "preserved_branch",
         "commit": None,
         "branch": preserved_branch,
-        "base_branch": base_branch,
+        "base_branch": display_base_branch,
+        "base_ref": base_ref,
+        "base_sha": base_sha,
+        "head_ref": preserved_branch,
+        "head_sha": head_sha,
+        "base_source": base_source,
+        "confidence": confidence,
+        "warnings": warnings,
         "files": branch_files,
         "diff": branch_diff_text,
         "stat": branch_stat_text,
@@ -591,7 +830,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Returns:
             A payload with sorted task summaries and total count.
         """
-        container, _, _ = deps.ctx(project_dir)
+        container, bus, _ = deps.ctx(project_dir)
         tasks = container.tasks.list()
         filtered = []
         for task in tasks:
@@ -615,7 +854,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Returns:
             A payload keyed by task status with sorted task cards.
         """
-        container, _, _ = deps.ctx(project_dir)
+        container, bus, _ = deps.ctx(project_dir)
         columns: dict[str, list[dict[str, Any]]] = {
             name: [] for name in ["backlog", "queued", "in_progress", "in_review", "blocked", "done", "cancelled"]
         }
@@ -667,7 +906,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Returns:
             A payload containing ready-to-run batches and recently completed tasks.
         """
-        container, _, _ = deps.ctx(project_dir)
+        container, bus, _ = deps.ctx(project_dir)
         tasks = container.tasks.list()
         terminal = {"done", "cancelled"}
         pending = [t for t in tasks if t.status not in terminal]
@@ -692,7 +931,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task does not exist.
         """
-        container, _, _ = deps.ctx(project_dir)
+        container, bus, _ = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -794,7 +1033,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Prefers committed diff when present; otherwise returns current working tree
         changes for task worktree/repo context.
         """
-        container, _, _ = deps.ctx(project_dir)
+        container, bus, _ = deps.ctx(project_dir)
         task = container.tasks.get(task_id)
         if not task:
             raise HTTPException(status_code=404, detail="Task not found")
@@ -809,6 +1048,13 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             return {
                 "mode": "committed",
                 "commit": commit_payload.get("commit"),
+                "base_ref": None,
+                "base_sha": None,
+                "head_ref": None,
+                "head_sha": None,
+                "base_source": "none",
+                "confidence": "high",
+                "warnings": [],
                 "files": commit_payload.get("files") or [],
                 "diff": commit_payload.get("diff") or "",
                 "stat": commit_payload.get("stat") or "",
@@ -895,24 +1141,63 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 return {
                     "mode": "working_tree",
                     "commit": None,
+                    "base_ref": None,
+                    "base_sha": None,
+                    "head_ref": None,
+                    "head_sha": None,
+                    "base_source": "none",
+                    "confidence": "high",
+                    "warnings": [],
                     "files": files,
                     "diff": diff_text,
                     "stat": stat_text,
                 }
 
-        preserved_payload = _preserved_branch_changes(metadata=task_metadata, git_dir=container.project_dir)
+        preserved_payload = _preserved_branch_changes(
+            task_id=task.id,
+            metadata=task_metadata,
+            git_dir=container.project_dir,
+            bus=bus,
+        )
         if preserved_payload:
             return preserved_payload
 
         if has_task_worktree:
-            return {"mode": "none", "commit": None, "files": [], "diff": "", "stat": ""}
+            return {
+                "mode": "none",
+                "commit": None,
+                "base_ref": None,
+                "base_sha": None,
+                "head_ref": None,
+                "head_sha": None,
+                "base_source": "none",
+                "confidence": "high",
+                "warnings": [],
+                "files": [],
+                "diff": "",
+                "stat": "",
+            }
 
         reason = "task_context_missing"
         if worktree_candidate_present and not has_task_worktree:
             reason = "invalid_worktree_context"
         elif str(task_metadata.get("preserved_branch") or "").strip():
             reason = "preserved_branch_missing"
-        return {"mode": "none", "reason": reason, "commit": None, "files": [], "diff": "", "stat": ""}
+        return {
+            "mode": "none",
+            "reason": reason,
+            "commit": None,
+            "base_ref": None,
+            "base_sha": None,
+            "head_ref": None,
+            "head_sha": None,
+            "base_source": "none",
+            "confidence": "low",
+            "warnings": [],
+            "files": [],
+            "diff": "",
+            "stat": "",
+        }
 
     @router.get("/tasks/{task_id}/logs")
     async def get_task_logs(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import subprocess
 import time
@@ -2233,6 +2234,94 @@ def test_precommit_review_approve_rejects_missing_context(tmp_path: Path) -> Non
         assert "Pre-commit context missing" in str(resp.json().get("detail") or "")
 
 
+def test_precommit_review_approve_accepts_sha_backed_review_context(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    _git(["checkout", "-b", "orchestrator-run-test"], tmp_path)
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    preserved_branch = "task-precommit-ctx"
+    _git(["checkout", "-b", preserved_branch], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\nupdated\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "preserved work",
+        ],
+        tmp_path,
+    )
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    fingerprint = hashlib.sha256(
+        subprocess.run(
+            ["git", "diff", "--binary", "--no-color", f"{base_sha}..{head_sha}"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.encode("utf-8")
+    ).hexdigest()
+    _git(["checkout", "orchestrator-run-test"], tmp_path)
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        client.get("/api/tasks")
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = Task(
+            title="Valid precommit context",
+            status="in_review",
+            task_type="feature",
+            hitl_mode="review_only",
+            metadata={
+                "pending_precommit_approval": True,
+                "review_stage": "pre_commit",
+                "preserved_branch": preserved_branch,
+                "review_context": {
+                    "preserved_branch": preserved_branch,
+                    "base_branch": "orchestrator-run-test",
+                    "base_sha": base_sha,
+                    "head_sha": head_sha,
+                    "diff_fingerprint": fingerprint,
+                },
+            },
+        )
+        container.tasks.upsert(task)
+
+        resp = client.post(f"/api/review/{task.id}/approve", json={})
+        assert resp.status_code == 200
+        payload = resp.json()["task"]
+        assert payload["status"] == "queued"
+
+
 def test_task_changes_endpoint_handles_unborn_head(tmp_path: Path) -> None:
     _git(["init"], tmp_path)
 
@@ -2445,6 +2534,12 @@ def test_task_changes_endpoint_uses_preserved_branch_when_worktree_is_empty(tmp_
         assert payload["commit"] is None
         assert payload["branch"] == preserved_branch
         assert payload["base_branch"] == base_branch
+        assert payload["base_source"] == "heuristic"
+        assert payload["confidence"] == "low"
+        assert payload["base_sha"]
+        assert payload["head_sha"]
+        assert payload["head_ref"] == preserved_branch
+        assert isinstance(payload["warnings"], list)
         assert any(item.get("path") == "tracked.txt" for item in payload["files"])
         assert "+branch change" in payload["diff"]
 
@@ -2514,9 +2609,397 @@ def test_task_changes_endpoint_prefers_preserved_branch_without_task_worktree_co
         assert payload["commit"] is None
         assert payload["branch"] == preserved_branch
         assert payload["base_branch"] == base_branch
+        assert payload["base_source"] == "heuristic"
+        assert payload["confidence"] == "low"
+        assert payload["base_sha"]
+        assert payload["head_sha"]
+        assert payload["head_ref"] == preserved_branch
+        assert isinstance(payload["warnings"], list)
         assert any(item.get("path") == "tracked.txt" for item in payload["files"])
         assert "+branch change" in payload["diff"]
         assert "+working change" not in payload["diff"]
+
+
+def test_task_changes_endpoint_prefers_metadata_sha_anchor_over_heuristic(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(["checkout", "-b", "orchestrator-run-test"], tmp_path)
+    (tmp_path / "run-only.txt").write_text("run only\n", encoding="utf-8")
+    _git(["add", "run-only.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "run branch commit",
+        ],
+        tmp_path,
+    )
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    preserved_branch = "task-task-preserved"
+    _git(["checkout", "-b", preserved_branch], tmp_path)
+    (tmp_path / "task-only.txt").write_text("task only\n", encoding="utf-8")
+    _git(["add", "task-only.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "task branch commit",
+        ],
+        tmp_path,
+    )
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(["checkout", base_branch], tmp_path)
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Metadata anchored changes"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        metadata = dict(stored.metadata or {})
+        metadata["preserved_branch"] = preserved_branch
+        metadata["preserved_base_branch"] = "orchestrator-run-test"
+        metadata["preserved_base_sha"] = base_sha
+        metadata["preserved_head_sha"] = head_sha
+        stored.metadata = metadata
+        container.tasks.upsert(stored)
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "preserved_branch"
+        assert payload["base_source"] == "metadata_sha"
+        assert payload["confidence"] == "high"
+        assert payload["base_ref"] == "orchestrator-run-test"
+        assert payload["base_sha"] == base_sha
+        assert payload["head_sha"] == head_sha
+        assert "+task only" in payload["diff"]
+        assert "run-only.txt" not in payload["diff"]
+
+
+def test_task_changes_endpoint_uses_review_context_anchor_for_legacy_preserved_branch(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(["checkout", "-b", "orchestrator-run-test"], tmp_path)
+    (tmp_path / "run-only.txt").write_text("run only\n", encoding="utf-8")
+    _git(["add", "run-only.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "run branch commit",
+        ],
+        tmp_path,
+    )
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    preserved_branch = "task-task-preserved"
+    _git(["checkout", "-b", preserved_branch], tmp_path)
+    (tmp_path / "task-only.txt").write_text("task only\n", encoding="utf-8")
+    _git(["add", "task-only.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "task branch commit",
+        ],
+        tmp_path,
+    )
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(["checkout", base_branch], tmp_path)
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Review-context anchored changes"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        metadata = dict(stored.metadata or {})
+        metadata["preserved_branch"] = preserved_branch
+        metadata["review_context"] = {
+            "preserved_branch": preserved_branch,
+            "base_branch": "orchestrator-run-test",
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+        }
+        stored.metadata = metadata
+        container.tasks.upsert(stored)
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "preserved_branch"
+        assert payload["base_source"] == "review_context_sha"
+        assert payload["confidence"] == "medium"
+        assert payload["base_ref"] == "orchestrator-run-test"
+        assert payload["base_sha"] == base_sha
+        assert payload["head_sha"] == head_sha
+        assert "+task only" in payload["diff"]
+        assert "run-only.txt" not in payload["diff"]
+
+
+def test_task_changes_endpoint_falls_back_from_stale_metadata_branch_to_review_context_sha(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(["checkout", "-b", "orchestrator-run-test"], tmp_path)
+    (tmp_path / "run-only.txt").write_text("run only\n", encoding="utf-8")
+    _git(["add", "run-only.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "run branch commit",
+        ],
+        tmp_path,
+    )
+    base_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    preserved_branch = "task-task-preserved"
+    _git(["checkout", "-b", preserved_branch], tmp_path)
+    (tmp_path / "task-only.txt").write_text("task only\n", encoding="utf-8")
+    _git(["add", "task-only.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "task branch commit",
+        ],
+        tmp_path,
+    )
+    head_sha = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(["checkout", base_branch], tmp_path)
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Stale metadata branch fallback"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        metadata = dict(stored.metadata or {})
+        metadata["preserved_branch"] = preserved_branch
+        metadata["preserved_base_branch"] = "nonexistent-base-branch"
+        metadata["review_context"] = {
+            "preserved_branch": preserved_branch,
+            "base_branch": "orchestrator-run-test",
+            "base_sha": base_sha,
+            "head_sha": head_sha,
+        }
+        stored.metadata = metadata
+        container.tasks.upsert(stored)
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "preserved_branch"
+        assert payload["base_source"] == "review_context_sha"
+        assert payload["confidence"] == "medium"
+        assert payload["base_ref"] == "orchestrator-run-test"
+        assert payload["base_sha"] == base_sha
+        assert payload["head_sha"] == head_sha
+        assert "+task only" in payload["diff"]
+        assert "run-only.txt" not in payload["diff"]
+
+
+def test_task_changes_endpoint_reports_low_confidence_warning_for_suspicious_heuristic_diff(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "base",
+        ],
+        tmp_path,
+    )
+    base_branch = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    _git(["checkout", "-b", "orchestrator-run-test"], tmp_path)
+
+    for index in range(130):
+        path = tmp_path / f"large-{index:03d}.txt"
+        path.write_text(f"value {index}\n", encoding="utf-8")
+    _git(["add", "."], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "large heuristic diff",
+        ],
+        tmp_path,
+    )
+    preserved_branch = "task-task-preserved"
+    _git(["checkout", "-b", preserved_branch], tmp_path)
+    (tmp_path / "task-only.txt").write_text("task only\n", encoding="utf-8")
+    _git(["add", "task-only.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "task branch commit",
+        ],
+        tmp_path,
+    )
+    _git(["checkout", base_branch], tmp_path)
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post("/api/tasks", json={"title": "Suspicious heuristic diff"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        stored = container.tasks.get(task["id"])
+        assert stored is not None
+        metadata = dict(stored.metadata or {})
+        metadata["preserved_branch"] = preserved_branch
+        stored.metadata = metadata
+        container.tasks.upsert(stored)
+
+        resp = client.get(f"/api/tasks/{task['id']}/changes")
+        assert resp.status_code == 200
+        payload = resp.json()
+        assert payload["mode"] == "preserved_branch"
+        assert payload["base_source"] == "heuristic"
+        assert payload["confidence"] == "low"
+        assert isinstance(payload["warnings"], list)
+        assert "heuristic_base_inferred" in payload["warnings"]
+        assert "large_file_count" in payload["warnings"]
 
 
 def test_task_execution_summary_prefers_terminal_run_for_done_task(tmp_path: Path) -> None:

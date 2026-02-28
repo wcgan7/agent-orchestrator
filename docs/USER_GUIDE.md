@@ -11,7 +11,8 @@ Primary surfaces in the web app:
 - `Execution`
 - `Workers`
 - `Settings`
-- `Create Work` drawer (`Create Task`, `Import PRD`, `Terminal`)
+- `Create Work` modal (`Create Task`, `Import PRD`)
+- Global `Toggle terminal` action (embedded project terminal)
 
 Board ordering defaults:
 - Active columns prioritize urgency (`P0` first) with status-specific recency signals.
@@ -102,7 +103,7 @@ Board clear-all behavior:
 
 ### 3. Use embedded terminal
 
-1. Open `Create Work` -> `Terminal`.
+1. Click `Toggle terminal` in the app shell.
 2. Start or attach to a session.
 3. Send input, resize as needed, stream logs.
 4. Stop session with `TERM` (default) or `KILL`.
@@ -138,6 +139,10 @@ Actions:
 
 Both actions can include optional human guidance and are recorded in task
 history/timeline metadata.
+
+Changes tab note:
+- Preserved-branch diffs may include low-confidence warnings when context is
+  reconstructed from legacy metadata (for example inferred base branch).
 
 ## HITL and Collaboration
 

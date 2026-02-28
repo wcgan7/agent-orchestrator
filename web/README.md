@@ -95,7 +95,10 @@ Accessible from any task card. Tabs: **Overview** (description, execution summar
 ### Create Work
 - **Create Task** — manual task creation with all fields
 - **Import PRD** — preview/commit + import job detail panel
-- **Terminal** — embedded interactive shell session for direct project commands
+
+### Embedded Terminal
+- Open from the global **Toggle terminal** action in the app shell
+- Start or attach to a project terminal session without leaving the UI
 
 ### Task Explorer
 Filtered task list with search, blocked-only toggle, and pagination. Accessible via the board sidebar.

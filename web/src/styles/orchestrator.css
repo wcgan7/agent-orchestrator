@@ -608,8 +608,8 @@ a:focus-visible {
 .settings-grid {
   grid-template-columns: minmax(320px, 1fr) minmax(380px, 1fr);
   grid-template-areas:
-    "projects diagnostics"
-    "routing routing";
+    "routing routing"
+    "projects diagnostics";
   align-items: start;
 }
 
@@ -1649,9 +1649,9 @@ textarea {
   .settings-grid {
     grid-template-columns: 1fr;
     grid-template-areas:
+      "routing"
       "projects"
-      "diagnostics"
-      "routing";
+      "diagnostics";
   }
 
   .provider-grid {

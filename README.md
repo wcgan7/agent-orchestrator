@@ -86,7 +86,7 @@ Frontend runs at `http://localhost:3000` by default (proxies `/api` to the backe
 
 ### Use embedded terminal
 
-1. Open **Create Work** → **Terminal**.
+1. Click **Toggle terminal** in the main UI.
 2. Start or attach to the active project terminal session.
 3. Run commands interactively with live output and ANSI support.
 4. Stop the session from the UI when done.
