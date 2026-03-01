@@ -11,6 +11,8 @@ type RouteKey = 'board' | 'planning' | 'execution' | 'agents' | 'settings'
 type CreateTab = 'task' | 'import'
 type TaskDetailTab = 'overview' | 'plan' | 'workdoc' | 'logs' | 'activity' | 'dependencies' | 'configuration' | 'changes'
 type TaskActionKey = 'save' | 'run' | 'retry' | 'cancel' | 'transition' | 'delete' | 'clear' | 'approve_gate'
+type GeneratedTaskStatus = 'backlog' | 'queued'
+type GeneratedTaskHitlSelection = 'inherit_parent' | 'autopilot' | 'supervised' | 'review_only'
 
 type TaskGateContext = {
   is_waiting: boolean
@@ -277,6 +279,11 @@ type SystemSettings = {
     }
     dependency_policy: string
     hitl_mode: 'autopilot' | 'supervised' | 'review_only'
+    task_generation: {
+      child_status: GeneratedTaskStatus
+      child_hitl_mode: GeneratedTaskHitlSelection
+      infer_deps: boolean
+    }
   }
   workers: {
     default: string
@@ -432,6 +439,70 @@ function isPlanningTaskType(taskType: string | undefined | null): boolean {
   return taskType === 'initiative_plan' || taskType === 'plan_only' || taskType === 'plan'
 }
 
+function normalizeGeneratedTaskStatus(raw: unknown): GeneratedTaskStatus {
+  const value = String(raw || '').trim().toLowerCase()
+  return value === 'queued' ? 'queued' : 'backlog'
+}
+
+function normalizeGeneratedTaskHitlSelection(raw: unknown): GeneratedTaskHitlSelection {
+  const value = String(raw || '').trim().toLowerCase()
+  if (value === 'collaborative') return 'supervised'
+  if (value === 'autopilot' || value === 'supervised' || value === 'review_only' || value === 'inherit_parent') {
+    return value
+  }
+  return 'inherit_parent'
+}
+
+function taskSupportsGenerateTasks(task: TaskRecord | null | undefined): boolean {
+  if (!task) return false
+  const explicitPipeline = Array.isArray(task.pipeline_template) ? task.pipeline_template.map((step) => String(step || '').trim()) : []
+  if (explicitPipeline.length > 0) {
+    return explicitPipeline.includes('generate_tasks')
+  }
+  const taskType = String(task.task_type || '').trim()
+  return new Set(['initiative_plan', 'plan_only', 'plan', 'decompose', 'repo_review', 'security', 'security_audit']).has(taskType)
+}
+
+function resolveTaskGenerationDefaults(
+  task: TaskRecord | null | undefined,
+  systemDefaults?: Partial<SystemSettings['defaults']['task_generation']> | null,
+): {
+  child_status: GeneratedTaskStatus
+  child_hitl_mode: GeneratedTaskHitlSelection
+  infer_deps: boolean
+} {
+  const metadata = task?.metadata && typeof task.metadata === 'object' ? task.metadata : {}
+  const raw = metadata && typeof metadata === 'object'
+    ? (metadata as Record<string, unknown>).task_generation_defaults
+    : null
+  const defaults = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {}
+  const system = systemDefaults && typeof systemDefaults === 'object'
+    ? systemDefaults
+    : DEFAULT_SETTINGS.defaults.task_generation
+  const inferRaw = defaults.infer_deps
+  const systemInferRaw = system.infer_deps
+  const inferDeps = typeof inferRaw === 'boolean'
+    ? inferRaw
+    : (
+      typeof inferRaw === 'string'
+        ? ['true', '1', 'yes', 'on'].includes(inferRaw.trim().toLowerCase())
+        : (
+          typeof systemInferRaw === 'boolean'
+            ? systemInferRaw
+            : true
+        )
+    )
+  return {
+    child_status: normalizeGeneratedTaskStatus(
+      defaults.child_status ?? system.child_status ?? DEFAULT_SETTINGS.defaults.task_generation.child_status,
+    ),
+    child_hitl_mode: normalizeGeneratedTaskHitlSelection(
+      defaults.child_hitl_mode ?? system.child_hitl_mode ?? DEFAULT_SETTINGS.defaults.task_generation.child_hitl_mode,
+    ),
+    infer_deps: inferDeps,
+  }
+}
+
 const DEFAULT_SETTINGS: SystemSettings = {
   orchestrator: {
     concurrency: 2,
@@ -453,6 +524,11 @@ const DEFAULT_SETTINGS: SystemSettings = {
     },
     dependency_policy: 'prudent',
     hitl_mode: 'autopilot',
+    task_generation: {
+      child_status: 'backlog',
+      child_hitl_mode: 'inherit_parent',
+      infer_deps: true,
+    },
   },
   workers: {
     default: 'codex',
@@ -933,6 +1009,7 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
   const routing: Partial<SystemSettings['agent_routing']> = payload?.agent_routing || {}
   const defaults: Partial<SystemSettings['defaults']> = payload?.defaults || {}
   const qualityGate: Partial<SystemSettings['defaults']['quality_gate']> = defaults.quality_gate || {}
+  const taskGenerationDefaults: Partial<SystemSettings['defaults']['task_generation']> = defaults.task_generation || {}
   const workers = normalizeWorkers(payload?.workers)
   const projectCommandsRaw = payload?.project?.commands
   const projectPromptOverrides = normalizePromptMap(payload?.project?.prompt_overrides)
@@ -986,6 +1063,13 @@ function normalizeSettings(payload: Partial<SystemSettings> | null | undefined):
       },
       dependency_policy: ['permissive', 'prudent', 'strict'].includes(String(defaults.dependency_policy || '')) ? String(defaults.dependency_policy) : DEFAULT_SETTINGS.defaults.dependency_policy,
       hitl_mode: normalizeHitlMode(String(defaults.hitl_mode || DEFAULT_SETTINGS.defaults.hitl_mode)),
+      task_generation: {
+        child_status: normalizeGeneratedTaskStatus(taskGenerationDefaults.child_status || DEFAULT_SETTINGS.defaults.task_generation.child_status),
+        child_hitl_mode: normalizeGeneratedTaskHitlSelection(taskGenerationDefaults.child_hitl_mode || DEFAULT_SETTINGS.defaults.task_generation.child_hitl_mode),
+        infer_deps: typeof taskGenerationDefaults.infer_deps === 'boolean'
+          ? taskGenerationDefaults.infer_deps
+          : DEFAULT_SETTINGS.defaults.task_generation.infer_deps,
+      },
     },
     workers,
     project: {
@@ -1611,7 +1695,13 @@ export default function App() {
   const [planGenerateSource, setPlanGenerateSource] = useState<'committed' | 'revision' | 'override' | 'latest'>('latest')
   const [planGenerateRevisionId, setPlanGenerateRevisionId] = useState('')
   const [planGenerateOverride, setPlanGenerateOverride] = useState('')
+  const [planGenerateChildStatus, setPlanGenerateChildStatus] = useState<GeneratedTaskStatus>('backlog')
+  const [planGenerateChildHitlMode, setPlanGenerateChildHitlMode] = useState<GeneratedTaskHitlSelection>('inherit_parent')
   const [planGenerateInferDeps, setPlanGenerateInferDeps] = useState(true)
+  const [planGenerateSaveAsDefault, setPlanGenerateSaveAsDefault] = useState(false)
+  const [taskGenerationSystemDefaults, setTaskGenerationSystemDefaults] = useState<SystemSettings['defaults']['task_generation']>(
+    DEFAULT_SETTINGS.defaults.task_generation,
+  )
   const [planActionMessage, setPlanActionMessage] = useState('')
   const [planActionError, setPlanActionError] = useState('')
   const [taskDetailTab, setTaskDetailTab] = useState<TaskDetailTab>('overview')
@@ -1647,6 +1737,28 @@ export default function App() {
     const timer = window.setTimeout(() => setPlanActionMessage(''), 4000)
     return () => window.clearTimeout(timer)
   }, [planActionMessage])
+
+  useEffect(() => {
+    if (!selectedTaskId) return
+    const allTasks = [
+      ...(board.columns.backlog || []),
+      ...(board.columns.queued || []),
+      ...(board.columns.in_progress || []),
+      ...(board.columns.in_review || []),
+      ...(board.columns.blocked || []),
+      ...(board.columns.done || []),
+      ...(board.columns.cancelled || []),
+    ]
+    const selected = (selectedTaskDetail && selectedTaskDetail.id === selectedTaskId)
+      ? selectedTaskDetail
+      : (allTasks.find((task) => task.id === selectedTaskId) || null)
+    if (!selected) return
+    const defaults = resolveTaskGenerationDefaults(selected, taskGenerationSystemDefaults)
+    setPlanGenerateChildStatus(defaults.child_status)
+    setPlanGenerateChildHitlMode(defaults.child_hitl_mode)
+    setPlanGenerateInferDeps(defaults.infer_deps)
+    setPlanGenerateSaveAsDefault(false)
+  }, [selectedTaskId, taskGenerationSystemDefaults])
 
   // taskEditMode removed — configLocked (status-based) controls editability
   const [taskActionPending, setTaskActionPending] = useState<TaskActionKey | null>(null)
@@ -1860,7 +1972,6 @@ export default function App() {
     setPlanRefineFeedback('')
     setPlanGenerateSource('latest')
     setPlanGenerateOverride('')
-    setPlanGenerateInferDeps(true)
     setTaskDiff(null)
     setTaskDiffLoading(false)
     setReviewGuidance('')
@@ -1938,6 +2049,11 @@ export default function App() {
     setSettingsPromptDefaults({})
     setSettingsPromptStep('')
     void loadProjectIdentity()
+  }, [projectDir])
+
+  useEffect(() => {
+    if (settingsLoadedRef.current || settingsLoading) return
+    void loadSettings()
   }, [projectDir])
 
   useEffect(() => {
@@ -2094,6 +2210,7 @@ export default function App() {
     setSettingsGateLow(String(payload.defaults.quality_gate.low))
     setSettingsDependencyPolicy(payload.defaults.dependency_policy || 'prudent')
     setSettingsDefaultHitlMode(normalizeHitlMode(payload.defaults.hitl_mode))
+    setTaskGenerationSystemDefaults(payload.defaults.task_generation || DEFAULT_SETTINGS.defaults.task_generation)
   }
 
   async function loadSettings(): Promise<void> {
@@ -3716,7 +3833,20 @@ export default function App() {
       const response = await requestJson<{ task: TaskRecord; message?: string }>(buildApiUrl(`/api/tasks/${taskId}/approve-gate`, projectDir), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ gate: gate || undefined, action: 'approve' }),
+        body: JSON.stringify({
+          gate: gate || undefined,
+          action: 'approve',
+          generation_policy: gate === 'before_generate_tasks'
+            ? {
+                child_status: planGenerateChildStatus,
+                child_hitl_mode: planGenerateChildHitlMode,
+                infer_deps: planGenerateInferDeps,
+              }
+            : undefined,
+          save_generation_policy_as_default: gate === 'before_generate_tasks'
+            ? planGenerateSaveAsDefault
+            : undefined,
+        }),
       })
       if (response.message) {
         setTaskActionMessage(response.message)
@@ -3867,6 +3997,12 @@ export default function App() {
     try {
       const payload: Record<string, unknown> = {
         source: planGenerateSource,
+        policy: {
+          child_status: planGenerateChildStatus,
+          child_hitl_mode: planGenerateChildHitlMode,
+          infer_deps: planGenerateInferDeps,
+        },
+        save_as_default: planGenerateSaveAsDefault,
         infer_deps: planGenerateInferDeps,
       }
       if (planGenerateSource === 'revision') {
@@ -3882,12 +4018,24 @@ export default function App() {
         }
         payload.plan_override = planGenerateOverride
       }
-      const result = await requestJson<{ created_task_ids: string[] }>(buildApiUrl(`/api/tasks/${taskId}/generate-tasks`, projectDir), {
+      const result = await requestJson<{
+        created_task_ids: string[]
+        effective_policy?: {
+          child_status?: string
+          child_hitl_mode?: string
+          infer_deps?: boolean
+        }
+      }>(buildApiUrl(`/api/tasks/${taskId}/generate-tasks`, projectDir), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
       })
-      setPlanActionMessage(`Generated ${result.created_task_ids?.length || 0} task(s) from plan.`)
+      const effectiveStatus = result.effective_policy?.child_status ? humanizeLabel(result.effective_policy.child_status) : ''
+      const effectiveHitl = result.effective_policy?.child_hitl_mode ? humanizeLabel(result.effective_policy.child_hitl_mode) : ''
+      const policySuffix = effectiveStatus || effectiveHitl
+        ? ` (${[effectiveStatus, effectiveHitl].filter(Boolean).join(' / ')})`
+        : ''
+      setPlanActionMessage(`Generated ${result.created_task_ids?.length || 0} task(s) from plan${policySuffix}.`)
       try {
         const boardData = await requestJson<BoardResponse>(buildApiUrl('/api/tasks/board', projectDir))
         setBoard(normalizeBoard(boardData))
@@ -4402,6 +4550,7 @@ export default function App() {
   const blockerIds = selectedTaskView?.blocked_by || []
   const blockedIds = selectedTaskView?.blocks || []
   const isPlanTask = isPlanningTaskType(selectedTaskView?.task_type)
+  const selectedTaskSupportsGeneration = taskSupportsGenerateTasks(selectedTaskView)
   const isTaskActionBusy = taskActionPending !== null
   const configLocked = !new Set(['backlog', 'queued', 'blocked', 'cancelled']).has(selectedTaskView?.status || '')
   const taskStatus = selectedTaskView?.status || ''
@@ -4450,6 +4599,104 @@ export default function App() {
     return () => window.clearInterval(timer)
   }, [selectedTaskId, selectedTaskView?.id, selectedTaskView?.timing_summary?.is_running, selectedTaskView?.timing_summary?.active_run_started_at])
 
+  const renderPendingGateBanner = (task: TaskRecord): JSX.Element => (
+    <div className="preview-box plan-gate-banner plan-gate-banner-compact">
+      <div className="plan-gate-header-row">
+        {task.pending_gate === 'before_generate_tasks' ? (
+          <p className="field-label plan-gate-title-inline"><strong>Plan ready to generate tasks</strong> <span aria-hidden="true">·</span> Pending gate</p>
+        ) : (
+          <p className="field-label">Pending gate: <strong>{gateDisplayLabel(task)}</strong></p>
+        )}
+      </div>
+      {task.pending_gate === 'before_generate_tasks' ? (
+        selectedTaskSupportsGeneration ? (
+          <div className="plan-gate-policy-line" role="group" aria-label="Generation policy">
+            <label className="plan-gate-policy-item" htmlFor="gate-quick-status">
+              <span className="plan-gate-policy-label">Start:</span>
+              <select
+                id="gate-quick-status"
+                aria-label="Start"
+                className="plan-gate-inline-select"
+                value={planGenerateChildStatus}
+                onChange={(event) => setPlanGenerateChildStatus(normalizeGeneratedTaskStatus(event.target.value))}
+                disabled={taskActionPending !== null}
+              >
+                <option value="backlog">Backlog</option>
+                <option value="queued">Queue</option>
+              </select>
+            </label>
+            <span className="plan-gate-policy-item">
+              <span className="plan-gate-policy-label">Mode:</span>
+            </span>
+            <div className="plan-gate-policy-item">
+              <HITLModeSelector
+                currentMode={planGenerateChildHitlMode}
+                onModeChange={(mode) => setPlanGenerateChildHitlMode(normalizeGeneratedTaskHitlSelection(mode))}
+                projectDir={projectDir}
+                allowInheritParent
+                inheritParentLabel="Inherit parent"
+                inheritParentDescription="Use the same HITL mode as the parent task."
+                compact
+                disabled={taskActionPending !== null}
+              />
+            </div>
+          </div>
+        ) : (
+          <p className="field-label">This pipeline does not support task generation.</p>
+        )
+      ) : null}
+      <div className="inline-actions plan-gate-actions">
+        <button
+          className="button button-primary"
+          onClick={() => void approveGate(task.id, task.pending_gate)}
+          disabled={taskActionPending === 'approve_gate'}
+        >
+          {taskActionPending === 'approve_gate' && taskActionDetail.startsWith('approve:')
+            ? 'Approving...'
+            : gateApprovalButtonLabel(task.pending_gate)}
+        </button>
+        {!gateRequestOpen ? (
+          <button
+            className="button"
+            onClick={() => setGateRequestOpen(true)}
+            disabled={taskActionPending !== null}
+          >
+            Request changes
+          </button>
+        ) : (
+          <>
+            <input
+              className="review-guidance-input"
+              value={gateRequestGuidance}
+              onChange={(event) => setGateRequestGuidance(event.target.value)}
+              placeholder="Guidance for changes..."
+              disabled={taskActionPending !== null}
+            />
+            <button
+              className="button"
+              onClick={() => void requestGateChanges(task.id, task.pending_gate)}
+              disabled={taskActionPending !== null}
+            >
+              {taskActionPending === 'approve_gate' && taskActionDetail === `request:${String(task.pending_gate || '')}`
+                ? 'Requesting...'
+                : 'Submit'}
+            </button>
+            <button
+              className="button button-ghost"
+              onClick={() => {
+                setGateRequestOpen(false)
+                setGateRequestGuidance('')
+              }}
+              disabled={taskActionPending !== null}
+            >
+              Cancel
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+
   const taskDetailContent = selectedTaskView ? (
       <div className="detail-card">
         {selectedTaskDetailLoading ? <p className="field-label">Loading full task detail...</p> : null}
@@ -4460,60 +4707,7 @@ export default function App() {
             {selectedTaskView.timing_summary?.is_running ? ' · running' : ''}
           </p>
         ) : null}
-        {showTopLevelGateBanner ? (
-          <div className="preview-box plan-gate-banner">
-            <p className="field-label">Pending gate: <strong>{gateDisplayLabel(selectedTaskView)}</strong></p>
-            <div className="inline-actions">
-              <button
-                className="button button-primary"
-                onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}
-                disabled={taskActionPending === 'approve_gate'}
-              >
-                {taskActionPending === 'approve_gate' && taskActionDetail.startsWith('approve:')
-                  ? 'Approving...'
-                  : gateApprovalButtonLabel(selectedTaskView.pending_gate)}
-              </button>
-              {!gateRequestOpen ? (
-                <button
-                  className="button"
-                  onClick={() => setGateRequestOpen(true)}
-                  disabled={taskActionPending !== null}
-                >
-                  Request changes
-                </button>
-              ) : (
-                <>
-                  <input
-                    className="review-guidance-input"
-                    value={gateRequestGuidance}
-                    onChange={(event) => setGateRequestGuidance(event.target.value)}
-                    placeholder="Guidance for changes..."
-                    disabled={taskActionPending !== null}
-                  />
-                  <button
-                    className="button"
-                    onClick={() => void requestGateChanges(selectedTaskView.id, selectedTaskView.pending_gate)}
-                    disabled={taskActionPending !== null}
-                  >
-                    {taskActionPending === 'approve_gate' && taskActionDetail === `request:${String(selectedTaskView.pending_gate || '')}`
-                      ? 'Requesting...'
-                      : 'Submit'}
-                  </button>
-                  <button
-                    className="button button-ghost"
-                    onClick={() => {
-                      setGateRequestOpen(false)
-                      setGateRequestGuidance('')
-                    }}
-                    disabled={taskActionPending !== null}
-                  >
-                    Cancel
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-        ) : null}
+        {showTopLevelGateBanner ? renderPendingGateBanner(selectedTaskView) : null}
         <div className="detail-tabs" role="tablist" aria-label="Task detail sections">
           <button
             className={`detail-tab ${effectiveTaskDetailTab === 'overview' ? 'is-active' : ''}`}
@@ -4788,60 +4982,7 @@ export default function App() {
           )
           return (
             <div className="task-detail-section-body">
-              {showPlanGate && !showTopLevelGateBanner ? (
-                <div className="preview-box plan-gate-banner">
-                  <p className="field-label">{gateDisplayLabel(selectedTaskView)}</p>
-                  <div className="inline-actions">
-                    <button
-                      className="button button-primary"
-                      onClick={() => void approveGate(selectedTaskView.id, selectedTaskView.pending_gate)}
-                      disabled={taskActionPending === 'approve_gate'}
-                    >
-                      {taskActionPending === 'approve_gate' && taskActionDetail.startsWith('approve:')
-                        ? 'Approving...'
-                        : gateApprovalButtonLabel(selectedTaskView.pending_gate)}
-                    </button>
-                    {!gateRequestOpen ? (
-                      <button
-                        className="button"
-                        onClick={() => setGateRequestOpen(true)}
-                        disabled={taskActionPending !== null}
-                      >
-                        Request changes
-                      </button>
-                    ) : (
-                      <>
-                        <input
-                          className="review-guidance-input"
-                          value={gateRequestGuidance}
-                          onChange={(event) => setGateRequestGuidance(event.target.value)}
-                          placeholder="Guidance for changes..."
-                          disabled={taskActionPending !== null}
-                        />
-                        <button
-                          className="button"
-                          onClick={() => void requestGateChanges(selectedTaskView.id, selectedTaskView.pending_gate)}
-                          disabled={taskActionPending !== null}
-                        >
-                          {taskActionPending === 'approve_gate' && taskActionDetail === `request:${String(selectedTaskView.pending_gate || '')}`
-                            ? 'Requesting...'
-                            : 'Submit'}
-                        </button>
-                        <button
-                          className="button button-ghost"
-                          onClick={() => {
-                            setGateRequestOpen(false)
-                            setGateRequestGuidance('')
-                          }}
-                          disabled={taskActionPending !== null}
-                        >
-                          Cancel
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-              ) : null}
+              {showPlanGate && !showTopLevelGateBanner ? renderPendingGateBanner(selectedTaskView) : null}
               {planActionMessage ? <p className="field-label" style={{ color: 'var(--color-success, #5cb85c)' }}>{planActionMessage}</p> : null}
               {planActionError ? <p className="field-label" style={{ color: 'var(--color-danger, #d9534f)' }}>{planActionError}</p> : null}
               {showRefineRunningBanner ? (
@@ -6384,6 +6525,7 @@ export default function App() {
   function renderPlanning(): JSX.Element {
     const allTasks: TaskRecord[] = Object.values(board.columns).flat().filter((t) => isPlanningTaskType(t.task_type))
     const planningTask = allTasks.find((t) => t.id === planningTaskId) || null
+    const planningTaskSupportsGeneration = taskSupportsGenerateTasks(planningTask)
     const planRevisions = selectedTaskPlan?.revisions || []
     const selectedPlanRevision = selectedPlanRevisionId
       ? (planRevisions.find((item) => item.id === selectedPlanRevisionId) || null)
@@ -6600,18 +6742,52 @@ export default function App() {
                       aria-label="Manual generate override"
                     />
                   ) : null}
-                  <label className="checkbox-row">
-                    <input
-                      type="checkbox"
-                      checked={planGenerateInferDeps}
-                      onChange={(event) => setPlanGenerateInferDeps(event.target.checked)}
-                    />
-                    Infer dependencies between generated tasks
-                  </label>
+                  {planningTaskSupportsGeneration ? (
+                    <>
+                      <label className="field-label" htmlFor="planning-generate-status">Start generated tasks in</label>
+                      <select
+                        id="planning-generate-status"
+                        value={planGenerateChildStatus}
+                        onChange={(event) => setPlanGenerateChildStatus(normalizeGeneratedTaskStatus(event.target.value))}
+                      >
+                        <option value="backlog">Backlog</option>
+                        <option value="queued">Queue</option>
+                      </select>
+                      <label className="field-label" htmlFor="planning-generate-hitl">Generated task HITL mode</label>
+                      <select
+                        id="planning-generate-hitl"
+                        value={planGenerateChildHitlMode}
+                        onChange={(event) => setPlanGenerateChildHitlMode(normalizeGeneratedTaskHitlSelection(event.target.value))}
+                      >
+                        <option value="inherit_parent">Inherit parent task mode</option>
+                        <option value="autopilot">Autopilot</option>
+                        <option value="supervised">Supervised</option>
+                        <option value="review_only">Review only</option>
+                      </select>
+                      <label className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={planGenerateInferDeps}
+                          onChange={(event) => setPlanGenerateInferDeps(event.target.checked)}
+                        />
+                        Infer dependencies between generated tasks
+                      </label>
+                      <label className="checkbox-row">
+                        <input
+                          type="checkbox"
+                          checked={planGenerateSaveAsDefault}
+                          onChange={(event) => setPlanGenerateSaveAsDefault(event.target.checked)}
+                        />
+                        Save these settings as this task's generation defaults
+                      </label>
+                    </>
+                  ) : (
+                    <p className="field-label">This pipeline does not support task generation.</p>
+                  )}
                   <button
                     className="button button-primary"
                     onClick={() => void generateTasksFromPlan(planningTask.id)}
-                    disabled={planGenerateLoading}
+                    disabled={planGenerateLoading || !planningTaskSupportsGeneration}
                   >
                     {planGenerateLoading ? 'Generating...' : 'Generate Tasks'}
                   </button>

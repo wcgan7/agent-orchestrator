@@ -25,9 +25,15 @@ interface Props {
   currentMode: string
   onModeChange: (mode: string) => void
   projectDir?: string
+  allowInheritParent?: boolean
+  inheritParentLabel?: string
+  inheritParentDescription?: string
+  disabled?: boolean
+  compact?: boolean
 }
 
 const MODE_ICONS: Record<string, string> = {
+  inherit_parent: '\u21BA',
   autopilot: '\u{1F680}',
   supervised: '\u{1F440}',
   review_only: '\u{1F50D}',
@@ -75,7 +81,16 @@ const DEFAULT_MODES: ModeConfig[] = [
 
 const SELECTABLE_MODES = new Set(['autopilot', 'supervised', 'review_only'])
 
-export default function HITLModeSelector({ currentMode, onModeChange, projectDir }: Props) {
+export default function HITLModeSelector({
+  currentMode,
+  onModeChange,
+  projectDir,
+  allowInheritParent = false,
+  inheritParentLabel = 'Inherit parent',
+  inheritParentDescription = 'Use the parent task HITL mode.',
+  disabled = false,
+  compact = false,
+}: Props) {
   const [modes, setModes] = useState<ModeConfig[]>(DEFAULT_MODES)
   const [expanded, setExpanded] = useState(false)
   const containerRef = useRef<HTMLDivElement | null>(null)
@@ -129,7 +144,21 @@ export default function HITLModeSelector({ currentMode, onModeChange, projectDir
   }, [expanded])
 
   const selectableModes = modes.filter((mode) => SELECTABLE_MODES.has(mode.mode))
-  const currentModeConfig = modes.find(m => m.mode === currentMode) || selectableModes[0] || modes[0]
+  const inheritParentMode: ModeConfig = {
+    mode: 'inherit_parent',
+    display_name: inheritParentLabel,
+    description: inheritParentDescription,
+    approve_before_plan: false,
+    approve_before_implement: false,
+    approve_before_generate_tasks: false,
+    approve_before_commit: false,
+    approve_before_done: false,
+    approve_after_implement: false,
+    allow_unattended: true,
+    require_reasoning: false,
+  }
+  const availableModes = allowInheritParent ? [inheritParentMode, ...selectableModes] : selectableModes
+  const currentModeConfig = availableModes.find((mode) => mode.mode === currentMode) || availableModes[0] || modes[0]
 
   const getGateBadges = (mode: ModeConfig) => {
     const gates: string[] = []
@@ -146,23 +175,24 @@ export default function HITLModeSelector({ currentMode, onModeChange, projectDir
     <div className="hitl-selector" ref={containerRef}>
       <button
         type="button"
-        className="hitl-current"
+        className={`hitl-current${compact ? ' hitl-current-compact' : ''}`}
         aria-haspopup="listbox"
         aria-expanded={expanded}
         aria-controls={listboxIdRef.current}
+        disabled={disabled}
         onClick={() => setExpanded((value) => !value)}
       >
         <span className="hitl-icon">{MODE_ICONS[currentMode] || '\u2699'}</span>
         <div className="hitl-current-info">
           <span className="hitl-current-name">{currentModeConfig?.display_name || currentMode}</span>
-          <span className="hitl-current-desc">{currentModeConfig?.description || ''}</span>
+          {!compact ? <span className="hitl-current-desc">{currentModeConfig?.description || ''}</span> : null}
         </div>
         <span className="hitl-expand">{expanded ? '\u25B2' : '\u25BC'}</span>
       </button>
 
-      {expanded && (
+      {expanded ? (
         <div className="hitl-options" role="listbox" id={listboxIdRef.current}>
-          {selectableModes.map(mode => {
+          {availableModes.map((mode) => {
             const gates = getGateBadges(mode)
             const isActive = mode.mode === currentMode
 
@@ -173,6 +203,7 @@ export default function HITLModeSelector({ currentMode, onModeChange, projectDir
                 className={`hitl-option ${isActive ? 'active' : ''}`}
                 role="option"
                 aria-selected={isActive}
+                disabled={disabled}
                 onClick={() => {
                   onModeChange(mode.mode)
                   setExpanded(false)
@@ -181,27 +212,27 @@ export default function HITLModeSelector({ currentMode, onModeChange, projectDir
                 <div className="hitl-option-header">
                   <span className="hitl-option-icon">{MODE_ICONS[mode.mode] || '\u2699'}</span>
                   <span className="hitl-option-name">{mode.display_name}</span>
-                  {isActive && <span className="hitl-active-badge">Active</span>}
+                  {isActive ? <span className="hitl-active-badge">Active</span> : null}
                 </div>
                 <div className="hitl-option-desc">{mode.description}</div>
-                {gates.length > 0 && (
+                {gates.length > 0 ? (
                   <div className="hitl-option-gates">
                     <span className="gates-label">Approval gates:</span>
-                    {gates.map(g => (
-                      <span key={g} className="gate-badge">{g}</span>
+                    {gates.map((gate) => (
+                      <span key={gate} className="gate-badge">{gate}</span>
                     ))}
                   </div>
-                )}
+                ) : null}
                 {mode.mode === 'autopilot' ? (
                   <div className="hitl-option-flags">
-                    {mode.allow_unattended && <span className="flag-badge flag-unattended">Unattended</span>}
+                    {mode.allow_unattended ? <span className="flag-badge flag-unattended">Unattended</span> : null}
                   </div>
                 ) : null}
               </button>
             )
           })}
         </div>
-      )}
+      ) : null}
     </div>
   )
 }

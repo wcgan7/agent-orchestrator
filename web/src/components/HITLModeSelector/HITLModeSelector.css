@@ -18,6 +18,21 @@
   transition: border-color var(--transition-fast);
 }
 
+.hitl-current-compact {
+  min-height: 2.2rem;
+  padding: 0.35rem 0.55rem;
+  gap: 0.35rem;
+}
+
+.hitl-current-compact .hitl-current-name {
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.hitl-current-compact .hitl-expand {
+  font-size: 11px;
+}
+
 .hitl-current:hover {
   border-color: var(--color-primary-400);
 }

@@ -1151,4 +1151,168 @@ describe('App action coverage', () => {
     expect(screen.getByText(/Provenance:/i)).toBeInTheDocument()
     expect(screen.getByText(/Base branch was inferred heuristically\./i)).toBeInTheDocument()
   })
+
+  it('sends generation policy when approving before_generate_tasks gate', async () => {
+    const jsonResponse = (payload: unknown) => Promise.resolve({ ok: true, json: async () => payload })
+    const task = {
+      id: 'task-gen-1',
+      title: 'Generate gate task',
+      description: 'Decompose initiative',
+      priority: 'P1',
+      status: 'in_progress',
+      task_type: 'initiative_plan',
+      labels: [],
+      blocked_by: [],
+      blocks: [],
+      pending_gate: 'before_generate_tasks',
+      pipeline_template: ['analyze', 'initiative_plan', 'generate_tasks'],
+      hitl_mode: 'supervised',
+      metadata: {
+        task_generation_defaults: {
+          child_status: 'queued',
+          child_hitl_mode: 'supervised',
+          infer_deps: false,
+        },
+      },
+    }
+    const mockedFetch = vi.fn().mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      if (u === '/' || u.startsWith('/?')) return jsonResponse({ project_id: 'repo-alpha' })
+      if (u.includes('/api/collaboration/modes')) return jsonResponse({ modes: [] })
+      if (u.includes('/api/tasks/board')) {
+        return jsonResponse({ columns: { backlog: [], queued: [], in_progress: [task], in_review: [], blocked: [], done: [], cancelled: [] } })
+      }
+      if (u.includes('/api/tasks/task-gen-1') && method === 'GET') return jsonResponse({ task })
+      if (u.includes('/api/tasks/task-gen-1/approve-gate') && method === 'POST') {
+        return jsonResponse({ task: { ...task, pending_gate: null }, message: 'Task generation approved. Task will resume shortly.' })
+      }
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) return jsonResponse({ tasks: [task] })
+      if (u.includes('/api/orchestrator/status')) return jsonResponse({ status: 'running', queue_depth: 0, in_progress: 1, draining: false, run_branch: null })
+      if (u.includes('/api/metrics')) return jsonResponse({})
+      if (u.includes('/api/workers/health')) return jsonResponse({ providers: [] })
+      if (u.includes('/api/workers/routing')) return jsonResponse({ default: 'codex', rows: [] })
+      if (u.includes('/api/agents')) return jsonResponse({ agents: [] })
+      if (u.includes('/api/projects/pinned')) return jsonResponse({ items: [] })
+      if (u.includes('/api/projects')) return jsonResponse({ projects: [] })
+      if (u.includes('/api/review-queue')) return jsonResponse({ tasks: [] })
+      if (u.includes('/api/phases')) return jsonResponse([])
+      if (u.includes('/api/collaboration/presence')) return jsonResponse({ users: [] })
+      if (u.includes('/api/collaboration/timeline/task-gen-1')) return jsonResponse({ events: [] })
+      if (u.includes('/api/collaboration/feedback/task-gen-1')) return jsonResponse({ feedback: [] })
+      if (u.includes('/api/collaboration/comments/task-gen-1')) return jsonResponse({ comments: [] })
+      if (u.includes('/api/tasks/task-gen-1/plan')) return jsonResponse({ task_id: 'task-gen-1', revisions: [] })
+      if (u.includes('/api/tasks/task-gen-1/plan/jobs')) return jsonResponse({ jobs: [] })
+      if (u.includes('/api/tasks/task-gen-1/workdoc')) return jsonResponse({ task_id: 'task-gen-1', content: '', exists: false })
+      if (u.includes('/api/settings')) {
+        return jsonResponse({
+          orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10, step_timeout_seconds: 600 },
+          agent_routing: { default_role: 'general', task_type_roles: {}, role_provider_overrides: {} },
+          defaults: {
+            quality_gate: { critical: 0, high: 0, medium: 0, low: 0 },
+            dependency_policy: 'prudent',
+            hitl_mode: 'autopilot',
+          },
+          workers: { default: 'codex', default_model: '', routing: {}, providers: { codex: { type: 'codex', command: 'codex exec' } } },
+          project: { commands: {}, prompt_overrides: {}, prompt_injections: {}, prompt_defaults: {} },
+        })
+      }
+      return jsonResponse({})
+    })
+    global.fetch = mockedFetch as unknown as typeof fetch
+
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByText('Generate gate task')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Generate gate task'))
+    await waitFor(() => {
+      expect(screen.getByText(/Plan ready to generate tasks/i)).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/Policy:/i)).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText(/^Start$/i), { target: { value: 'backlog' } })
+    fireEvent.click(screen.getByRole('button', { name: /Supervised/i }))
+    fireEvent.click(screen.getByRole('option', { name: /Review Only/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Generate tasks/i }))
+
+    await waitFor(() => {
+      const call = mockedFetch.mock.calls.find(([url, init]) =>
+        String(url).includes('/api/tasks/task-gen-1/approve-gate') && (init as RequestInit | undefined)?.method === 'POST'
+      )
+      expect(call).toBeTruthy()
+      const body = JSON.parse(String((call?.[1] as RequestInit).body))
+      expect(body.generation_policy.child_status).toBe('backlog')
+      expect(body.generation_policy.child_hitl_mode).toBe('review_only')
+      expect(typeof body.generation_policy.infer_deps).toBe('boolean')
+      expect(body.save_generation_policy_as_default).toBe(false)
+    })
+  })
+
+  it('does not render generation controls for incompatible before_generate_tasks gate tasks', async () => {
+    const jsonResponse = (payload: unknown) => Promise.resolve({ ok: true, json: async () => payload })
+    const task = {
+      id: 'task-gen-2',
+      title: 'Incompatible generate gate',
+      description: 'Feature task with inconsistent gate',
+      priority: 'P2',
+      status: 'in_progress',
+      task_type: 'feature',
+      labels: [],
+      blocked_by: [],
+      blocks: [],
+      pending_gate: 'before_generate_tasks',
+      pipeline_template: ['plan', 'implement', 'verify', 'review', 'commit'],
+      hitl_mode: 'autopilot',
+    }
+    const mockedFetch = vi.fn().mockImplementation((url, init) => {
+      const u = String(url)
+      const method = String((init as RequestInit | undefined)?.method || 'GET').toUpperCase()
+      if (u === '/' || u.startsWith('/?')) return jsonResponse({ project_id: 'repo-alpha' })
+      if (u.includes('/api/collaboration/modes')) return jsonResponse({ modes: [] })
+      if (u.includes('/api/tasks/board')) {
+        return jsonResponse({ columns: { backlog: [], queued: [], in_progress: [task], in_review: [], blocked: [], done: [], cancelled: [] } })
+      }
+      if (u.includes('/api/tasks/task-gen-2') && method === 'GET') return jsonResponse({ task })
+      if (u.includes('/api/tasks') && !u.includes('/api/tasks/')) return jsonResponse({ tasks: [task] })
+      if (u.includes('/api/orchestrator/status')) return jsonResponse({ status: 'running', queue_depth: 0, in_progress: 1, draining: false, run_branch: null })
+      if (u.includes('/api/metrics')) return jsonResponse({})
+      if (u.includes('/api/workers/health')) return jsonResponse({ providers: [] })
+      if (u.includes('/api/workers/routing')) return jsonResponse({ default: 'codex', rows: [] })
+      if (u.includes('/api/agents')) return jsonResponse({ agents: [] })
+      if (u.includes('/api/projects/pinned')) return jsonResponse({ items: [] })
+      if (u.includes('/api/projects')) return jsonResponse({ projects: [] })
+      if (u.includes('/api/review-queue')) return jsonResponse({ tasks: [] })
+      if (u.includes('/api/phases')) return jsonResponse([])
+      if (u.includes('/api/collaboration/presence')) return jsonResponse({ users: [] })
+      if (u.includes('/api/collaboration/timeline/task-gen-2')) return jsonResponse({ events: [] })
+      if (u.includes('/api/collaboration/feedback/task-gen-2')) return jsonResponse({ feedback: [] })
+      if (u.includes('/api/collaboration/comments/task-gen-2')) return jsonResponse({ comments: [] })
+      if (u.includes('/api/tasks/task-gen-2/plan')) return jsonResponse({ task_id: 'task-gen-2', revisions: [] })
+      if (u.includes('/api/tasks/task-gen-2/plan/jobs')) return jsonResponse({ jobs: [] })
+      if (u.includes('/api/tasks/task-gen-2/workdoc')) return jsonResponse({ task_id: 'task-gen-2', content: '', exists: false })
+      if (u.includes('/api/settings')) {
+        return jsonResponse({
+          orchestrator: { concurrency: 2, auto_deps: true, max_review_attempts: 10, step_timeout_seconds: 600 },
+          agent_routing: { default_role: 'general', task_type_roles: {}, role_provider_overrides: {} },
+          defaults: { quality_gate: { critical: 0, high: 0, medium: 0, low: 0 }, dependency_policy: 'prudent', hitl_mode: 'autopilot' },
+          workers: { default: 'codex', default_model: '', routing: {}, providers: { codex: { type: 'codex', command: 'codex exec' } } },
+          project: { commands: {}, prompt_overrides: {}, prompt_injections: {}, prompt_defaults: {} },
+        })
+      }
+      return jsonResponse({})
+    })
+    global.fetch = mockedFetch as unknown as typeof fetch
+
+    render(<App />)
+    await waitFor(() => {
+      expect(screen.getByText('Incompatible generate gate')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Incompatible generate gate'))
+    await waitFor(() => {
+      expect(screen.getByText(/This pipeline does not support task generation\./i)).toBeInTheDocument()
+    })
+    expect(screen.queryByText(/Save these settings as this task's generation defaults/i)).not.toBeInTheDocument()
+  })
 })
