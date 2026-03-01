@@ -49,6 +49,8 @@ type TaskRecord = {
   metadata?: Record<string, unknown>
   human_blocking_issues?: HumanBlockingIssue[]
   human_review_actions?: ReviewAction[]
+  can_skip_to_precommit?: boolean
+  skip_to_precommit_reason_code?: string | null
   error?: string | null
   timing_summary?: TaskTimingSummary | null
   execution_summary?: ExecutionSummary | null
@@ -4455,6 +4457,29 @@ export default function App() {
     )
   }
 
+  async function skipToPrecommit(taskId: string): Promise<void> {
+    await runTaskMutation(
+      'transition',
+      async () => {
+        await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}/skip-to-precommit`, projectDir), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ guidance: reviewGuidance.trim() || undefined }),
+        })
+        setReviewGuidance('')
+        await reloadAll()
+        if (selectedTaskIdRef.current === taskId) {
+          await loadTaskDetail(taskId)
+        }
+      },
+      {
+        successMessage: 'Task moved to pre-commit review.',
+        errorPrefix: 'Failed to skip to pre-commit',
+        detail: 'skip_to_precommit',
+      },
+    )
+  }
+
   async function approveTask(taskId: string): Promise<void> {
     await runTaskMutation(
       'transition',
@@ -7073,7 +7098,9 @@ export default function App() {
                 ) : null}
                 {taskStatus === 'blocked' ? (
                   <>
-                    <button className="button" onClick={() => void transitionTask(selectedTaskView.id, 'in_review')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'in_review' ? 'Moving...' : 'Move to Review'}</button>
+                    {selectedTaskView.can_skip_to_precommit ? (
+                      <button className="button button-primary" onClick={() => void skipToPrecommit(selectedTaskView.id)} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'skip_to_precommit' ? 'Moving...' : 'Skip to Pre-commit Review'}</button>
+                    ) : null}
                     <button className="button button-danger" onClick={() => void transitionTask(selectedTaskView.id, 'cancelled')} disabled={isTaskActionBusy}>{taskActionPending === 'transition' && taskActionDetail === 'cancelled' ? 'Cancelling...' : 'Cancel'}</button>
                   </>
                 ) : null}
