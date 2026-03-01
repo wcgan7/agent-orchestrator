@@ -960,7 +960,15 @@ class TaskExecutor:
                             text=True,
                         )
 
-            if task.status in {"done", "cancelled"} and task.metadata.get("worktree_dir"):
+            if task.status == "cancelled":
+                cancel_cleanup = svc._cleanup_cancelled_task_context(task, force=True)
+                if any(
+                    bool(cancel_cleanup.get(key))
+                    for key in ("metadata_changed", "worktree_removed", "branch_deleted", "lease_released")
+                ):
+                    metadata_changed = True
+                worktree_removed = worktree_removed or bool(cancel_cleanup.get("worktree_removed"))
+            elif task.status == "done" and task.metadata.get("worktree_dir"):
                 task.metadata.pop("worktree_dir", None)
                 metadata_changed = True
 

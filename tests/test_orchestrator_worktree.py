@@ -1850,3 +1850,112 @@ def test_can_skip_to_precommit_does_not_depend_on_error_phrase(tmp_path: Path) -
     allowed, reason = service.can_skip_to_precommit(stored)
     assert allowed is True
     assert reason is None
+
+
+def test_cancel_cleanup_defers_while_execution_lease_active_then_reconciles(tmp_path: Path) -> None:
+    """Cancelled cleanup must defer during active lease and finalize on reconcile."""
+    container, service, _ = _service(tmp_path, git=True)
+    task = Task(
+        title="Deferred cancel cleanup",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+    )
+    container.tasks.upsert(task)
+
+    retained_branch = f"task-{task.id}"
+    retained_worktree = container.state_root / "worktrees" / task.id
+    subprocess.run(
+        ["git", "worktree", "add", str(retained_worktree), "-b", retained_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    stored = container.tasks.get(task.id)
+    assert stored is not None
+    stored.metadata = {
+        "worktree_dir": str(retained_worktree),
+        "task_context": {
+            "context_id": "ctx-deferred-cancel",
+            "worktree_dir": str(retained_worktree),
+            "task_branch": retained_branch,
+            "retained": True,
+            "expected_on_retry": True,
+        },
+    }
+    container.tasks.upsert(stored)
+    service._acquire_execution_lease(stored)
+
+    cancelled = service.cancel_task(task.id, source="test_deferred")
+    assert cancelled.status == "cancelled"
+    assert cancelled.metadata.get("cancel_cleanup_pending") is True
+    assert retained_worktree.exists()
+    branch_listing = subprocess.run(
+        ["git", "branch", "--list", retained_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert retained_branch in branch_listing
+
+    latest = container.tasks.get(task.id)
+    assert latest is not None
+    service._release_execution_lease(latest)
+
+    service.reconcile(source="manual")
+    updated = container.tasks.get(task.id)
+    assert updated is not None
+    assert updated.status == "cancelled"
+    assert not retained_worktree.exists()
+    branch_listing_after = subprocess.run(
+        ["git", "branch", "--list", retained_branch],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert branch_listing_after == ""
+    metadata = updated.metadata if isinstance(updated.metadata, dict) else {}
+    assert "worktree_dir" not in metadata
+    assert "task_context" not in metadata
+    assert "cancel_cleanup_pending" not in metadata
+
+
+def test_cancel_cleanup_never_removes_out_of_scope_worktree_paths(tmp_path: Path) -> None:
+    """Cancelled cleanup should clear metadata but never delete out-of-scope paths."""
+    container, service, _ = _service(tmp_path, git=True)
+    outside = tmp_path / "outside-worktree"
+    outside.mkdir(parents=True, exist_ok=True)
+    marker = outside / "keep.txt"
+    marker.write_text("must survive cancel cleanup\n", encoding="utf-8")
+
+    task = Task(
+        title="Out of scope cleanup guard",
+        task_type="feature",
+        status="blocked",
+        hitl_mode="autopilot",
+        metadata={
+            "worktree_dir": str(outside),
+            "task_context": {
+                "context_id": "ctx-outside",
+                "worktree_dir": str(outside),
+                "task_branch": "external-branch",
+                "retained": True,
+                "expected_on_retry": True,
+            },
+        },
+    )
+    container.tasks.upsert(task)
+
+    cancelled = service.cancel_task(task.id, source="test_outside_guard")
+    assert cancelled.status == "cancelled"
+    assert outside.exists()
+    assert marker.exists()
+    updated = container.tasks.get(task.id)
+    assert updated is not None
+    metadata = updated.metadata if isinstance(updated.metadata, dict) else {}
+    assert "worktree_dir" not in metadata
+    assert "task_context" not in metadata

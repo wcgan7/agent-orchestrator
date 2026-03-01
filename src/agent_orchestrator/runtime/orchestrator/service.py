@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
 import threading
 import time
@@ -65,6 +66,22 @@ class OrchestratorService:
     }
     _HUMAN_INTERVENTION_GATE = "human_intervention"
     _SKIP_TO_PRECOMMIT_COMPATIBLE_BLOCKED_STEPS = {"verify", "benchmark"}
+    _CANCELLED_CONTEXT_METADATA_KEYS = (
+        "worktree_dir",
+        "task_context",
+        "preserved_branch",
+        "preserved_base_branch",
+        "preserved_base_sha",
+        "preserved_head_sha",
+        "preserved_merge_base_sha",
+        "preserved_at",
+        "review_context",
+        "pending_precommit_approval",
+        "review_stage",
+        "cancel_cleanup_pending",
+        "cancel_cleanup_deferred_at",
+        "cancel_cleanup_reason",
+    )
 
     def __init__(
         self,
@@ -388,6 +405,150 @@ class OrchestratorService:
             task.metadata.pop("execution_lease", None)
             return True
         return False
+
+    def _task_has_active_future(self, task_id: str, *, active_future_task_ids: set[str] | None = None) -> bool:
+        if active_future_task_ids is not None:
+            return task_id in active_future_task_ids
+        with self._futures_lock:
+            future = self._futures.get(task_id)
+            return bool(future and not future.done())
+
+    @staticmethod
+    def _strip_cancelled_gate_artifacts(task: Task) -> bool:
+        changed = False
+        if task.pending_gate:
+            task.pending_gate = None
+            changed = True
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        for key in (
+            "pending_precommit_approval",
+            "review_stage",
+            "execution_checkpoint",
+            "requested_changes",
+        ):
+            if key in task.metadata:
+                task.metadata.pop(key, None)
+                changed = True
+        return changed
+
+    def _cleanup_cancelled_task_context(
+        self,
+        task: Task,
+        *,
+        active_future_task_ids: set[str] | None = None,
+        force: bool = False,
+    ) -> dict[str, bool]:
+        """Best-effort cancelled-task cleanup with strict active-task guards.
+
+        Cleanup is deferred while a task still has active execution state
+        (future in-flight or unexpired execution lease).
+        """
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        metadata = task.metadata
+
+        has_active_future = self._task_has_active_future(task.id, active_future_task_ids=active_future_task_ids)
+        has_active_lease = self._execution_lease_active(task)
+        deferred = bool((not force) and (has_active_future or has_active_lease))
+        metadata_changed = False
+        worktree_removed = False
+        branch_deleted = False
+        lease_released = False
+
+        if deferred:
+            if metadata.get("cancel_cleanup_pending") is not True:
+                metadata["cancel_cleanup_pending"] = True
+                metadata_changed = True
+            deferred_reason: list[str] = []
+            if has_active_future:
+                deferred_reason.append("active_future")
+            if has_active_lease:
+                deferred_reason.append("active_lease")
+            reason_text = ",".join(deferred_reason) if deferred_reason else "active_execution"
+            if str(metadata.get("cancel_cleanup_reason") or "") != reason_text:
+                metadata["cancel_cleanup_reason"] = reason_text
+                metadata_changed = True
+            if not str(metadata.get("cancel_cleanup_deferred_at") or "").strip():
+                metadata["cancel_cleanup_deferred_at"] = now_iso()
+                metadata_changed = True
+            return {
+                "deferred": True,
+                "metadata_changed": metadata_changed,
+                "worktree_removed": False,
+                "branch_deleted": False,
+                "lease_released": False,
+            }
+
+        expected_worktree = self.container.state_root / "worktrees" / str(task.id)
+        if expected_worktree.exists():
+            if expected_worktree.is_symlink():
+                logger.warning(
+                    "Skipping cancelled-task cleanup for symlinked worktree path: task=%s path=%s",
+                    task.id,
+                    expected_worktree,
+                )
+            else:
+                subprocess.run(
+                    ["git", "worktree", "remove", str(expected_worktree), "--force"],
+                    cwd=self.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                )
+                if expected_worktree.exists():
+                    shutil.rmtree(expected_worktree, ignore_errors=True)
+                worktree_removed = not expected_worktree.exists()
+
+        branch_name = f"task-{task.id}"
+        if (self.container.project_dir / ".git").exists():
+            branch_existed = self._local_branch_exists(branch_name)
+            if branch_existed:
+                subprocess.run(
+                    ["git", "branch", "-D", branch_name],
+                    cwd=self.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                )
+                branch_deleted = not self._local_branch_exists(branch_name)
+
+        lease_released = self._release_execution_lease(task)
+        for key in self._CANCELLED_CONTEXT_METADATA_KEYS:
+            if key in metadata:
+                metadata.pop(key, None)
+                metadata_changed = True
+
+        return {
+            "deferred": False,
+            "metadata_changed": metadata_changed,
+            "worktree_removed": worktree_removed,
+            "branch_deleted": branch_deleted,
+            "lease_released": lease_released,
+        }
+
+    def cancel_task(self, task_id: str, *, source: str = "api_cancel") -> Task:
+        """Cancel a task via one canonical lifecycle path.
+
+        Active tasks defer worktree cleanup; inactive tasks are cleaned up
+        immediately with task-owned path guards.
+        """
+        with self._lock:
+            task = self.container.tasks.get(task_id)
+            if not task:
+                raise ValueError(f"Task not found: {task_id}")
+            task.status = "cancelled"
+            task.current_agent_id = None
+            self._strip_cancelled_gate_artifacts(task)
+            cleanup = self._cleanup_cancelled_task_context(task)
+            task.updated_at = now_iso()
+            self.container.tasks.upsert(task)
+
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.cancelled",
+            entity_id=task.id,
+            payload={"status": "cancelled", "cleanup_deferred": bool(cleanup.get("deferred")), "source": source},
+        )
+        return task
 
     def reconcile(self, *, source: Literal["startup", "automatic", "manual"] = "manual") -> dict[str, Any]:
         """Apply runtime invariants and emit deterministic repair events."""

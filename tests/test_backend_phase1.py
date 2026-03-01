@@ -1487,6 +1487,142 @@ def test_cancel_task_clears_pending_gate_and_checkpoint(tmp_path: Path) -> None:
         assert "execution_checkpoint" not in (updated.metadata or {})
 
 
+def test_cancel_task_immediately_cleans_retained_context_and_branch(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        tmp_path,
+    )
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Cancel cleanup"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        retained_branch = f"task-{task.id}"
+        retained_worktree = container.state_root / "worktrees" / task.id
+        subprocess.run(
+            ["git", "worktree", "add", str(retained_worktree), "-b", retained_branch],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        task.status = "blocked"
+        task.metadata = {
+            "worktree_dir": str(retained_worktree),
+            "task_context": {
+                "context_id": "ctx-cancel-cleanup",
+                "worktree_dir": str(retained_worktree),
+                "task_branch": retained_branch,
+                "retained": True,
+                "expected_on_retry": True,
+            },
+        }
+        container.tasks.upsert(task)
+
+        resp = client.post(f"/api/tasks/{task.id}/cancel")
+        assert resp.status_code == 200
+        payload = resp.json()["task"]
+        assert payload["status"] == "cancelled"
+
+        updated = container.tasks.get(task.id)
+        assert updated is not None
+        assert not retained_worktree.exists()
+        branch_listing = subprocess.run(
+            ["git", "branch", "--list", retained_branch],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert branch_listing == ""
+        metadata = updated.metadata if isinstance(updated.metadata, dict) else {}
+        assert "worktree_dir" not in metadata
+        assert "task_context" not in metadata
+        assert "cancel_cleanup_pending" not in metadata
+
+
+def test_transition_to_cancelled_uses_same_cleanup_path(tmp_path: Path) -> None:
+    _git(["init"], tmp_path)
+    (tmp_path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    _git(["add", "tracked.txt"], tmp_path)
+    _git(
+        [
+            "-c",
+            "user.name=AO Test",
+            "-c",
+            "user.email=ao-test@example.com",
+            "commit",
+            "-m",
+            "init",
+        ],
+        tmp_path,
+    )
+
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Transition cancel cleanup"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        retained_branch = f"task-{task.id}"
+        retained_worktree = container.state_root / "worktrees" / task.id
+        subprocess.run(
+            ["git", "worktree", "add", str(retained_worktree), "-b", retained_branch],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        task.status = "blocked"
+        task.metadata = {
+            "worktree_dir": str(retained_worktree),
+            "task_context": {
+                "context_id": "ctx-transition-cancel",
+                "worktree_dir": str(retained_worktree),
+                "task_branch": retained_branch,
+                "retained": True,
+                "expected_on_retry": True,
+            },
+        }
+        container.tasks.upsert(task)
+
+        resp = client.post(f"/api/tasks/{task.id}/transition", json={"status": "cancelled"})
+        assert resp.status_code == 200
+        payload = resp.json()["task"]
+        assert payload["status"] == "cancelled"
+
+        updated = container.tasks.get(task.id)
+        assert updated is not None
+        assert not retained_worktree.exists()
+        branch_listing = subprocess.run(
+            ["git", "branch", "--list", retained_branch],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert branch_listing == ""
+        metadata = updated.metadata if isinstance(updated.metadata, dict) else {}
+        assert "worktree_dir" not in metadata
+        assert "task_context" not in metadata
+        assert "cancel_cleanup_pending" not in metadata
+
+
 def test_get_task_timing_summary_prefers_earliest_active_run(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     container = Container(tmp_path)

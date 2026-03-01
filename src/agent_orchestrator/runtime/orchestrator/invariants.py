@@ -86,6 +86,28 @@ def apply_runtime_invariants(
                     code="cancelled_cleanup",
                     message="Cleared gate and review artifacts from cancelled task.",
                 )
+            cleanup = service._cleanup_cancelled_task_context(
+                task,
+                active_future_task_ids=active_future_task_ids,
+            )
+            if cleanup.get("deferred"):
+                if cleanup.get("metadata_changed"):
+                    changed = True
+                    _record(
+                        task,
+                        code="cancelled_cleanup_deferred",
+                        message="Deferred cancelled context cleanup because execution is still active.",
+                    )
+            elif any(
+                bool(cleanup.get(key))
+                for key in ("metadata_changed", "worktree_removed", "branch_deleted", "lease_released")
+            ):
+                changed = True
+                _record(
+                    task,
+                    code="cancelled_context_cleanup",
+                    message="Cleaned retained context and branch artifacts from cancelled task.",
+                )
 
         if task.status == "queued" and task.pending_gate:
             gate_name = str(task.pending_gate or "").strip() or "approval"

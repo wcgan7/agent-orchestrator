@@ -19,10 +19,13 @@ class OrchestratorReconciler:
     def run_once(self, *, source: Literal["startup", "automatic", "manual"]) -> dict[str, Any]:
         """Run one reconciliation pass and return summary details."""
         with self._service._futures_lock:
-            active_ids = set(self._service._futures.keys())
+            active_ids = {
+                task_id
+                for task_id, future in self._service._futures.items()
+                if not future.done()
+            }
         return apply_runtime_invariants(
             self._service,
             active_future_task_ids=active_ids,
             source=source,
         )
-

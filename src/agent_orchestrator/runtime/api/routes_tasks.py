@@ -1750,6 +1750,20 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         valid = VALID_TRANSITIONS.get(task.status, set())
         if target not in valid:
             raise HTTPException(status_code=400, detail=f"Invalid transition {task.status} -> {target}")
+        if target == "cancelled":
+            try:
+                cancelled = orchestrator.cancel_task(task.id, source="api_transition")
+            except ValueError as exc:
+                if "Task not found" in str(exc):
+                    raise HTTPException(status_code=404, detail=str(exc))
+                raise HTTPException(status_code=400, detail=str(exc))
+            bus.emit(
+                channel="tasks",
+                event_type="task.transitioned",
+                entity_id=cancelled.id,
+                payload={"status": cancelled.status},
+            )
+            return {"task": _task_payload(cancelled, container, orchestrator)}
         if target == "queued":
             unresolved = _has_unresolved_blockers(container, task)
             if unresolved is not None:
@@ -1930,17 +1944,13 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         Raises:
             HTTPException: If the task does not exist.
         """
-        container, bus, orchestrator = deps.ctx(project_dir)
-        task = container.tasks.get(task_id)
-        if not task:
-            raise HTTPException(status_code=404, detail="Task not found")
-        task.status = "cancelled"
-        task.pending_gate = None
-        task.current_agent_id = None
-        task.metadata = task.metadata if isinstance(task.metadata, dict) else {}
-        task.metadata.pop("execution_checkpoint", None)
-        container.tasks.upsert(task)
-        bus.emit(channel="tasks", event_type="task.cancelled", entity_id=task.id, payload={})
+        container, _, orchestrator = deps.ctx(project_dir)
+        try:
+            task = orchestrator.cancel_task(task_id, source="api_cancel")
+        except ValueError as exc:
+            if "Task not found" in str(exc):
+                raise HTTPException(status_code=404, detail=str(exc))
+            raise HTTPException(status_code=400, detail=str(exc))
         return {"task": _task_payload(task, container, orchestrator)}
 
     @router.post("/tasks/{task_id}/approve-gate")
