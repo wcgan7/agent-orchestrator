@@ -32,10 +32,20 @@ class MockWebSocket {
 function installFetchMock(options?: {
   promptOverrides?: Record<string, string>
   promptInjections?: Record<string, string>
+  clearConflictOnce?: boolean
 }) {
   const jsonResponse = (payload: unknown) =>
     Promise.resolve({
       ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => payload,
+    })
+  const jsonErrorResponse = (status: number, statusText: string, payload: unknown) =>
+    Promise.resolve({
+      ok: false,
+      status,
+      statusText,
       json: async () => payload,
     })
 
@@ -71,6 +81,7 @@ function installFetchMock(options?: {
     blocks: [],
   }
   let boardCleared = false
+  let clearConflictEmitted = false
   let terminalDeleted = false
 
   const taskR1 = {
@@ -153,6 +164,22 @@ function installFetchMock(options?: {
       return jsonResponse({ deleted: true, task_id: 'task-d1' })
     }
     if (u.includes('/api/tasks/clear') && method === 'POST') {
+      if (options?.clearConflictOnce && !clearConflictEmitted && !u.includes('force=true')) {
+        clearConflictEmitted = true
+        return jsonErrorResponse(409, 'Conflict', {
+          detail: {
+            detail: 'Cannot clear tasks while execution is still active. Retry with force=true.',
+            code: 'active_execution',
+            data: {
+              active_execution: {
+                count: 1,
+                task_ids: ['task-1'],
+                task_reasons: { 'task-1': ['active_future'] },
+              },
+            },
+          },
+        })
+      }
       boardCleared = true
       return jsonResponse({
         cleared: true,
@@ -443,6 +470,38 @@ describe('App action coverage', () => {
     })
     await waitFor(() => {
       expect(screen.getByText(/Archived previous runtime state to/i)).toBeInTheDocument()
+    })
+  })
+
+  it('offers force clear when clear is blocked by active execution', async () => {
+    const mockedFetch = installFetchMock({ clearConflictOnce: true })
+    render(<App />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /^Clear All Tasks$/i })).toBeInTheDocument()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Clear All Tasks$/i }))
+
+    await waitFor(() => {
+      expect(
+        mockedFetch.mock.calls.some(([url, init]) =>
+          String(url).includes('/api/tasks/clear') &&
+          !String(url).includes('force=true') &&
+          (init as RequestInit | undefined)?.method === 'POST'
+        )
+      ).toBe(true)
+    })
+
+    await waitFor(() => {
+      expect(
+        mockedFetch.mock.calls.some(([url, init]) =>
+          String(url).includes('/api/tasks/clear?') &&
+          String(url).includes('force=true') &&
+          String(url).includes('timeout_seconds=30') &&
+          (init as RequestInit | undefined)?.method === 'POST'
+        )
+      ).toBe(true)
     })
   })
 

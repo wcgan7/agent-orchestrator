@@ -153,11 +153,26 @@ Notes:
 ### `POST /api/tasks/clear`
 Clear all board tasks by archiving runtime state and reinitializing empty state.
 
+Query parameters:
+- `force` (`false` by default): when `true`, cancel active tasks and wait for quiescence before clear.
+- `timeout_seconds` (`10.0` by default, `0..120`): max wait for shutdown/quiescence.
+
 Response:
 - `cleared` (`true` on success)
 - `archived_to` (absolute archive directory path; empty when no prior state existed)
 - `message` (user-facing archive/clear summary)
 - `cleared_at` (ISO timestamp)
+- `force`
+- `timeout_seconds`
+- `active_execution_before`
+- `active_execution_after`
+- `force_cancel_result`
+- `quiescence_result`
+
+Conflict responses (`409`):
+- `detail.detail` (human-readable message)
+- `detail.code` (`active_execution` or `active_execution_timeout`)
+- `detail.data` (structured diagnostics)
 
 ### `GET /api/tasks/execution-order`
 Returns dependency-aware batches for non-terminal tasks.

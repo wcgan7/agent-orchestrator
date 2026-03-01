@@ -711,20 +711,69 @@ function toHash(route: RouteKey): string {
   return `#/${route}`
 }
 
+type ApiRequestError = Error & {
+  status: number
+  statusText: string
+  url: string
+  code?: string
+  data?: unknown
+  payload?: unknown
+}
+
+function _extractApiErrorFields(payload: unknown): { detail: string; code?: string; data?: unknown } {
+  if (!payload || typeof payload !== 'object') return { detail: '' }
+  const top = payload as Record<string, unknown>
+  let detail = ''
+  let code: string | undefined
+  let data: unknown
+
+  if (typeof top.code === 'string' && top.code.trim()) code = top.code.trim()
+  if (top.data !== undefined) data = top.data
+
+  const rawDetail = top.detail
+  if (typeof rawDetail === 'string') {
+    detail = rawDetail
+    return { detail, code, data }
+  }
+  if (rawDetail && typeof rawDetail === 'object') {
+    const nested = rawDetail as Record<string, unknown>
+    if (typeof nested.detail === 'string' && nested.detail.trim()) {
+      detail = nested.detail
+    } else if (typeof nested.message === 'string' && nested.message.trim()) {
+      detail = nested.message
+    } else if (typeof nested.error === 'string' && nested.error.trim()) {
+      detail = nested.error
+    }
+    if (!code && typeof nested.code === 'string' && nested.code.trim()) code = nested.code.trim()
+    if (data === undefined && nested.data !== undefined) data = nested.data
+    return { detail, code, data }
+  }
+  if (typeof top.message === 'string' && top.message.trim()) detail = top.message
+  return { detail, code, data }
+}
+
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, {
     ...init,
     headers: buildAuthHeaders(init?.headers || {}),
   })
   if (!response.ok) {
-    let detail = ''
+    let payload: unknown = null
     try {
-      const payload = await response.json() as { detail?: string }
-      detail = payload?.detail ? `: ${payload.detail}` : ''
+      payload = await response.json()
     } catch {
       // ignore parse failures for non-json bodies
     }
-    throw new Error(`${response.status} ${response.statusText} [${url}]${detail}`)
+    const parsed = _extractApiErrorFields(payload)
+    const detailSuffix = parsed.detail ? `: ${parsed.detail}` : ''
+    const error = new Error(`${response.status} ${response.statusText} [${url}]${detailSuffix}`) as ApiRequestError
+    error.status = response.status
+    error.statusText = response.statusText
+    error.url = url
+    if (parsed.code) error.code = parsed.code
+    if (parsed.data !== undefined) error.data = parsed.data
+    if (payload !== null) error.payload = payload
+    throw error
   }
   return response.json() as Promise<T>
 }
@@ -3600,17 +3649,43 @@ export default function App() {
     await runTaskMutation(
       'clear',
       async () => {
-        const result = await requestJson<{ cleared: boolean; archived_to?: string; message?: string }>(
-          buildApiUrl('/api/tasks/clear', projectDir),
+        const applyClearResult = async (result: { cleared: boolean; archived_to?: string; message?: string }) => {
+          await reloadAll()
+          modalDismissedRef.current = true
+          modalExplicitRef.current = false
+          setSelectedTaskId('')
+          setSelectedTaskDetail(null)
+          setSelectedTaskPlan(null)
+          setTaskActionMessage(String(result.message || 'Cleared all tasks.'))
+        }
+
+        try {
+          const result = await requestJson<{ cleared: boolean; archived_to?: string; message?: string }>(
+            buildApiUrl('/api/tasks/clear', projectDir),
+            { method: 'POST' },
+          )
+          await applyClearResult(result)
+          return
+        } catch (err) {
+          const apiErr = err as Partial<ApiRequestError>
+          const isActiveExecutionConflict = apiErr.status === 409 && apiErr.code === 'active_execution'
+          if (!isActiveExecutionConflict) throw err
+
+          if (
+            !window.confirm(
+              'Tasks are still running. Force clear will cancel active tasks before archiving state. Continue?'
+            )
+          ) {
+            setTaskActionMessage('Clear cancelled. Active tasks are still running.')
+            return
+          }
+        }
+
+        const forced = await requestJson<{ cleared: boolean; archived_to?: string; message?: string }>(
+          buildApiUrl('/api/tasks/clear', projectDir, { force: true, timeout_seconds: 30 }),
           { method: 'POST' },
         )
-        await reloadAll()
-        modalDismissedRef.current = true
-        modalExplicitRef.current = false
-        setSelectedTaskId('')
-        setSelectedTaskDetail(null)
-        setSelectedTaskPlan(null)
-        setTaskActionMessage(String(result.message || 'Cleared all tasks.'))
+        await applyClearResult(forced)
       },
       {
         startMessage: 'Clearing all tasks...',

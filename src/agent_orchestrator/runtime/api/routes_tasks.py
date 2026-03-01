@@ -88,6 +88,21 @@ _INTERNAL_TASK_METADATA_KEYS = {
 }
 
 
+def _error_detail_envelope(
+    *,
+    detail: str,
+    code: str | None = None,
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return a backward-compatible error envelope for API responses."""
+    payload: dict[str, Any] = {"detail": detail}
+    if code:
+        payload["code"] = code
+    if data:
+        payload["data"] = data
+    return payload
+
+
 def _gate_approved_message(gate: str | None, *, will_resume: bool) -> str:
     normalized = str(gate or "").strip()
     if will_resume:
@@ -1016,44 +1031,114 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         return {"columns": columns}
 
     @router.post("/tasks/clear")
-    async def clear_tasks(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+    async def clear_tasks(
+        project_dir: Optional[str] = Query(None),
+        force: bool = Query(False),
+        timeout_seconds: float = Query(10.0, ge=0.0, le=120.0),
+    ) -> dict[str, Any]:
         """Clear all tasks by archiving runtime state and reinitializing storage.
 
         Args:
             project_dir: Optional project directory used to resolve runtime state.
+            force: Whether to force-cancel active tasks before clear.
+            timeout_seconds: Maximum wait time for shutdown/quiescence.
 
         Returns:
             A payload indicating clear status and archive destination path.
         """
         container, bus, orchestrator = deps.ctx(project_dir)
-        # Pause intake and stop scheduler/workers before mutating state files.
-        orchestrator.control("pause")
-        orchestrator.shutdown(timeout=10.0)
-
-        context_entries = _collect_task_context_manifest_entries(container.tasks.list())
-        context_manifest = archive_task_context_manifest(container.project_dir, context_entries)
-        archived_to = archive_state_root(container.project_dir)
-        ensure_state_root(container.project_dir)
-        deps.job_store.clear()
-        # Clearing state recreates config defaults; ensure queue intake returns
-        # to running mode so queued tasks cannot get stranded in paused mode.
-        orchestrator.control("resume")
-        archive_path = str(archived_to) if archived_to else ""
-        message = (
-            f"Cleared all tasks. Archived previous runtime state to {archive_path}."
-            if archive_path
-            else "Cleared all tasks. No existing runtime state archive was needed."
-        )
-        payload = {
-            "archived_to": archive_path,
-            "message": message,
-            "cleared_at": now_iso(),
-            "archived_context_count": len(context_entries),
-            "archived_context_manifest_path": str(context_manifest) if context_manifest else "",
+        pre_clear_status = str(orchestrator.status().get("status") or "running")
+        clear_succeeded = False
+        clear_timeout = max(float(timeout_seconds), 0.0)
+        force_cancel_result: dict[str, Any] = {
+            "cancelled_task_ids": [],
+            "already_cancelled_task_ids": [],
+            "terminal_skipped_task_ids": [],
+            "missing_task_ids": [],
+            "failed": {},
         }
-        bus.emit(channel="tasks", event_type="tasks.cleared", entity_id=container.project_id, payload=payload)
-        bus.emit(channel="notifications", event_type="tasks.cleared", entity_id=container.project_id, payload=payload)
-        return {"cleared": True, **payload}
+
+        orchestrator.control("pause")
+        try:
+            # Pause intake and stop scheduler/workers before mutating state files.
+            orchestrator.shutdown(timeout=clear_timeout)
+            blockers_before = orchestrator.active_execution_blockers()
+
+            if int(blockers_before.get("count") or 0) > 0 and not force:
+                message = "Cannot clear tasks while execution is still active. Retry with force=true."
+                raise HTTPException(
+                    status_code=409,
+                    detail=_error_detail_envelope(
+                        detail=message,
+                        code="active_execution",
+                        data={"active_execution": blockers_before},
+                    ),
+                )
+
+            blockers_after = blockers_before
+            quiescence_result: dict[str, Any] | None = None
+            if int(blockers_before.get("count") or 0) > 0 and force:
+                force_cancel_result = orchestrator.force_cancel_tasks(
+                    list(blockers_before.get("task_ids") or []),
+                    source="api_clear_force",
+                )
+                quiescence_result = orchestrator.wait_for_execution_quiescence(timeout=clear_timeout)
+                blockers_after = dict(quiescence_result.get("blockers") or {})
+                if not bool(quiescence_result.get("quiescent")):
+                    message = "Forced clear timed out waiting for active execution to stop."
+                    raise HTTPException(
+                        status_code=409,
+                        detail=_error_detail_envelope(
+                            detail=message,
+                            code="active_execution_timeout",
+                            data={
+                                "active_execution": blockers_after,
+                                "force_cancel_result": force_cancel_result,
+                                "waited_seconds": quiescence_result.get("waited_seconds"),
+                            },
+                        ),
+                    )
+
+            context_entries = _collect_task_context_manifest_entries(container.tasks.list())
+            context_manifest = archive_task_context_manifest(container.project_dir, context_entries)
+            archived_to = archive_state_root(container.project_dir)
+            ensure_state_root(container.project_dir)
+            deps.job_store.clear()
+
+            archive_path = str(archived_to) if archived_to else ""
+            message = (
+                f"Cleared all tasks. Archived previous runtime state to {archive_path}."
+                if archive_path
+                else "Cleared all tasks. No existing runtime state archive was needed."
+            )
+            payload = {
+                "archived_to": archive_path,
+                "message": message,
+                "cleared_at": now_iso(),
+                "archived_context_count": len(context_entries),
+                "archived_context_manifest_path": str(context_manifest) if context_manifest else "",
+                "force": force,
+                "timeout_seconds": clear_timeout,
+                "active_execution_before": blockers_before,
+                "active_execution_after": blockers_after,
+                "force_cancel_result": force_cancel_result,
+                "quiescence_result": quiescence_result or {"quiescent": True, "waited_seconds": 0.0},
+            }
+            bus.emit(channel="tasks", event_type="tasks.cleared", entity_id=container.project_id, payload=payload)
+            bus.emit(channel="notifications", event_type="tasks.cleared", entity_id=container.project_id, payload=payload)
+            clear_succeeded = True
+            return {"cleared": True, **payload}
+        finally:
+            # On success, return intake to running mode after storage reinit.
+            # On failure, restore previous status to avoid side-effecting control state.
+            if clear_succeeded:
+                orchestrator.control("resume")
+            elif pre_clear_status == "paused":
+                orchestrator.control("pause")
+            elif pre_clear_status == "stopped":
+                orchestrator.control("stop")
+            else:
+                orchestrator.control("resume")
 
     @router.get("/tasks/execution-order")
     async def execution_order(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:

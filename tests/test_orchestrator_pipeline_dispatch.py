@@ -1539,6 +1539,41 @@ def test_generate_tasks_from_plan_with_deps(tmp_path: Path) -> None:
     assert created_ids[1] in api_task.blocked_by
 
 
+def test_generate_tasks_from_plan_normalizes_generated_task_types(tmp_path: Path) -> None:
+    """Generated task types are constrained to feature/bug/chore."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
+
+    def mock_run_step(*, task, step, attempt):
+        if step == "generate_tasks":
+            return StepResult(
+                status="ok",
+                generated_tasks=[
+                    {"title": "Fix login issue", "task_type": "bugfix"},
+                    {"title": "Fix cache race", "task_type": "bug fix"},
+                    {"title": "Investigate architecture", "task_type": "research"},
+                    {"title": "Clean up scripts", "task_type": "chore"},
+                    {"title": "Unknown shape", "task_type": "whatever"},
+                ],
+            )
+        return StepResult(status="ok")
+
+    adapter = MagicMock()
+    adapter.run_step = mock_run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+
+    task = Task(title="Normalize generated types", task_type="decompose", status="queued")
+    container.tasks.upsert(task)
+
+    created_ids, _ = service.generate_tasks_from_plan(task.id, "Decompose work", infer_deps=False)
+    child_types = [container.tasks.get(task_id).task_type for task_id in created_ids]
+    assert child_types == ["bug", "bug", "feature", "chore", "feature"]
+
+
 def test_pipeline_generate_tasks_consumes_pending_policy_override(tmp_path: Path) -> None:
     """Runtime generate_tasks step should consume one-shot policy override."""
     from unittest.mock import MagicMock

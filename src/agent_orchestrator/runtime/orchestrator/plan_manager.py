@@ -471,7 +471,7 @@ class PlanManager:
             child = Task(
                 title=str(item.get("title") or "Generated task"),
                 description=str(item.get("description") or ""),
-                task_type=str(item.get("task_type") or "feature"),
+                task_type=self._normalize_generated_task_type(item.get("task_type")),
                 priority=cast(Priority, priority),
                 parent_id=parent.id,
                 status=cast(TaskStatus, child_status),
@@ -536,6 +536,25 @@ class PlanManager:
             parent.children_ids.extend(created_ids)
             svc.container.tasks.upsert(parent)
         return created_ids
+
+    @staticmethod
+    def _normalize_generated_task_type(raw: Any) -> str:
+        """Constrain generated child task types to supported execution paths.
+
+        Generated tasks should use a narrow, stable set so pipeline selection
+        stays deterministic. We currently support:
+        - ``feature`` (default/fallback)
+        - ``bug`` (includes common bugfix aliases)
+        - ``chore``
+        """
+        value = str(raw or "").strip().lower()
+        if value in {"bug", "bugfix", "bug_fix", "bug-fix", "bug fix"}:
+            return "bug"
+        if value == "chore":
+            return "chore"
+        if value == "feature":
+            return "feature"
+        return "feature"
 
     def generate_tasks_from_plan(
         self,

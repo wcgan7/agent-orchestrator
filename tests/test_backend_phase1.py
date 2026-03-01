@@ -5,7 +5,7 @@ import hashlib
 import sqlite3
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -2182,6 +2182,113 @@ def test_clear_tasks_archives_context_manifest_when_present(tmp_path: Path) -> N
         assert manifest["items"][0]["task_id"] == task.id
 
 
+def test_clear_tasks_rejects_when_active_execution_present_without_force(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Still running", "status": "queued"}).json()["task"]
+        key = str(tmp_path.resolve())
+        orchestrator = app.state.orchestrators[key]
+        stuck_future: Future[object] = Future()
+        with orchestrator._futures_lock:
+            orchestrator._futures[created["id"]] = stuck_future
+
+        clear_resp = client.post("/api/tasks/clear?timeout_seconds=0")
+        assert clear_resp.status_code == 409
+        detail = clear_resp.json()["detail"]
+        assert "Cannot clear tasks while execution is still active." in str(detail.get("detail") or "")
+        assert detail["code"] == "active_execution"
+        assert created["id"] in set(detail["data"]["active_execution"]["task_ids"])
+
+        assert Container(tmp_path).tasks.get(created["id"]) is not None
+        stuck_future.set_result(None)
+
+
+def test_clear_tasks_reject_does_not_flip_paused_orchestrator_state(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        pause = client.post("/api/orchestrator/control", json={"action": "pause"})
+        assert pause.status_code == 200
+        created = client.post("/api/tasks", json={"title": "Paused clear guard", "status": "queued"}).json()["task"]
+        key = str(tmp_path.resolve())
+        orchestrator = app.state.orchestrators[key]
+        stuck_future: Future[object] = Future()
+        with orchestrator._futures_lock:
+            orchestrator._futures[created["id"]] = stuck_future
+
+        clear_resp = client.post("/api/tasks/clear?timeout_seconds=0")
+        assert clear_resp.status_code == 409
+        status_resp = client.get("/api/orchestrator/status")
+        assert status_resp.status_code == 200
+        assert status_resp.json().get("status") == "paused"
+
+        stuck_future.set_result(None)
+
+
+def test_clear_tasks_force_cancels_in_progress_blockers_and_succeeds(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    container = Container(tmp_path)
+    executing = Task(title="Force clear blocker", status="in_progress", pending_gate="before_implement")
+    container.tasks.upsert(executing)
+
+    with TestClient(app) as client:
+        # Ensure app-owned orchestrator is initialized, then attach an active lease.
+        status_resp = client.get("/api/orchestrator/status")
+        assert status_resp.status_code == 200
+        key = str(tmp_path.resolve())
+        orchestrator = app.state.orchestrators[key]
+        live = container.tasks.get(executing.id)
+        assert live is not None
+        orchestrator._acquire_execution_lease(live)
+
+        clear_resp = client.post("/api/tasks/clear?force=true&timeout_seconds=0")
+        assert clear_resp.status_code == 200
+        body = clear_resp.json()
+        assert body["cleared"] is True
+        assert body["force"] is True
+        assert executing.id in set(body["active_execution_before"]["task_ids"])
+        assert body["quiescence_result"]["quiescent"] is True
+        assert executing.id in set(body["force_cancel_result"]["cancelled_task_ids"])
+        assert Container(tmp_path).tasks.get(executing.id) is None
+
+
+def test_clear_tasks_force_times_out_when_active_future_persists(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Should remain", "status": "queued"}).json()["task"]
+        key = str(tmp_path.resolve())
+        orchestrator = app.state.orchestrators[key]
+        stuck_future: Future[object] = Future()
+        with orchestrator._futures_lock:
+            orchestrator._futures["ghost-running"] = stuck_future
+
+        clear_resp = client.post("/api/tasks/clear?force=true&timeout_seconds=0")
+        assert clear_resp.status_code == 409
+        detail = clear_resp.json()["detail"]
+        assert "Forced clear timed out waiting for active execution to stop." in str(detail.get("detail") or "")
+        assert detail["code"] == "active_execution_timeout"
+        assert "ghost-running" in set(detail["data"]["active_execution"]["task_ids"])
+        assert Container(tmp_path).tasks.get(created["id"]) is not None
+
+        stuck_future.set_result(None)
+
+
+def test_force_cancel_tasks_skips_done_tasks(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        done_task = client.post("/api/tasks", json={"title": "Done task", "status": "done"}).json()["task"]
+        key = str(tmp_path.resolve())
+        orchestrator = app.state.orchestrators[key]
+
+        result = orchestrator.force_cancel_tasks([done_task["id"]], source="test_force_cancel")
+        assert result["cancelled_task_ids"] == []
+        assert result["terminal_skipped_task_ids"] == [done_task["id"]]
+        assert result["failed"] == {}
+
+        latest = Container(tmp_path).tasks.get(done_task["id"])
+        assert latest is not None
+        assert latest.status == "done"
+
+
 def test_api_surfaces_human_blocking_issues_on_task_and_timeline(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
@@ -3891,6 +3998,34 @@ def test_generate_tasks_endpoint(tmp_path: Path) -> None:
         assert body["effective_policy"]["child_status"] == "backlog"
         assert body["effective_policy"]["child_hitl_mode"] == "autopilot"
         assert body["effective_policy"]["infer_deps"] is True
+
+
+def test_generate_tasks_endpoint_normalizes_generated_task_types(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        task = client.post(
+            "/api/tasks",
+            json={
+                "title": "Normalize generated task types",
+                "task_type": "initiative_plan",
+                "status": "backlog",
+                "metadata": {
+                    "scripted_generated_tasks": [
+                        {"title": "Bug fix", "task_type": "bugfix"},
+                        {"title": "Bug fix with space", "task_type": "bug fix"},
+                        {"title": "Research spike", "task_type": "research"},
+                        {"title": "Housekeeping", "task_type": "chore"},
+                    ],
+                },
+            },
+        ).json()["task"]
+        _create_plan_revision(client, task["id"], "Plan body")
+
+        resp = client.post(f"/api/tasks/{task['id']}/generate-tasks", json={"source": "latest"})
+        assert resp.status_code == 200
+        payload = resp.json()
+        child_types = [child["task_type"] for child in payload["children"]]
+        assert child_types == ["bug", "bug", "feature", "chore"]
 
 
 def test_generate_tasks_endpoint_applies_policy_and_persists_defaults(tmp_path: Path) -> None:

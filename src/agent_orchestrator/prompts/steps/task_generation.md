@@ -18,7 +18,7 @@ Task generation rules:
 Output requirements:
 - Return JSON only; no conversational text or markdown fences.
 - Respond with valid JSON matching this schema:
-  `{"tasks": [{"id": "string", "title": "string", "description": "string", "task_type": "feature|bugfix|research|chore", "priority": "P0|P1|P2|P3", "depends_on": ["id-1"]}]}`
+  `{"tasks": [{"id": "string", "title": "string", "description": "string", "task_type": "feature|bug|chore", "priority": "P0|P1|P2|P3", "depends_on": ["id-1"]}]}`
 - Each task must include:
   - `id`
   - `title`

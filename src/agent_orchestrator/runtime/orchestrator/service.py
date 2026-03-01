@@ -670,6 +670,105 @@ class OrchestratorService:
         self._pool_size = desired_workers
         return self._pool
 
+    def active_execution_blockers(self) -> dict[str, Any]:
+        """Return a snapshot of active execution that blocks destructive clear/reset."""
+        self._sweep_futures()
+        now_ts = time.time()
+        tasks = self.container.tasks.list()
+
+        with self._futures_lock:
+            active_future_task_ids = sorted(task_id for task_id, future in self._futures.items() if not future.done())
+
+        in_progress_task_ids: list[str] = []
+        active_lease_task_ids: list[str] = []
+        reasons_by_task: dict[str, list[str]] = {}
+        for task in tasks:
+            if task.status != "in_progress":
+                continue
+            if not task.pending_gate:
+                in_progress_task_ids.append(task.id)
+                reasons_by_task.setdefault(task.id, []).append("in_progress")
+            if self._execution_lease_active(task, now_ts=now_ts):
+                active_lease_task_ids.append(task.id)
+                reasons_by_task.setdefault(task.id, []).append("active_lease")
+
+        for task_id in active_future_task_ids:
+            reasons_by_task.setdefault(task_id, []).append("active_future")
+
+        task_ids = sorted(reasons_by_task.keys())
+        return {
+            "count": len(task_ids),
+            "task_ids": task_ids,
+            "task_reasons": {task_id: sorted(set(reasons_by_task.get(task_id) or [])) for task_id in task_ids},
+            "active_future_task_ids": active_future_task_ids,
+            "active_lease_task_ids": sorted(set(active_lease_task_ids)),
+            "in_progress_task_ids": sorted(set(in_progress_task_ids)),
+        }
+
+    def force_cancel_tasks(self, task_ids: list[str], *, source: str = "api_force_cancel") -> dict[str, Any]:
+        """Best-effort cancel for a set of task ids, with per-id outcome reporting."""
+        cancelled_task_ids: list[str] = []
+        already_cancelled_task_ids: list[str] = []
+        terminal_skipped_task_ids: list[str] = []
+        missing_task_ids: list[str] = []
+        failed: dict[str, str] = {}
+        seen: set[str] = set()
+        for raw_task_id in task_ids:
+            task_id = str(raw_task_id or "").strip()
+            if not task_id or task_id in seen:
+                continue
+            seen.add(task_id)
+            task = self.container.tasks.get(task_id)
+            if not task:
+                missing_task_ids.append(task_id)
+                continue
+            if task.status == "cancelled":
+                already_cancelled_task_ids.append(task_id)
+                continue
+            if task.status == "done":
+                terminal_skipped_task_ids.append(task_id)
+                continue
+            try:
+                self.cancel_task(task_id, source=source)
+                cancelled_task_ids.append(task_id)
+            except Exception as exc:  # pragma: no cover - defensive path
+                failed[task_id] = str(exc)
+        return {
+            "cancelled_task_ids": sorted(cancelled_task_ids),
+            "already_cancelled_task_ids": sorted(already_cancelled_task_ids),
+            "terminal_skipped_task_ids": sorted(terminal_skipped_task_ids),
+            "missing_task_ids": sorted(missing_task_ids),
+            "failed": failed,
+        }
+
+    def wait_for_execution_quiescence(
+        self,
+        *,
+        timeout: float = 10.0,
+        poll_interval: float = 0.1,
+    ) -> dict[str, Any]:
+        """Wait until active execution blockers clear or timeout expires."""
+        timeout_seconds = max(float(timeout), 0.0)
+        poll_seconds = min(max(float(poll_interval), 0.05), 1.0)
+        started = time.monotonic()
+        blockers = self.active_execution_blockers()
+        if int(blockers.get("count") or 0) == 0:
+            return {"quiescent": True, "waited_seconds": 0.0, "blockers": blockers}
+
+        deadline = started + timeout_seconds
+        while time.monotonic() < deadline:
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining <= 0:
+                break
+            time.sleep(min(poll_seconds, remaining))
+            blockers = self.active_execution_blockers()
+            if int(blockers.get("count") or 0) == 0:
+                break
+
+        waited_seconds = max(0.0, time.monotonic() - started)
+        quiescent = int(blockers.get("count") or 0) == 0
+        return {"quiescent": quiescent, "waited_seconds": waited_seconds, "blockers": blockers}
+
     def status(self) -> dict[str, Any]:
         """Build a status snapshot of queue depth and active worker usage.
 
@@ -822,6 +921,7 @@ class OrchestratorService:
             inflight = list(self._futures.values())
         if inflight and timeout > 0:
             wait(inflight, timeout=timeout)
+        self._sweep_futures()
 
         pool = self._pool
         if pool is not None:
@@ -829,8 +929,6 @@ class OrchestratorService:
             self._pool = None
             self._pool_size = 0
 
-        with self._futures_lock:
-            self._futures.clear()
         self._thread = None
         self._watchdog_thread = None
         self._persist_runtime_state(force=True)
