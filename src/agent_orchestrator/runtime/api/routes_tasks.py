@@ -6,7 +6,7 @@ import json
 import re
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional, cast
 
@@ -1481,6 +1481,31 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 for run in all_runs
                 if str(run.id).strip() and str(run.task_id or "").strip() == task.id
             ]
+        # Normalize run ordering using run timestamps so latest-log selection does
+        # not depend on historical run_ids list direction.
+        indexed_run_ids = {run_id_value: idx for idx, run_id_value in enumerate(task_run_ids)}
+
+        def _run_sort_key(run_id_value: str) -> tuple[float, int, str]:
+            run = runs_by_id.get(run_id_value)
+            fallback_idx = indexed_run_ids.get(run_id_value, 10_000_000)
+            if not run:
+                return float("-inf"), fallback_idx, run_id_value
+            started_at_raw = str(getattr(run, "started_at", "") or "").strip()
+            finished_at_raw = str(getattr(run, "finished_at", "") or "").strip()
+            candidate = started_at_raw or finished_at_raw
+            if not candidate:
+                return float("-inf"), fallback_idx, run_id_value
+            normalized = candidate[:-1] + "+00:00" if candidate.endswith("Z") else candidate
+            try:
+                parsed = datetime.fromisoformat(normalized)
+                if parsed.tzinfo is None:
+                    parsed = parsed.replace(tzinfo=timezone.utc)
+                parsed_epoch = parsed.astimezone(timezone.utc).timestamp()
+            except ValueError:
+                parsed_epoch = float("-inf")
+            return parsed_epoch, fallback_idx, run_id_value
+
+        task_run_ids = sorted(task_run_ids, key=_run_sort_key)
         step_execution_counts: dict[str, int] = {}
         step_latest_run: dict[str, str] = {}
         available_steps: list[str] = []
