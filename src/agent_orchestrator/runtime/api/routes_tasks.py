@@ -1602,9 +1602,26 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             else:
                 logs_meta = {"step": requested_step}
         else:
-            logs_meta = active_meta or last_meta or {}
-            selected_run_id = str(logs_meta.get("run_id") or "").strip() or None
-            mode = "active" if active_meta else ("last" if last_meta else "none")
+            # Keep active stream selection first for in-progress tasks, but for
+            # non-scoped requests fall back to the latest historical execution
+            # before considering stale `last_logs` metadata.
+            latest_history = step_history_entries[0] if step_history_entries else None
+            latest_history_entry = latest_history.get("entry") if isinstance(latest_history, dict) else None
+            if active_meta:
+                logs_meta = active_meta
+                selected_run_id = str(logs_meta.get("run_id") or "").strip() or None
+                mode = "active"
+            elif isinstance(latest_history_entry, dict):
+                logs_meta = latest_history_entry
+                selected_run_id = str(latest_history.get("run_id") or "").strip() or None
+                mode = "history"
+            elif last_meta:
+                logs_meta = last_meta
+                selected_run_id = str(logs_meta.get("run_id") or "").strip() or None
+                mode = "last"
+            else:
+                logs_meta = {}
+                mode = "none"
 
         stdout_path = _safe_state_path(logs_meta.get("stdout_path"), container.state_root)
         stderr_path = _safe_state_path(logs_meta.get("stderr_path"), container.state_root)

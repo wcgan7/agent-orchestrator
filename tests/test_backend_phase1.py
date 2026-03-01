@@ -1535,6 +1535,69 @@ def test_task_logs_latest_selection_uses_run_timestamps_not_run_ids_order(tmp_pa
         assert verify_attempts.get(run_new.id) == 2
 
 
+def test_task_logs_default_selection_prefers_latest_history_over_stale_last_logs(tmp_path: Path) -> None:
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Default logs selection"}).json()["task"]
+        container = app.state.containers[str(tmp_path.resolve())]
+        task = container.tasks.get(created["id"])
+        assert task is not None
+
+        logs_dir = container.state_root / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        verify_old = logs_dir / "verify.default.old.stdout.log"
+        verify_old.write_text("verify default old\n", encoding="utf-8")
+        verify_new = logs_dir / "verify.default.new.stdout.log"
+        verify_new.write_text("verify default new\n", encoding="utf-8")
+
+        run_old = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-03-01T14:44:01Z",
+            finished_at="2026-03-01T14:44:31Z",
+            steps=[
+                {
+                    "step": "verify",
+                    "status": "ok",
+                    "stdout_path": str(verify_old),
+                    "started_at": "2026-03-01T14:44:01Z",
+                    "ts": "2026-03-01T14:44:31Z",
+                },
+            ],
+        )
+        run_new = RunRecord(
+            task_id=task.id,
+            status="done",
+            started_at="2026-03-01T14:48:03Z",
+            finished_at="2026-03-01T14:50:33Z",
+            steps=[
+                {
+                    "step": "verify",
+                    "status": "ok",
+                    "stdout_path": str(verify_new),
+                    "started_at": "2026-03-01T14:48:03Z",
+                    "ts": "2026-03-01T14:50:33Z",
+                },
+            ],
+        )
+        container.runs.upsert(run_old)
+        container.runs.upsert(run_new)
+
+        task.run_ids = [run_old.id, run_new.id]
+        task.status = "done"
+        task.current_step = "verify"
+        task.metadata = dict(task.metadata or {})
+        task.metadata["last_logs"] = {"step": "verify", "stdout_path": str(verify_old), "run_id": run_old.id}
+        container.tasks.upsert(task)
+
+        merged = client.get(f"/api/tasks/{task.id}/logs")
+        assert merged.status_code == 200
+        body = merged.json()
+        assert body["mode"] == "history"
+        assert body["run_id"] == run_new.id
+        assert body["stdout"] == "verify default new\n"
+
+
 def test_cancel_task_clears_pending_gate_and_checkpoint(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
     with TestClient(app) as client:
