@@ -1509,12 +1509,26 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                     {
                         "step": step_name,
                         "run_id": task_run_id,
+                        # Temporary recent-first ordinal; normalized below so
+                        # attempt numbers are chronological (oldest=1, newest=N).
                         "attempt": step_attempt_counts[step_name],
                         "started_at": entry.get("started_at"),
                         "finished_at": entry.get("ts"),
                         "entry": entry,
                     }
                 )
+
+        # Normalize per-step attempt numbering so higher attempt means more recent.
+        # `step_history_entries` is recent-first, while `step_execution_counts`
+        # carries total executions for each step.
+        for item in step_history_entries:
+            step_name = str(item.get("step") or "").strip()
+            if not step_name:
+                continue
+            recent_first_attempt = int(item.get("attempt") or 0)
+            total_for_step = int(step_execution_counts.get(step_name) or 0)
+            if recent_first_attempt > 0 and total_for_step > 0:
+                item["attempt"] = total_for_step - recent_first_attempt + 1
 
         # When a specific step is requested, resolve logs strictly for that step.
         step_logs_meta: Optional[dict[str, Any]] = None

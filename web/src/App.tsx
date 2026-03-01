@@ -4421,8 +4421,6 @@ export default function App() {
     selectedTaskView
     && selectedTaskView.status !== 'cancelled'
     && selectedTaskView.pending_gate
-    && selectedTaskView.pending_gate !== 'before_implement'
-    && selectedTaskView.pending_gate !== 'before_generate_tasks'
   )
   const showChangesTab = !!(
     selectedTaskView
@@ -4790,7 +4788,7 @@ export default function App() {
           )
           return (
             <div className="task-detail-section-body">
-              {showPlanGate ? (
+              {showPlanGate && !showTopLevelGateBanner ? (
                 <div className="preview-box plan-gate-banner">
                   <p className="field-label">{gateDisplayLabel(selectedTaskView)}</p>
                   <div className="inline-actions">

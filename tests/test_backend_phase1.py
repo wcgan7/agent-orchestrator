@@ -1437,6 +1437,13 @@ def test_task_logs_include_steps_from_all_runs_and_support_run_id_selection(tmp_
         assert merged_body["step_latest_run"]["verify"] == run_new.id
         assert any(item["step"] == "verify" and item["run_id"] == run_old.id for item in merged_body["step_history"])
         assert any(item["step"] == "verify" and item["run_id"] == run_new.id for item in merged_body["step_history"])
+        verify_attempts = {
+            item["run_id"]: int(item["attempt"])
+            for item in merged_body["step_history"]
+            if item["step"] == "verify"
+        }
+        assert verify_attempts.get(run_old.id) == 1
+        assert verify_attempts.get(run_new.id) == 2
 
         scoped_old = client.get(f"/api/tasks/{task.id}/logs?step=verify&run_id={run_old.id}")
         assert scoped_old.status_code == 200

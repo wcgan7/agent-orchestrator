@@ -1213,6 +1213,15 @@ describe('App default route', () => {
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /^Plan$/i })).toBeInTheDocument()
     })
+    await waitFor(() => {
+      expect(screen.getByText(/Pending gate:/i)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Approve plan/i })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^Logs$/i }))
+    await waitFor(() => {
+      expect(screen.getByText(/Pending gate:/i)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: /Approve plan/i })).toBeInTheDocument()
+    })
     expect(screen.getAllByText('Awaiting Approval').length).toBeGreaterThanOrEqual(2)
   })
 
