@@ -130,6 +130,14 @@ type OrchestratorStatus = {
   dispatch_blocked_reason?: string | null
   last_reconcile_at?: string | null
   reconcile_repairs?: number
+  integration_health?: {
+    status?: string | null
+    last_check_at?: string | null
+    last_check_task_id?: string | null
+    merge_count_since_check?: number
+    failure_summary?: string | null
+    fix_task_id?: string | null
+  } | null
 }
 
 type AgentRecord = {
@@ -658,6 +666,7 @@ function dispatchBlockedReasonLabel(raw: string | null | undefined): string {
   if (normalized === 'concurrency_limit') return 'At concurrency limit'
   if (normalized === 'no_runnable_queued_tasks') return 'No runnable queued tasks'
   if (normalized === 'scheduler_stale') return 'Scheduler stale'
+  if (normalized === 'integration_degraded') return 'Paused — post-merge tests failing'
   return humanizeLabel(normalized)
 }
 
@@ -5718,6 +5727,31 @@ export default function App() {
           {dispatchBlockedReasonLabel(orchestrator?.dispatch_blocked_reason) ? (
             <span className="field-label">Dispatch: {dispatchBlockedReasonLabel(orchestrator?.dispatch_blocked_reason)}</span>
           ) : null}
+          {(() => {
+            const ih = orchestrator?.integration_health
+            if (ih?.status !== 'degraded') return null
+            const fixId = ih.fix_task_id
+            const fixTask = fixId ? Object.values(board.columns).flat().find((t) => t.id === fixId) : null
+            const fixLabel = fixTask ? ` \u2014 fix ${humanizeLabel(fixTask.status)}` : ''
+            return (
+              <span
+                className="field-label"
+                style={{ color: 'var(--color-warning-700)' }}
+                title={ih.failure_summary || undefined}
+              >
+                Post-merge tests: failing{fixLabel}
+                {fixId ? (
+                  <button
+                    className="link-button"
+                    style={{ marginLeft: '0.3rem', color: 'inherit', textDecoration: 'underline' }}
+                    onClick={() => setSelectedTaskId(fixId)}
+                  >
+                    view fix
+                  </button>
+                ) : null}
+              </span>
+            )
+          })()}
         </div>
       </section>
     )
@@ -5776,6 +5810,31 @@ export default function App() {
           {dispatchBlockedReasonLabel(orchestrator?.dispatch_blocked_reason) ? (
             <span className="field-label">Dispatch: {dispatchBlockedReasonLabel(orchestrator?.dispatch_blocked_reason)}</span>
           ) : null}
+          {(() => {
+            const ih = orchestrator?.integration_health
+            if (ih?.status !== 'degraded') return null
+            const fixId = ih.fix_task_id
+            const fixTask = fixId ? Object.values(board.columns).flat().find((t) => t.id === fixId) : null
+            const fixLabel = fixTask ? ` \u2014 fix ${humanizeLabel(fixTask.status)}` : ''
+            return (
+              <span
+                className="field-label"
+                style={{ color: 'var(--color-warning-700)' }}
+                title={ih.failure_summary || undefined}
+              >
+                Post-merge tests: failing{fixLabel}
+                {fixId ? (
+                  <button
+                    className="link-button"
+                    style={{ marginLeft: '0.3rem', color: 'inherit', textDecoration: 'underline' }}
+                    onClick={() => setSelectedTaskId(fixId)}
+                  >
+                    view fix
+                  </button>
+                ) : null}
+              </span>
+            )
+          })()}
         </div>
         <div className="list-stack">
           <p className="field-label section-heading">Execution pipeline</p>
