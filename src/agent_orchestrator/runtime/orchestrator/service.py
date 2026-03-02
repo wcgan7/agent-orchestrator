@@ -1917,6 +1917,22 @@ class OrchestratorService:
         branch_name = str(task_branch or context.get("task_branch") or f"task-{task.id}").strip()
         if branch_name:
             context["task_branch"] = branch_name
+        # Snapshot the worktree HEAD before the task starts working so diffs
+        # can exclude dependency-task commits that were merged beforehand.
+        if worktree_dir is not None and not context.get("initial_head_sha"):
+            try:
+                head_result = subprocess.run(
+                    ["git", "rev-parse", "--verify", "HEAD"],
+                    cwd=worktree_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                if head_result.returncode == 0 and head_result.stdout.strip():
+                    context["initial_head_sha"] = head_result.stdout.strip()
+            except Exception:
+                pass
         context["retained"] = False
         context["retained_reason"] = None
         context["retained_at"] = None

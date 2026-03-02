@@ -365,8 +365,35 @@ def _resolve_worktree_diff_base_ref(
     review_base = str(review_context.get("base_branch") or "").strip()
     if review_base and _resolve_commit_sha(git_dir, review_base):
         return review_base, "review_context"
+
+    # Prefer the snapshot of HEAD at worktree dispatch time — this excludes
+    # dependency-task commits that were merged before this task started.
+    initial_head = str(task_context.get("initial_head_sha") or "").strip()
+    if initial_head and _resolve_commit_sha(git_dir, initial_head):
+        return initial_head, "initial_head"
+
     heuristic = _resolve_base_branch(git_dir, avoid_branch=str(head_ref or "").strip() or None)
     if heuristic and _resolve_commit_sha(git_dir, heuristic):
+        # Guard against including dependency-task commits in the diff.
+        # If every commit between the heuristic base and HEAD belongs to
+        # other tasks (not this one), the base is too broad — fall back to
+        # HEAD so only this task's uncommitted work is shown.
+        task_id = str(task.id)
+        try:
+            log_result = subprocess.run(
+                ["git", "log", "--oneline", f"{heuristic}..HEAD"],
+                cwd=git_dir,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=10,
+            )
+            if log_result.returncode == 0:
+                commits = log_result.stdout.strip().splitlines()
+                if commits and not any(task_id in line for line in commits):
+                    return "HEAD", "head_inferred"
+        except Exception:
+            pass
         return heuristic, "heuristic"
     return None, "none"
 
@@ -723,7 +750,14 @@ def _preserved_branch_changes(
     if not base_sha:
         return None
 
-    diff_range = f"{base_sha}..{head_sha}"
+    # Use the merge-base (not the raw base tip) so the diff only contains
+    # the task's own changes and excludes work merged into the base branch
+    # after the task branched off.
+    explicit_merge_base_sha = _resolve_commit_sha(git_dir, str(metadata_obj.get("preserved_merge_base_sha") or "").strip())
+    computed_merge_base_sha = explicit_merge_base_sha or _merge_base_sha(git_dir, base_sha, head_sha)
+    effective_base = computed_merge_base_sha or base_sha
+
+    diff_range = f"{effective_base}..{head_sha}"
     try:
         branch_stat = subprocess.run(
             ["git", "diff", "--stat", diff_range],
@@ -758,8 +792,6 @@ def _preserved_branch_changes(
         return None
 
     warnings: list[str] = []
-    explicit_merge_base_sha = _resolve_commit_sha(git_dir, str(metadata_obj.get("preserved_merge_base_sha") or "").strip())
-    computed_merge_base_sha = explicit_merge_base_sha or _merge_base_sha(git_dir, base_sha, head_sha)
 
     if base_source == "heuristic":
         warnings.append("heuristic_base_inferred")
@@ -1447,6 +1479,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 )
                 base_ref = None
                 base_source = "none"
+                effective_base_sha: str | None = None
                 if prefer_retained_worktree and has_head:
                     base_ref, base_source = _resolve_worktree_diff_base_ref(
                         task=task,
@@ -1455,8 +1488,14 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                         head_ref=head_ref,
                     )
                 if base_ref and has_head:
-                    stat_cmd = ["git", "diff", "--stat", base_ref]
-                    diff_cmd = ["git", "diff", base_ref]
+                    # Use the merge-base so the diff only shows the task's
+                    # own changes, excluding work merged into the base branch
+                    # after this task branched off.
+                    worktree_merge_base = _merge_base_sha(git_dir, base_ref, "HEAD")
+                    effective_base_sha = worktree_merge_base or _resolve_commit_sha(git_dir, base_ref)
+                    effective_worktree_base = effective_base_sha or base_ref
+                    stat_cmd = ["git", "diff", "--stat", effective_worktree_base]
+                    diff_cmd = ["git", "diff", effective_worktree_base]
                 else:
                     stat_cmd = ["git", "diff", "--stat", "HEAD"] if has_head else ["git", "diff", "--stat"]
                     diff_cmd = ["git", "diff", "HEAD"] if has_head else ["git", "diff"]
@@ -1510,7 +1549,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                     "context_source": "retained_worktree",
                     "commit": None,
                     "base_ref": base_ref,
-                    "base_sha": _resolve_commit_sha(git_dir, base_ref) if base_ref else None,
+                    "base_sha": effective_base_sha or (_resolve_commit_sha(git_dir, base_ref) if base_ref else None),
                     "head_ref": head_ref,
                     "head_sha": _resolve_commit_sha(git_dir, head_ref) if head_ref else None,
                     "base_source": base_source,
