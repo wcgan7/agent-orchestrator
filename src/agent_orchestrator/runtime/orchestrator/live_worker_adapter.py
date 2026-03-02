@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 _PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine"}
 _IMPL_STEPS = {"implement", "prototype"}
 _FIX_STEPS = {"implement_fix"}
-_VERIFY_STEPS = {"verify", "benchmark", "reproduce"}
+_VERIFY_STEPS = {"verify", "benchmark"}
 _REVIEW_STEPS = {"review"}
 _REPORT_STEPS = {"report", "summarize"}
 _SCAN_STEPS = {"scan_deps", "scan_code"}
@@ -42,8 +42,8 @@ _PIPELINE_CLASSIFICATION_STEPS = {"pipeline_classify"}
 # Which prior step outputs each category should receive in its prompt.
 # None = inject all available outputs (for reporting/summarize steps).
 _STEP_OUTPUT_INJECTION: dict[str, tuple[str, ...] | None] = {
-    "implementation": ("plan", "analyze", "reproduce", "diagnose", "profile"),
-    "diagnosis": ("reproduce",),
+    "implementation": ("plan", "analyze", "diagnose", "profile"),
+    "diagnosis": (),
     "planning": (),
     "review": ("verify", "benchmark"),
     "reporting": None,
@@ -53,7 +53,7 @@ _STEP_OUTPUT_INJECTION: dict[str, tuple[str, ...] | None] = {
 }
 
 _STEP_TIMEOUT_ALIASES = {"implement_fix": "implement"}
-_DEFAULT_STEP_TIMEOUT_SECONDS = 600
+_DEFAULT_STEP_TIMEOUT_SECONDS = 0  # 0 = no timeout
 _DEFAULT_HEARTBEAT_SECONDS = 60
 _DEFAULT_HEARTBEAT_GRACE_SECONDS = 240
 
@@ -94,7 +94,6 @@ _SETTINGS_PROMPT_STEPS: tuple[str, ...] = (
     "profile",
     "prototype",
     "report",
-    "reproduce",
     "resolve_merge",
     "review",
     "scan_code",
@@ -1186,7 +1185,7 @@ class LiveWorkerAdapter:
             timeout = int(value)
         except (TypeError, ValueError):
             return default
-        return timeout if timeout > 0 else default
+        return timeout if timeout >= 0 else default
 
     def _default_step_timeout_seconds(self) -> int:
         cfg = self._container.config.load()
@@ -1210,7 +1209,14 @@ class LiveWorkerAdapter:
         except Exception:
             return default_timeout
 
-        step_timeouts = {sd.name: self._coerce_timeout(sd.timeout_seconds, default_timeout) for sd in template.steps}
+        # Only honour template-level timeouts that were explicitly set (i.e.
+        # differ from the StepDef dataclass default of 600s).  Steps using the
+        # default should defer to the global ``step_timeout_seconds`` config
+        # value so that a user-configured default actually applies everywhere.
+        step_timeouts: dict[str, int] = {}
+        for sd in template.steps:
+            if sd.timeout_seconds != _DEFAULT_STEP_TIMEOUT_SECONDS:
+                step_timeouts[sd.name] = self._coerce_timeout(sd.timeout_seconds, default_timeout)
         for key in (step, _STEP_TIMEOUT_ALIASES.get(step)):
             if key and key in step_timeouts:
                 return step_timeouts[key]

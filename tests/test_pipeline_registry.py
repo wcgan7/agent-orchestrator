@@ -29,7 +29,7 @@ class TestPipelineTemplate:
     def test_bug_fix_pipeline_steps(self):
         """Test that bug fix pipeline steps."""
         tmpl = BUILTIN_TEMPLATES["bug_fix"]
-        assert "reproduce" in tmpl.step_names()
+        assert tmpl.step_names() == ["diagnose", "implement", "verify", "review", "commit"]
         assert "diagnose" in tmpl.step_names()
 
     def test_research_pipeline_steps(self):

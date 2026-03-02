@@ -138,7 +138,7 @@ def _run_codex_worker(
 
     while True:
         elapsed = time.monotonic() - start_time
-        if elapsed > timeout_seconds:
+        if timeout_seconds > 0 and elapsed > timeout_seconds:
             timed_out = True
             process.terminate()
             try:

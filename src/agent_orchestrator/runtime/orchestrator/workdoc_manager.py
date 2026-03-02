@@ -31,7 +31,6 @@ class WorkdocManager:
         "implement_fix": ("## Fix Log", None),  # placeholder uses different wording
         "verify": ("## Verification Results", "verify"),
         "benchmark": ("## Verification Results", "verify"),
-        "reproduce": ("## Verification Results", "verify"),
         "report": ("## Final Report", "report"),
     }
     _WORKDOC_SENTINEL_ID_MAP: dict[str, str] = {
@@ -48,7 +47,6 @@ class WorkdocManager:
         "implement_fix": "fix_log",
         "verify": "verification_results",
         "benchmark": "verification_results",
-        "reproduce": "verification_results",
         "report": "final_report",
         "review": "review_findings",
     }
@@ -82,7 +80,6 @@ class WorkdocManager:
         "## Prototype Notes": "implementation_log",
         "## Fix Log": "fix_log",
         "## Verification Results": "verification_results",
-        "## Reproduction Evidence": "verification_results",
         "## Benchmark Results": "verification_results",
         "## Final Report": "final_report",
         "## Security Report": "final_report",
@@ -330,10 +327,6 @@ _Pending: will be populated by the report step._
 {description}
 
 ---
-
-## Reproduction Evidence
-
-_Pending: will be populated by the reproduce step._
 
 ## Diagnosis
 
@@ -681,7 +674,6 @@ _Pending: will be populated by the report step._
                 "analyze": ("## Review Analysis", "analyze"),
             },
             "bug_fix": {
-                "reproduce": ("## Reproduction Evidence", "reproduce"),
                 "diagnose": ("## Diagnosis", "diagnose"),
                 "implement": ("## Fix Implementation", "implement"),
             },
@@ -880,7 +872,7 @@ _Pending: will be populated by the report step._
         changed = False
         sync_mode: str | None = None
         sync_reason: str | None = None
-        orchestrator_managed_steps = {"verify", "benchmark", "reproduce", "implement_fix", "report", "profile"}
+        orchestrator_managed_steps = {"verify", "benchmark", "implement_fix", "report", "profile"}
         allow_worker_workdoc_write = step not in orchestrator_managed_steps
         if worktree_text != canonical_text and allow_worker_workdoc_write:
             section = self.workdoc_section_for_step(task, step)

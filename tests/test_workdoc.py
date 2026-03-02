@@ -266,7 +266,6 @@ def test_init_bug_fix_uses_bug_template(service: OrchestratorService, project_di
     )
     canonical = service._init_workdoc(task, project_dir)
     content = canonical.read_text()
-    assert "## Reproduction Evidence" in content
     assert "## Diagnosis" in content
     assert "## Fix Implementation" in content
     assert "## Verification Results" in content
@@ -858,7 +857,7 @@ def test_sync_blocks_on_malformed_sentinel_comment_format(
 def test_shared_verification_section_appends_attempt_numbering_across_steps(
     service: OrchestratorService, project_dir: Path
 ) -> None:
-    """verify/benchmark/reproduce should share one section with append-only attempt blocks."""
+    """verify/benchmark should share one section with append-only attempt blocks."""
     task = Task(
         title="Shared verification",
         description="Validate shared verification section behavior",
@@ -869,7 +868,6 @@ def test_shared_verification_section_appends_attempt_numbering_across_steps(
 
     service._sync_workdoc(task, "verify", project_dir, "verify attempt one", attempt=1)
     service._sync_workdoc(task, "benchmark", project_dir, "benchmark attempt two", attempt=2)
-    service._sync_workdoc(task, "reproduce", project_dir, "reproduce attempt three", attempt=3)
 
     canonical = service._workdoc_canonical_path(task.id)
     content = canonical.read_text(encoding="utf-8")
@@ -877,8 +875,6 @@ def test_shared_verification_section_appends_attempt_numbering_across_steps(
     assert "verify attempt one" in content
     assert "### Attempt 2" in content
     assert "benchmark attempt two" in content
-    assert "### Attempt 3" in content
-    assert "reproduce attempt three" in content
 
 
 def test_sync_verify_ignores_worker_changes_and_uses_summary(

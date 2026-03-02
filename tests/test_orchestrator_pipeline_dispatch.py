@@ -139,7 +139,7 @@ def test_bug_fix_runs_correct_steps(tmp_path: Path) -> None:
 
     assert result.status == "done"
     steps = _step_names(container, task.id)
-    assert steps == ["reproduce", "diagnose", "implement", "verify", "review", "commit"]
+    assert steps == ["diagnose", "implement", "verify", "review", "commit"]
 
 
 # ---------------------------------------------------------------------------
@@ -148,20 +148,17 @@ def test_bug_fix_runs_correct_steps(tmp_path: Path) -> None:
 
 
 def test_bug_fix_writes_sections_to_workdoc(tmp_path: Path) -> None:
-    """bug_fix run should populate reproduce/diagnose/fix/verify/review/fix-log."""
+    """bug_fix run should populate diagnose/fix/verify/review/fix-log."""
     from unittest.mock import MagicMock
 
     from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 
-    reproduce_text = "reproduce: crash occurs on missing user profile"
     diagnose_text = "diagnose: None dereference in auth adapter"
     implement_text = "implement: added guard and fallback profile path"
     verify_text = "verify: regression and unit checks passed"
     report_text = "report: post-fix review summary"
 
     def mock_run_step(*, task, step, attempt):
-        if step == "reproduce":
-            return StepResult(status="ok", summary=reproduce_text)
         if step == "diagnose":
             return StepResult(status="ok", summary=diagnose_text)
         if step == "implement":
@@ -197,7 +194,6 @@ def test_bug_fix_writes_sections_to_workdoc(tmp_path: Path) -> None:
 
     workdoc = container.state_root / "workdocs" / f"{task.id}.md"
     content = workdoc.read_text(encoding="utf-8")
-    assert reproduce_text in content
     assert diagnose_text in content
     assert implement_text in content
     assert verify_text in content
@@ -205,7 +201,6 @@ def test_bug_fix_writes_sections_to_workdoc(tmp_path: Path) -> None:
     assert "Add missing edge-case test" in content
     assert "### Fix Cycle 1" in content
     assert "added edge-case test coverage" in content
-    assert "_Pending: will be populated by the reproduce step._" not in content
     assert "_Pending: will be populated by the diagnose step._" not in content
     assert "_Pending: will be populated by the implement step._" not in content
     assert "_Pending: will be populated by the verify step._" not in content
@@ -877,7 +872,7 @@ def test_pipeline_template_stored_on_task(tmp_path: Path) -> None:
 
     assert result.status == "done"
     # After execution, the stored template should match the bug_fix pipeline
-    assert result.pipeline_template == ["reproduce", "diagnose", "implement", "verify", "review", "commit"]
+    assert result.pipeline_template == ["diagnose", "implement", "verify", "review", "commit"]
 
 
 # ---------------------------------------------------------------------------

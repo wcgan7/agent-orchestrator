@@ -307,7 +307,7 @@ def _run_ollama_generate(
             stdout_path, "w", encoding="utf-8"
         ) as out, open(stderr_path, "w", encoding="utf-8") as err:
             while True:
-                if time.monotonic() - start > timeout_seconds:
+                if timeout_seconds > 0 and time.monotonic() - start > timeout_seconds:
                     timed_out = True
                     err.write(f"[runner] Ollama timed out after {timeout_seconds}s\n")
                     break

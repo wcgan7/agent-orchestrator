@@ -264,7 +264,7 @@ def _guidance_fallback_step(task: Task, *, target_step: str | None) -> str | Non
     if str(target_step or "").strip() == "implement_fix":
         return None
     pipeline_steps = set(_pipeline_steps(task))
-    if any(step in pipeline_steps for step in {"implement", "prototype", "verify", "benchmark", "reproduce", "review", "commit"}):
+    if any(step in pipeline_steps for step in {"implement", "prototype", "verify", "benchmark", "review", "commit"}):
         return "implement_fix"
     return None
 
@@ -2167,11 +2167,11 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         if start_from.strip():
             task.metadata["retry_from_step"] = start_from.strip()
         elif task.current_step:
-            # Only auto-default to steps that exist in the pipeline or
-            # the special review/commit phases.  Synthetic steps like
-            # "implement_fix" are not in the template and would cause
-            # the retry-from logic to silently skip all phase-1 steps.
-            valid_restart = set(task.pipeline_template or []) | {"review", "commit"}
+            # Auto-default to the current step.  Pipeline template steps and
+            # the special review/commit phases restart directly.  The synthetic
+            # "implement_fix" step is also allowed — the executor will resume
+            # at the parent verify step and re-enter the fix loop.
+            valid_restart = set(task.pipeline_template or []) | {"review", "commit", "implement_fix"}
             if task.current_step in valid_restart:
                 task.metadata["retry_from_step"] = task.current_step
             else:

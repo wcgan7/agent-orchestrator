@@ -107,7 +107,6 @@ This table is authoritative for section resolution and sentinel IDs.
 - `implement_fix` -> `fix_log` -> `## Fix Log`
 - `verify` -> `verification_results` -> `## Verification Results`
 - `benchmark` -> `verification_results` -> `## Verification Results`
-- `reproduce` -> `verification_results` -> `## Verification Results`
 - `report` -> `final_report` -> `## Final Report`
 - `review` -> `review_findings` -> `## Review Findings`
 
@@ -117,7 +116,7 @@ Explicit non-sync skip steps:
 
 V1 policy:
 - Keep existing headings unchanged for compatibility.
-- `verify`/`benchmark`/`reproduce` intentionally share one section in v1.
+- `verify`/`benchmark` intentionally share one section in v1.
 
 Rules:
 - `workdoc_section_for_step` must resolve through this mapping (no free-form IDs).
@@ -169,7 +168,7 @@ Add/extend tests for:
 - Legacy heading fallback still works for old docs.
 - Ambiguous legacy bounds route to fallback append (or explicit error when no summary).
 - Structural sentinel corruption triggers explicit block diagnostic.
-- Shared verification section behavior stays correct for `verify`/`benchmark`/`reproduce` (single section, append-only history).
+- Shared verification section behavior stays correct for `verify`/`benchmark` (single section, append-only history).
 - Event payload includes `sync_mode` and remains backward compatible.
 
 ## Rollout Phases

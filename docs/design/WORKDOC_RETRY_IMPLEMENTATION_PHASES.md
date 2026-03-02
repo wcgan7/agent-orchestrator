@@ -59,7 +59,7 @@ Track execution of the retry/workdoc behavior change from specification to produ
 ### Phase 7B: Template Sentinelization
 - [x] Add sentinel pairs to initialized workdoc templates for all mapped sections.
 - [x] Preserve existing human-readable headings (compatibility-first).
-- [x] Preserve v1 shared-section policy for `verify`/`benchmark`/`reproduce`.
+- [x] Preserve v1 shared-section policy for `verify`/`benchmark`.
 
 ### Phase 7C: Diagnostics + Observability
 - [x] Persist sync diagnostic metadata on fallback/block paths (`workdoc_sync_error_type`, `workdoc_sync_mode`, `workdoc_sync_step`, `workdoc_sync_attempt`).
@@ -69,7 +69,7 @@ Track execution of the retry/workdoc behavior change from specification to produ
 ### Phase 7D: Regression + Sign-off
 - [x] Add regression tests for internal `##` headings, malformed sentinels, and mismatch-state combinations.
 - [x] Add regression tests for legacy non-sentinel fallback behavior.
-- [x] Add regression tests for shared verification section behavior (`verify`/`benchmark`/`reproduce`) and append-only numbering.
+- [x] Add regression tests for shared verification section behavior (`verify`/`benchmark`) and append-only numbering.
 - [x] Run full backend suite in `.venv` with no new regressions.
 - [x] Update docs to match implemented behavior and mark Phase 7 complete.
 

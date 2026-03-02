@@ -392,6 +392,18 @@ class TaskExecutor:
             if isinstance(task.metadata, dict):
                 retry_from = str(task.metadata.pop("retry_from_step", "") or "").strip()
 
+            # Resolve retry_from="implement_fix" to the parent verify step
+            # that originally triggered the fix loop.  The loop below will
+            # re-enter the verify-fix cycle and dispatch implement_fix.
+            resume_implement_fix = False
+            if retry_from == "implement_fix":
+                parent_step = str((task.metadata or {}).get("pipeline_phase") or "").strip()
+                if parent_step in steps:
+                    retry_from = parent_step
+                    resume_implement_fix = True
+                else:
+                    retry_from = ""
+
             start_step: str | None
             if retry_from in steps:
                 start_step = retry_from
@@ -466,54 +478,64 @@ class TaskExecutor:
                 task.current_step = step
                 task.metadata["pipeline_phase"] = step
                 svc.container.tasks.upsert(task)
-                if not svc._run_non_review_step(task, run, step, attempt=1, workdoc_attempt=run_attempt):
-                    if step in _VERIFY_STEPS:
-                        if svc._consume_verify_non_actionable_flag(task):
-                            last_phase1_step = step
-                            continue
-                        fixed = False
-                        for fix_attempt in range(1, max_verify_fix_attempts + 1):
-                            task.status = "in_progress"
-                            task.metadata["verify_failure"] = task.error
-                            svc._capture_verify_output(task)
-                            task.error = None
-                            task.retry_count += 1
-                            svc.container.tasks.upsert(task)
-                            run.status = "in_progress"
-                            run.finished_at = None
-                            run.summary = None
-                            svc.container.runs.upsert(run)
-
-                            task.current_step = "implement_fix"
-                            task.metadata["pipeline_phase"] = step
-                            svc.container.tasks.upsert(task)
-                            if not svc._run_non_review_step(task, run, "implement_fix", attempt=fix_attempt + 1):
-                                return
-                            _consume_human_guidance("implement_fix")
-                            task.metadata.pop("verify_failure", None)
-                            task.metadata.pop("verify_output", None)
-                            task.current_step = step
-                            task.metadata["pipeline_phase"] = step
-                            svc.container.tasks.upsert(task)
-                            if svc._run_non_review_step(task, run, step, attempt=fix_attempt + 1):
-                                _consume_human_guidance(step)
-                                fixed = True
-                                break
-                        if fixed:
-                            last_phase1_step = step
-                            continue
-                        # All verify-fix attempts exhausted — ensure task is blocked.
-                        task.status = "blocked"
-                        task.error = task.error or f"Could not fix {step} after {max_verify_fix_attempts} attempts"
-                        task.current_step = step
+                # When resuming from implement_fix, skip the initial verify
+                # run and enter the fix loop directly — the failure context
+                # is already in task metadata from the previous run.
+                verify_failed = False
+                if resume_implement_fix and step in _VERIFY_STEPS:
+                    verify_failed = True
+                    resume_implement_fix = False  # consume the flag
+                elif not svc._run_non_review_step(task, run, step, attempt=1, workdoc_attempt=run_attempt):
+                    verify_failed = step in _VERIFY_STEPS
+                    if not verify_failed:
+                        return
+                if verify_failed:
+                    if svc._consume_verify_non_actionable_flag(task):
+                        last_phase1_step = step
+                        continue
+                    fixed = False
+                    for fix_attempt in range(1, max_verify_fix_attempts + 1):
+                        task.status = "in_progress"
+                        task.metadata["verify_failure"] = task.error
+                        svc._capture_verify_output(task)
+                        task.error = None
+                        task.retry_count += 1
                         svc.container.tasks.upsert(task)
-                        svc._finalize_run(task, run, status="blocked", summary=f"Blocked: {step} failed after {max_verify_fix_attempts} fix attempts")
-                        svc.bus.emit(
-                            channel="tasks",
-                            event_type="task.blocked",
-                            entity_id=task.id,
-                            payload={"error": task.error},
-                        )
+                        run.status = "in_progress"
+                        run.finished_at = None
+                        run.summary = None
+                        svc.container.runs.upsert(run)
+
+                        task.current_step = "implement_fix"
+                        task.metadata["pipeline_phase"] = step
+                        svc.container.tasks.upsert(task)
+                        if not svc._run_non_review_step(task, run, "implement_fix", attempt=fix_attempt + 1):
+                            return
+                        _consume_human_guidance("implement_fix")
+                        task.metadata.pop("verify_failure", None)
+                        task.metadata.pop("verify_output", None)
+                        task.current_step = step
+                        task.metadata["pipeline_phase"] = step
+                        svc.container.tasks.upsert(task)
+                        if svc._run_non_review_step(task, run, step, attempt=fix_attempt + 1):
+                            _consume_human_guidance(step)
+                            fixed = True
+                            break
+                    if fixed:
+                        last_phase1_step = step
+                        continue
+                    # All verify-fix attempts exhausted — ensure task is blocked.
+                    task.status = "blocked"
+                    task.error = task.error or f"Could not fix {step} after {max_verify_fix_attempts} attempts"
+                    task.current_step = step
+                    svc.container.tasks.upsert(task)
+                    svc._finalize_run(task, run, status="blocked", summary=f"Blocked: {step} failed after {max_verify_fix_attempts} fix attempts")
+                    svc.bus.emit(
+                        channel="tasks",
+                        event_type="task.blocked",
+                        entity_id=task.id,
+                        payload={"error": task.error},
+                    )
                     return
                 _consume_human_guidance(step)
                 last_phase1_step = step

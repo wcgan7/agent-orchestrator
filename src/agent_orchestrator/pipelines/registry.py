@@ -30,7 +30,7 @@ class StepDef:
     display_name: str = ""                         # human-readable label
     required: bool = True                          # can be skipped?
     condition: Optional[str] = None                # skip-rule expression (evaluated at runtime)
-    timeout_seconds: int = 600                     # max time for this step
+    timeout_seconds: int = 0                        # max time for this step; 0 = no timeout
     retry_limit: int = 3                           # retries before escalating
     agent_role: Optional[str] = None               # preferred agent role (None = auto)
     config: dict[str, Any] = field(default_factory=dict)  # step-specific config
@@ -83,10 +83,9 @@ FEATURE_PIPELINE = PipelineTemplate(
 BUG_FIX_PIPELINE = PipelineTemplate(
     id="bug_fix",
     display_name="Bug Fix",
-    description="Reproduce, diagnose, fix, verify, review, commit.",
+    description="Diagnose, fix, verify, review, commit.",
     task_types=("bug",),
     steps=(
-        StepDef(name="reproduce", display_name="Reproduce", timeout_seconds=300),
         StepDef(name="diagnose", display_name="Diagnose"),
         StepDef(name="implement", display_name="Fix"),
         StepDef(name="verify", display_name="Verify"),

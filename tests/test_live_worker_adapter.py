@@ -271,7 +271,8 @@ def test_timeout_override_from_task_metadata(adapter: LiveWorkerAdapter) -> None
 # ---------------------------------------------------------------------------
 
 
-def test_timeout_defaults_from_pipeline_template(adapter: LiveWorkerAdapter) -> None:
+def test_timeout_defaults_to_no_timeout(adapter: LiveWorkerAdapter) -> None:
+    """When no global config override is set, steps default to 0 (no timeout)."""
     run_result = _make_run_result(exit_code=0)
     task = _make_task(task_type="bug")
 
@@ -292,10 +293,10 @@ def test_timeout_defaults_from_pipeline_template(adapter: LiveWorkerAdapter) -> 
             return_value=run_result,
         ) as run_worker_mock,
     ):
-        result = adapter.run_step(task=task, step="reproduce", attempt=1)
+        result = adapter.run_step(task=task, step="diagnose", attempt=1)
 
     assert result.status == "ok"
-    assert run_worker_mock.call_args.kwargs["timeout_seconds"] == 300
+    assert run_worker_mock.call_args.kwargs["timeout_seconds"] == 0
 
 
 def test_timeout_defaults_from_orchestrator_settings_when_step_has_no_template(
@@ -329,6 +330,44 @@ def test_timeout_defaults_from_orchestrator_settings_when_step_has_no_template(
 
     assert result.status == "ok"
     assert run_worker_mock.call_args.kwargs["timeout_seconds"] == 321
+
+
+def test_global_timeout_applies_to_template_steps_and_aliases(
+    container: Container, adapter: LiveWorkerAdapter
+) -> None:
+    """Global step_timeout_seconds should override template defaults for both
+    regular pipeline steps and aliased synthetic steps like implement_fix."""
+    run_result = _make_run_result(exit_code=0)
+    cfg = container.config.load()
+    orchestrator_cfg = dict(cfg.get("orchestrator") or {})
+    orchestrator_cfg["step_timeout_seconds"] = 6000
+    cfg["orchestrator"] = orchestrator_cfg
+    container.config.save(cfg)
+
+    task = _make_task(task_type="bug")
+
+    with (
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.get_workers_runtime_config"
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.resolve_worker_for_step",
+            return_value=_CODEX_SPEC,
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
+            return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
+            return_value=run_result,
+        ) as run_worker_mock,
+    ):
+        # implement_fix aliases to implement — should still get global 6000s
+        result = adapter.run_step(task=task, step="implement_fix", attempt=1)
+
+    assert result.status == "ok"
+    assert run_worker_mock.call_args.kwargs["timeout_seconds"] == 6000
 
 
 def test_heartbeat_defaults_are_forwarded(adapter: LiveWorkerAdapter) -> None:
@@ -1710,16 +1749,14 @@ class TestStepOutputInjection:
         assert "## Output from prior 'plan' step" not in prompt
         assert "## Remediation task generation focus" in prompt
 
-    def test_only_reproduce_injected_for_diagnose(self) -> None:
-        """Test that only reproduce injected for diagnose."""
+    def test_no_prior_output_injected_for_diagnose(self) -> None:
+        """Diagnose is the first step in bug_fix; no prior outputs are injected."""
         task = _make_task(
             task_type="bug",
-            metadata={"step_outputs": {"reproduce": "Fails on null payload", "plan": "Old plan text"}},
+            metadata={"step_outputs": {"plan": "Old plan text"}},
         )
         prompt = build_step_prompt(task=task, step="diagnose", attempt=1)
-        assert "## Output from prior 'reproduce' step" in prompt
-        assert "Fails on null payload" in prompt
-        assert "## Output from prior 'plan' step" not in prompt
+        assert "## Output from prior" not in prompt
 
     def test_no_injection_for_verification(self) -> None:
         """Test that no injection for verification."""

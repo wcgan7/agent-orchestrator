@@ -164,7 +164,7 @@ Tasks execute through pipeline templates matched to their type. These templates 
 | Pipeline | Use case / intent | Steps / flow |
 |---|---|---|
 | `feature` | Standard feature delivery with planning, quality checks, and commit. | `plan → implement → verify → review → commit` |
-| `bug_fix` | Reproduce and diagnose a bug before fixing and validating. | `reproduce → diagnose → implement → verify → review → commit` |
+| `bug_fix` | Diagnose a bug, fix, verify, and commit. | `diagnose → implement → verify → review → commit` |
 | `refactor` | Structured refactor with analysis and explicit plan first. | `analyze → plan → implement → verify → review → commit` |
 | `hotfix` | Fast-path production fix without dedicated diagnosis step. | `implement → verify → review → commit` |
 | `docs` | Documentation updates with quality verification and review. | `analyze → implement → verify → review → commit` |
