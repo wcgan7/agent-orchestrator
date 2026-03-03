@@ -9,7 +9,7 @@ Rules:
   intentional/documented design decisions that need no action.
 - If a finding is labeled 'positive', 'by design', or explicitly states
   no change is needed, drop it.
-- If no actionable issues remain, return {"findings": []}.
+- If no actionable issues remain, return {{"findings": []}}.
 - Each finding must have at least severity, category, and summary.
 - Use the exact severity/category values listed above.
 - Prefer file/line when available; use empty file and line=0 if unknown.
