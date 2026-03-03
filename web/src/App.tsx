@@ -4,6 +4,7 @@ import { ImportJobPanel } from './components/AppPanels/ImportJobPanel'
 import { TerminalPanel } from './components/AppPanels/TerminalPanel'
 import HITLModeSelector from './components/HITLModeSelector/HITLModeSelector'
 import Markdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { humanizeLabel } from './ui/labels'
 import './styles/orchestrator.css'
 
@@ -438,11 +439,16 @@ const TASK_TYPE_OPTIONS = [
   'initiative_plan',
   'bug',
   'refactor',
+  'chore',
+  'hotfix',
   'research',
+  'spike',
   'test',
   'docs',
+  'review',
   'security',
   'performance',
+  'verify_only',
 ]
 
 function isPlanningTaskType(taskType: string | undefined | null): boolean {
@@ -595,7 +601,7 @@ typescript:
 function RenderedMarkdown({ content, className, style }: { content: string; className?: string; style?: CSSProperties }): JSX.Element {
   return (
     <div className={`rendered-markdown ${className || ''}`} style={style}>
-      <Markdown>{content}</Markdown>
+      <Markdown remarkPlugins={[remarkGfm]}>{content}</Markdown>
     </div>
   )
 }

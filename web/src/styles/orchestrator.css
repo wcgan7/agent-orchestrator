@@ -2046,6 +2046,46 @@ textarea {
   background: none;
   padding: 0;
 }
+.rendered-markdown table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5rem 0;
+  font-size: 0.85em;
+}
+.rendered-markdown th,
+.rendered-markdown td {
+  border: 1px solid var(--color-border, #444);
+  padding: 0.3rem 0.6rem;
+  text-align: left;
+}
+.rendered-markdown th {
+  background: var(--color-bg-secondary, #2a2a2a);
+  font-weight: 600;
+}
+.rendered-markdown tr:nth-child(even) {
+  background: var(--color-bg-secondary, #2a2a2a);
+}
+.rendered-markdown blockquote {
+  margin: 0.5rem 0;
+  padding: 0.3rem 0.8rem;
+  border-left: 3px solid var(--color-border, #444);
+  color: var(--color-text-secondary, #aaa);
+}
+.rendered-markdown blockquote p {
+  margin: 0.2rem 0;
+}
+.rendered-markdown hr {
+  border: none;
+  border-top: 1px solid var(--color-border, #444);
+  margin: 0.75rem 0;
+}
+.rendered-markdown img {
+  max-width: 100%;
+  height: auto;
+}
+.rendered-markdown input[type="checkbox"] {
+  margin-right: 0.4rem;
+}
 /* Plan content specific: constrain height and scroll */
 .plan-content-field.rendered-markdown {
   max-height: 36rem;
