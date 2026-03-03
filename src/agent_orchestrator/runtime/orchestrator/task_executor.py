@@ -224,12 +224,15 @@ class TaskExecutor:
                     entity_id=fresh.id,
                     payload={"status": "cancelled"},
                 )
-        except Exception:
+        except Exception as exc:
             logger.exception("Unexpected error executing task %s", task.id)
             fresh = svc.container.tasks.get(task.id) or task
             fresh.status = "blocked"
             fresh.current_agent_id = None
-            fresh.error = "Internal error during execution"
+            exc_type = type(exc).__name__
+            exc_msg = str(exc).strip()
+            detail = f"{exc_type}: {exc_msg}" if exc_msg else exc_type
+            fresh.error = f"Internal error during execution: {detail}"
             if isinstance(fresh.metadata, dict):
                 raw_worktree_dir = str(fresh.metadata.get("worktree_dir") or "").strip()
                 if raw_worktree_dir:

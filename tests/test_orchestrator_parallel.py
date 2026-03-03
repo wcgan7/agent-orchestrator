@@ -343,7 +343,8 @@ def test_future_exception_sets_task_blocked(tmp_path: Path) -> None:
     updated = container.tasks.get(task.id)
     assert updated is not None
     assert updated.status == "blocked"
-    assert updated.error == "Internal error during execution"
+    assert updated.error.startswith("Internal error during execution:")
+    assert "RuntimeError" in updated.error
 
 
 # ---------------------------------------------------------------------------
