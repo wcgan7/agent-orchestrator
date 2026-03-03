@@ -2678,6 +2678,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         try:
             committed_revision_id = orchestrator.commit_plan_revision(task_id, body.revision_id)
             plan_doc = orchestrator.get_plan_document(task_id)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return {
@@ -2719,6 +2721,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 feedback_note=body.feedback_note,
                 step=None,
             )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
         return {"revision": revision.to_dict()}

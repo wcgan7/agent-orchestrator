@@ -54,6 +54,34 @@ class PlanManager:
         section_end = min(end_candidates) if end_candidates else len(text)
         return text[:section_start] + replacement + text[section_end:]
 
+    def is_plan_mutable(self, task_id: str) -> bool:
+        """Return True when the plan is still open for edits/refines.
+
+        Plan is locked once the pipeline has moved past the planning stage.
+        """
+        task = self._service.container.tasks.get(task_id)
+        if not task:
+            return False
+        if task.status in ("done", "cancelled", "in_review"):
+            return False
+        if task.status in ("backlog", "queued"):
+            return True
+        # At a pre-implementation gate — plan is still open for changes
+        if task.pending_gate in ("before_plan", "before_implement", "before_generate_tasks"):
+            return True
+        if task.current_step == "plan":
+            return True
+        steps = task.pipeline_template or []
+        current = task.current_step
+        if not steps or not current:
+            return True  # can't determine, be permissive
+        if "plan" not in steps:
+            return False  # no plan step, task is executing
+        try:
+            return steps.index(current) <= steps.index("plan")
+        except ValueError:
+            return False  # virtual step (e.g. implement_fix), past plan
+
     def active_plan_refine_job(self, task_id: str) -> PlanRefineJob | None:
         """Return the active queued/running refine job for a task if present."""
         svc = self._service
@@ -90,6 +118,7 @@ class PlanManager:
             "committed_revision_id": committed_revision_id,
             "revisions": [item.to_dict() for item in revisions],
             "active_refine_job": active_job.to_dict() if active_job else None,
+            "plan_mutable": self.is_plan_mutable(task_id),
         }
 
     def create_plan_revision(
@@ -111,6 +140,8 @@ class PlanManager:
         task = svc.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
+        if source == "human_edit" and not self.is_plan_mutable(task_id):
+            raise RuntimeError("Plan is locked — pipeline has moved past the planning stage")
         if not isinstance(task.metadata, dict):
             task.metadata = {}
         body = str(content or "").strip()
@@ -168,6 +199,8 @@ class PlanManager:
                 task.metadata = {}
             if self.active_plan_refine_job(task_id):
                 raise RuntimeError("A plan refine job is already active for this task")
+            if not self.is_plan_mutable(task_id):
+                raise RuntimeError("Plan is locked — pipeline has moved past the planning stage")
             revisions = svc.container.plan_revisions.for_task(task_id)
             revisions.sort(key=lambda item: item.created_at)
             if not revisions:
@@ -351,6 +384,8 @@ class PlanManager:
         task = svc.container.tasks.get(task_id)
         if not task:
             raise ValueError("Task not found")
+        if not self.is_plan_mutable(task_id):
+            raise RuntimeError("Plan is locked — pipeline has moved past the planning stage")
         target = svc.container.plan_revisions.get(revision_id)
         if not target or target.task_id != task_id:
             raise ValueError("Revision not found for task")

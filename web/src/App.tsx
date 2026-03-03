@@ -385,6 +385,7 @@ type TaskPlanDocument = {
   committed_revision_id?: string | null
   revisions: PlanRevisionRecord[]
   active_refine_job?: PlanRefineJobRecord | null
+  plan_mutable?: boolean
 }
 
 type TaskWorkdocDocument = {
@@ -1363,6 +1364,7 @@ function normalizeTaskPlan(payload: unknown): TaskPlanDocument {
     committed_revision_id: root.committed_revision_id ? String(root.committed_revision_id) : null,
     revisions,
     active_refine_job: normalizePlanRefineJob(root.active_refine_job || null),
+    plan_mutable: typeof root.plan_mutable === 'boolean' ? root.plan_mutable : undefined,
   }
 }
 
@@ -3070,6 +3072,12 @@ export default function App() {
       setPlanRefineTrackedJobId('')
     }
   }, [selectedTaskPlan?.active_refine_job, selectedTaskPlanJobs, planRefineTrackedJobId, planRefineUiState])
+
+  useEffect(() => {
+    if (selectedTaskPlan?.plan_mutable === false && planTabMode !== 'view') {
+      setPlanTabMode('view')
+    }
+  }, [selectedTaskPlan?.plan_mutable, planTabMode])
 
   useEffect(() => {
     if (!selectedTaskId) return
@@ -5074,27 +5082,31 @@ export default function App() {
             && (selectedTaskPlan.active_refine_job.status === 'queued' || selectedTaskPlan.active_refine_job.status === 'running'))
           const showRefineRunningBanner = planRefineUiState === 'running' || isRefining
           const showRefineDoneBanner = planRefineUiState === 'done'
-          const renderPlanModeToolbar = (): JSX.Element => (
-            <div className="plan-tab-toolbar">
-              <div className="plan-tab-mode-switcher">
-                <button className={`button ${planTabMode === 'view' ? 'is-active' : ''}`} onClick={() => setPlanTabMode('view')}>View</button>
-                <button className={`button ${planTabMode === 'edit' ? 'is-active' : ''}`} onClick={() => {
-                  if (planTabMode !== 'edit') {
-                    const text = planContent
-                    const seeded = planManualSeedRef.current
-                    const wasSeeded = seeded.taskId === selectedTaskView.id && seeded.workerText.trim().length > 0
-                    const sameAsSeeded = wasSeeded && planManualContent.trim() === seeded.workerText.trim()
-                    if (!planManualContent.trim() || sameAsSeeded) {
-                      setPlanManualContent(text)
-                      planManualSeedRef.current = { taskId: selectedTaskView.id, workerText: text }
+          const isPlanLocked = selectedTaskPlan?.plan_mutable === false
+          const renderPlanModeToolbar = (): JSX.Element | null => {
+            if (isPlanLocked) return null
+            return (
+              <div className="plan-tab-toolbar">
+                <div className="plan-tab-mode-switcher">
+                  <button className={`button ${planTabMode === 'view' ? 'is-active' : ''}`} onClick={() => setPlanTabMode('view')}>View</button>
+                  <button className={`button ${planTabMode === 'edit' ? 'is-active' : ''}`} onClick={() => {
+                    if (planTabMode !== 'edit') {
+                      const text = planContent
+                      const seeded = planManualSeedRef.current
+                      const wasSeeded = seeded.taskId === selectedTaskView.id && seeded.workerText.trim().length > 0
+                      const sameAsSeeded = wasSeeded && planManualContent.trim() === seeded.workerText.trim()
+                      if (!planManualContent.trim() || sameAsSeeded) {
+                        setPlanManualContent(text)
+                        planManualSeedRef.current = { taskId: selectedTaskView.id, workerText: text }
+                      }
                     }
-                  }
-                  setPlanTabMode('edit')
-                }}>Edit</button>
-                <button className={`button ${planTabMode === 'refine' ? 'is-active' : ''}`} onClick={() => setPlanTabMode('refine')}>Refine</button>
+                    setPlanTabMode('edit')
+                  }}>Edit</button>
+                  <button className={`button ${planTabMode === 'refine' ? 'is-active' : ''}`} onClick={() => setPlanTabMode('refine')}>Refine</button>
+                </div>
               </div>
-            </div>
-          )
+            )
+          }
           return (
             <div className="task-detail-section-body">
               {showPlanGate && !showTopLevelGateBanner ? renderPendingGateBanner(selectedTaskView) : null}
