@@ -177,6 +177,8 @@ def test_single_run_branch_commits_in_task_order(tmp_path: Path) -> None:
     subprocess.run(['git', 'add', 'seed.txt'], cwd=tmp_path, check=True, capture_output=True)
     subprocess.run(['git', 'commit', '-m', 'seed'], cwd=tmp_path, check=True, capture_output=True)
 
+    initial_branch = subprocess.run(['git', 'branch', '--show-current'], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+
     app = create_app(project_dir=tmp_path, worker_adapter=_FileWritingAdapter())
     with TestClient(app) as client:
         first = client.post('/api/tasks', json={'title': 'First', }).json()['task']
@@ -186,7 +188,7 @@ def test_single_run_branch_commits_in_task_order(tmp_path: Path) -> None:
         client.post(f"/api/tasks/{second['id']}/run")
 
     branch = subprocess.run(['git', 'branch', '--show-current'], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
-    assert branch.startswith('orchestrator-run-')
+    assert branch == initial_branch
 
     messages = subprocess.run(['git', 'log', '--pretty=%s', '-n', '2'], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.splitlines()
     assert messages[0].startswith(f"task({second['id']})")

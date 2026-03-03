@@ -826,7 +826,7 @@ class TaskExecutor:
                     # No new commit was created — check if the branch already
                     # carries prior committed work (e.g. from a preserved branch
                     # retry).  If so, use the branch HEAD as the commit ref so
-                    # merge_and_cleanup can still merge it into the run branch.
+                    # merge_and_cleanup can still merge it into the base branch.
                     commit_cwd = worktree_dir or svc.container.project_dir
                     if svc._has_commits_ahead(commit_cwd):
                         head_result = subprocess.run(

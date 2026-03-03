@@ -1,6 +1,6 @@
 """Post-merge integration health checker.
 
-Runs verification commands on the run branch after task merges to detect
+Runs verification commands on the base branch after task merges to detect
 cross-task regressions.  When failures are found the checker marks the
 integration as *degraded* and optionally auto-generates a fix task.
 """
@@ -130,7 +130,7 @@ class IntegrationHealthChecker:
         return False
 
     def run_check(self, trigger_task_id: str) -> HealthCheckResult | None:
-        """Run verification commands on the run branch and update health state.
+        """Run verification commands on the base branch and update health state.
 
         Returns ``None`` when the check is skipped (mode is off or periodic
         interval not yet reached).
@@ -288,7 +288,7 @@ class IntegrationHealthChecker:
                 return
 
         fix_task = Task(
-            title="Fix integration regressions on run branch",
+            title="Fix integration regressions on base branch",
             description=(
                 f"Post-merge health check failed after task {result.trigger_task_id}.\n\n"
                 f"Command: {result.command}\n"

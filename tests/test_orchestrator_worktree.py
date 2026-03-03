@@ -340,12 +340,12 @@ def test_ensure_worker_skips_recovery_for_inflight_manual_run(tmp_path: Path) ->
 
 
 # ---------------------------------------------------------------------------
-# 3. Task branch is merged to run branch
+# 3. Task branch is merged to the user's current branch
 # ---------------------------------------------------------------------------
 
 
-def test_task_branch_merged_to_run_branch(tmp_path: Path) -> None:
-    """After task completes, its commits appear on the run branch."""
+def test_task_branch_merged_to_current_branch(tmp_path: Path) -> None:
+    """After task completes, its commits appear on the user's original branch."""
 
     class FileWriter:
         def run_step(self, *, task: Task, step: str, attempt: int) -> StepResult:
@@ -366,7 +366,7 @@ def test_task_branch_merged_to_run_branch(tmp_path: Path) -> None:
     result = service.run_task(task.id)
     assert result.status == "done"
 
-    # The file should exist on the run branch (project_dir)
+    # The file should exist on the base branch (project_dir)
     expected_file = tmp_path / f"{task.id}.txt"
     assert expected_file.exists()
     assert expected_file.read_text().strip() == f"work by {task.id}"
@@ -1124,7 +1124,7 @@ def test_precommit_review_requires_preserved_branch_context(tmp_path: Path) -> N
 
 
 # ---------------------------------------------------------------------------
-# 17. approve_and_merge merges preserved branch to run branch
+# 17. approve_and_merge merges preserved branch to the current branch
 # ---------------------------------------------------------------------------
 
 
@@ -1167,7 +1167,7 @@ def test_approve_merges_preserved_branch(tmp_path: Path) -> None:
     assert merge_result["status"] == "ok"
     assert "commit_sha" in merge_result
 
-    # Changes should now be on the run branch
+    # Changes should now be on the base branch
     assert (tmp_path / "feature.py").exists()
     assert "new feature" in (tmp_path / "feature.py").read_text()
 

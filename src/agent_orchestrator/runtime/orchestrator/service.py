@@ -1070,7 +1070,7 @@ class OrchestratorService:
             ).get("blocking"):
                 # Allow the auto-generated fix task to be dispatched; block
                 # everything else to prevent cascading failures on a broken
-                # run branch.
+                # base branch.
                 fix_id = self._integration_health._fix_task_id
                 fix_task = self.container.tasks.get(fix_id) if fix_id else None
                 if not fix_task or fix_task.status != "queued":
@@ -2243,7 +2243,7 @@ class OrchestratorService:
         self._worktree_manager.merge_and_cleanup(task, worktree_dir)
 
     def approve_and_merge(self, task: Task) -> dict[str, Any]:
-        """Merge a preserved branch to the run branch on user approval.
+        """Merge a preserved branch to the base branch on user approval.
 
         Called when a blocked task is approved and its work was preserved on a
         branch (for example, after review-attempt limits were hit).
@@ -2306,7 +2306,7 @@ class OrchestratorService:
         return self._worktree_manager.has_uncommitted_changes(cwd)
 
     def _has_commits_ahead(self, cwd: Path) -> bool:
-        """Check whether cwd's HEAD has commits beyond the run branch."""
+        """Check whether cwd's HEAD has commits beyond the base branch."""
         return self._worktree_manager.has_commits_ahead(cwd)
 
     def _preserve_worktree_work(self, task: Task, worktree_dir: Path) -> Any:

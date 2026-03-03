@@ -206,7 +206,7 @@ class WorktreeManager:
         return worktree_dir
 
     def merge_and_cleanup(self, task: Any, worktree_dir: Path) -> None:
-        """Merge task work into the run branch, then remove transient worktree.
+        """Merge task work into the base branch, then remove transient worktree.
 
         On merge conflicts the method attempts automated resolution and marks
         ``task.metadata["merge_conflict"]`` when conflict handling fails.
@@ -452,7 +452,12 @@ class WorktreeManager:
                     )
 
     def ensure_branch(self) -> Optional[str]:
-        """Create or reuse the shared orchestrator run branch in a thread-safe way."""
+        """Record the user's current branch as the orchestrator base branch.
+
+        Previously this created an ephemeral ``orchestrator-run-*`` branch.
+        Now it simply reads the current branch name so that task merges land
+        directly on whatever branch the user was on (e.g. ``main``).
+        """
         svc = self._service
         if svc._run_branch:
             return svc._run_branch
@@ -462,17 +467,19 @@ class WorktreeManager:
             git_dir = svc.container.project_dir / ".git"
             if not git_dir.exists():
                 return None
-            branch = f"orchestrator-run-{int(time.time())}"
             try:
-                subprocess.run(
-                    ["git", "checkout", "-B", branch],
+                result = subprocess.run(
+                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
                     cwd=svc.container.project_dir,
                     check=True,
                     capture_output=True,
                     text=True,
                 )
-                svc._run_branch = branch
-                return branch
+                branch = result.stdout.strip()
+                if branch and branch != "HEAD":
+                    svc._run_branch = branch
+                    return branch
+                return None
             except subprocess.CalledProcessError:
                 return None
 
@@ -523,7 +530,7 @@ class WorktreeManager:
             return True
 
     def has_commits_ahead(self, cwd: Path) -> bool:
-        """Return whether ``cwd``'s HEAD has commits beyond the run branch.
+        """Return whether ``cwd``'s HEAD has commits beyond the base branch.
 
         Used to detect prior committed work on a task branch (e.g. from a
         preserved branch) even when there are no uncommitted changes.
@@ -565,7 +572,7 @@ class WorktreeManager:
         """Persist task edits by keeping branch history but removing worktree dir.
 
         This is used when human review is required before final merge into the
-        orchestrator run branch.
+        base branch.
         """
         svc = self._service
         branch = f"task-{task.id}"
