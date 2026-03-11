@@ -335,8 +335,8 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.error = None
         ts = now_iso()
         task.metadata["last_review_approval"] = {"ts": ts, "guidance": body.guidance}
-        review_history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
-        review_history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
+        approve_history: list[dict[str, Any]] = task.metadata.setdefault("human_review_actions", [])
+        approve_history.append({"action": "approve", "ts": ts, "guidance": body.guidance or ""})
 
         with container.transaction():
             latest_run = None

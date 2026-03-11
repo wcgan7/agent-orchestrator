@@ -41,7 +41,7 @@ from .live_worker_adapter import _VERIFY_STEPS
 from .plan_manager import PlanManager
 from .task_executor import TaskExecutor
 from .workdoc_manager import WorkdocManager
-from .worktree_manager import WorktreeManager
+from .worktree_manager import MergeOutcome, WorktreeManager
 from .worker_adapter import DefaultWorkerAdapter, StepResult, WorkerAdapter
 
 logger = logging.getLogger(__name__)
@@ -1860,7 +1860,8 @@ class OrchestratorService:
         preserved_branch = str(metadata.get("preserved_branch") or "").strip()
         if preserved_branch and self._local_branch_exists(preserved_branch):
             candidate_refs.append(preserved_branch)
-        task_context = metadata.get("task_context") if isinstance(metadata.get("task_context"), dict) else {}
+        raw_tc = metadata.get("task_context")
+        task_context: dict[str, Any] = raw_tc if isinstance(raw_tc, dict) else {}
         task_branch = str(task_context.get("task_branch") or "").strip()
         if task_branch and self._local_branch_exists(task_branch) and task_branch not in candidate_refs:
             candidate_refs.append(task_branch)
@@ -2588,7 +2589,7 @@ class OrchestratorService:
         content = self._read_canonical_workdoc(canonical, task_id=task_id)
         return {"task_id": task_id, "content": content, "exists": True}
 
-    def _merge_and_cleanup(self, task: Task, worktree_dir: Path) -> dict[str, Any]:
+    def _merge_and_cleanup(self, task: Task, worktree_dir: Path) -> MergeOutcome:
         return self._worktree_manager.merge_and_cleanup(task, worktree_dir)
 
     def approve_and_merge(self, task: Task) -> dict[str, Any]:

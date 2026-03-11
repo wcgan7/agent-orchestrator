@@ -249,7 +249,7 @@ class Task:
             hitl_mode=hitl_mode,
             dependency_policy=cast(DependencyPolicy, dependency_policy),
             pending_gate=(str(data.get("pending_gate")) if data.get("pending_gate") else None),
-            wait_state=dict(data.get("wait_state")) if isinstance(data.get("wait_state"), dict) else None,
+            wait_state=dict(raw_ws) if isinstance((raw_ws := data.get("wait_state")), dict) else None,
             source=str(data.get("source") or "manual"),
             worker_model=(str(data.get("worker_model")) if data.get("worker_model") else None),
             created_at=str(data.get("created_at") or now_iso()),

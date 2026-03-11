@@ -35,7 +35,8 @@ def workers_environment_config(cfg: dict[str, Any]) -> dict[str, Any]:
     """Return normalized worker environment preflight settings."""
     workers = cfg.get("workers") if isinstance(cfg, dict) else {}
     workers = workers if isinstance(workers, dict) else {}
-    env = workers.get("environment") if isinstance(workers.get("environment"), dict) else {}
+    raw_env = workers.get("environment")
+    env: dict[str, Any] = raw_env if isinstance(raw_env, dict) else {}
     required_raw = env.get("required_capabilities_by_step")
 
     required: dict[str, list[str]] = {}
