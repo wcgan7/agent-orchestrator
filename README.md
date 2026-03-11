@@ -77,7 +77,7 @@ Not designed for lightweight or single-pass code generation workflows.
 ### Enforce quality and governance
 - Choose a Human-in-the-Loop mode per task: **Autopilot**, **Supervised**, or **Review Only**.
   - **Autopilot**: runs end-to-end without approvals.
-  - **Supervised**: requires plan approval and human review before commit.
+  - **Supervised**: requires approval before implementation and human review before commit.
   - **Review Only**: pauses before commit and adds a final completion gate.
 - Configure severity thresholds (`critical`, `high`, `medium`, `low`) globally or per task to control pass/fail tolerance.
 - Draft, refine, and commit plan revisions with full lineage before implementation.
@@ -153,6 +153,8 @@ Frontend runs at `http://localhost:3000` by default (proxies `/api` to the backe
 backlog → queued → in_progress → in_review → done
                         ↓               ↓
                      blocked       (request changes → queued)
+                        ↓
+                    cancelled
 ```
 
 Tasks support dependency graphs (validated for cycles), automatic dependency inference, parallel execution with configurable concurrency, merge-aware completion for worktree runs, and review cycles with severity-based findings.
@@ -178,6 +180,7 @@ Tasks execute through pipeline templates matched to their type. These templates 
 | `chore` | Mechanical maintenance work with verification and commit. | `implement → verify → commit` |
 | `plan_only` | Initiative-level planning and decomposition into executable tasks. | `analyze → initiative_plan → generate_tasks` |
 | `verify_only` | Run checks and report status without making code changes. | `verify → report` |
+| `commit_review` | Review an existing commit, then fix, verify, and commit. | `commit_review → implement → verify → review → commit` |
 
 ## API and CLI
 
@@ -270,7 +273,7 @@ npm --prefix web run e2e:smoke
 
 Local pushes are gated by `.githooks/pre-push` and run:
 - `.venv/bin/ruff check .`
-- `.venv/bin/pytest -q`
+- `.venv/bin/pytest -n auto -q`
 - `npm --prefix web run check`
 
 Enable hooks once per clone:
