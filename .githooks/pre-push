@@ -12,7 +12,7 @@ fi
 
 echo "[pre-push] Running backend checks (.venv)..."
 .venv/bin/ruff check .
-.venv/bin/pytest -q
+.venv/bin/pytest -n auto -q
 
 echo "[pre-push] Running web checks..."
 npm --prefix web run check
