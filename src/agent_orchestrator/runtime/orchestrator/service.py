@@ -1804,7 +1804,9 @@ class OrchestratorService:
             )
         except Exception:
             return []
-        if result.returncode != 0:
+        # Only discard on fatal git errors (exit >= 128); lower codes may
+        # still carry valid stdout on some git versions.
+        if result.returncode >= 128:
             return []
         return [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
 

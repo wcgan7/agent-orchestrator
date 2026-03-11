@@ -3370,13 +3370,33 @@ def test_finalize_merge_conflict_endpoint_rejects_unmerged_index_entries(tmp_pat
             tmp_path,
         )
         merge_result = subprocess.run(
-            ["git", "merge", task_branch],
+            [
+                "git",
+                "-c", "user.name=AO Test",
+                "-c", "user.email=ao-test@example.com",
+                "merge", task_branch,
+            ],
             cwd=tmp_path,
             capture_output=True,
             text=True,
             check=False,
         )
-        assert merge_result.returncode != 0
+        assert merge_result.returncode == 1, (
+            f"Expected conflict exit code 1, got {merge_result.returncode}: "
+            f"{merge_result.stderr}"
+        )
+        # Verify the index actually has unmerged entries
+        ls_unmerged = subprocess.run(
+            ["git", "ls-files", "--unmerged"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert ls_unmerged.stdout.strip(), (
+            f"Expected unmerged index entries but got none. "
+            f"Merge stderr: {merge_result.stderr}"
+        )
 
         container = app.state.containers[str(tmp_path.resolve())]
         stored = container.tasks.get(task["id"])
