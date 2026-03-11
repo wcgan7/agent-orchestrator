@@ -333,8 +333,12 @@ class SqliteTerminalSessionRepository(TerminalSessionRepository):
 class SqliteEventRepository(EventRepository):
     """SQLite-backed event repository."""
 
+    _RETENTION_LIMIT = 10_000
+    _PRUNE_INTERVAL = 500
+
     def __init__(self, db: SQLiteDB) -> None:
         self._db = db
+        self._append_count = 0
 
     def append(
         self,
@@ -372,7 +376,20 @@ class SqliteEventRepository(EventRepository):
                 _json_dumps(event_payload),
             ),
         )
+        self._append_count += 1
+        if self._append_count % self._PRUNE_INTERVAL == 0:
+            self._prune()
         return event
+
+    def _prune(self) -> None:
+        """Delete events beyond the retention limit, keeping the newest."""
+        self._db.execute(
+            """
+            DELETE FROM events
+            WHERE seq <= (SELECT seq FROM events ORDER BY seq DESC LIMIT 1 OFFSET ?)
+            """,
+            (self._RETENTION_LIMIT,),
+        )
 
     def list_recent(self, limit: int = 100) -> List[dict[str, Any]]:
         if limit <= 0:

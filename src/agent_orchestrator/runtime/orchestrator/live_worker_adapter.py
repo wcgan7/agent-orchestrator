@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import subprocess
 import tempfile
 from dataclasses import replace
@@ -1971,6 +1972,8 @@ class LiveWorkerAdapter:
         except Exception:
             logger.debug("Verify formatter call failed; returning error")
             return StepResult(status="error", summary="Verification output formatter failed")
+        finally:
+            shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
@@ -2037,6 +2040,8 @@ class LiveWorkerAdapter:
         except Exception:
             logger.debug("Review formatter call failed; returning error")
             return StepResult(status="error", summary="Review output formatter failed")
+        finally:
+            shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
@@ -2089,6 +2094,8 @@ class LiveWorkerAdapter:
         except Exception:
             logger.debug("Task generation formatter call failed; returning error")
             return StepResult(status="error", summary="Task generation output formatter failed")
+        finally:
+            shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
@@ -2369,6 +2376,8 @@ class LiveWorkerAdapter:
         except Exception:
             logger.debug("Summarize call failed; returning fallback")
             return "Summary generation failed"
+        finally:
+            shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
         parsed = _extract_json(fmt_result.response_text or "")
         if isinstance(parsed, dict):

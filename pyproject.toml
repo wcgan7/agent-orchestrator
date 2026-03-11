@@ -5,13 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "agent-orchestrator"
 version = "0.1.0"
-description = "Standalone helper module for long-running feature development driven by a PRD."
+description = "Deterministic orchestration for AI-assisted software delivery."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
   "loguru",
   "PyYAML>=6.0",
-  "rich",
 ]
 
 [project.optional-dependencies]
@@ -33,9 +32,6 @@ server = [
   "pydantic>=2.5.0",
   "pyjwt>=2.8.0",
   "python-multipart>=0.0.6",
-]
-notifications = [
-  "plyer>=2.1.0",
 ]
 
 [tool.mypy]

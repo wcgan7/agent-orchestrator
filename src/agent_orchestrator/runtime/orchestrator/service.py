@@ -650,6 +650,7 @@ class OrchestratorService:
                     cwd=self.container.project_dir,
                     capture_output=True,
                     text=True,
+                    timeout=10,
                 )
                 if expected_worktree.exists():
                     shutil.rmtree(expected_worktree, ignore_errors=True)
@@ -664,6 +665,7 @@ class OrchestratorService:
                     cwd=self.container.project_dir,
                     capture_output=True,
                     text=True,
+                    timeout=10,
                 )
                 branch_deleted = not self._local_branch_exists(branch_name)
 
@@ -1793,7 +1795,7 @@ class OrchestratorService:
         """Return currently unmerged paths in the project index."""
         try:
             result = subprocess.run(
-                ["git", "diff", "--name-only", "--diff-filter=U"],
+                ["git", "ls-files", "--unmerged"],
                 cwd=self.container.project_dir,
                 capture_output=True,
                 text=True,
@@ -1804,7 +1806,13 @@ class OrchestratorService:
             return []
         if result.returncode != 0:
             return []
-        return [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
+        # ls-files --unmerged outputs lines like "<mode> <hash> <stage>\t<path>"
+        paths: set[str] = set()
+        for line in (result.stdout or "").splitlines():
+            parts = line.split("\t", 1)
+            if len(parts) == 2:
+                paths.add(parts[1].strip())
+        return list(paths)
 
     def _latest_run_commit_ref(self, task: Task) -> str | None:
         """Return newest commit SHA captured in task run steps, if present."""

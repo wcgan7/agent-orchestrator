@@ -61,19 +61,40 @@ The build script enforces API contract checks (`check:mounted-api-contracts`) be
 ### Backend (`src/agent_orchestrator/`)
 
 - **`runtime/orchestrator/service.py`** — Core `OrchestratorService`. Manages task queue, worker dispatch via `ThreadPoolExecutor`, state transitions, and review cycles. This is the central coordination point.
-- **`runtime/api/router.py`** — FastAPI router. All REST endpoints (`/api/*`) and request/response schemas are defined here.
+- **`runtime/orchestrator/task_executor.py`** — Task execution logic: runs pipeline steps, persists run/task state, handles retries.
+- **`runtime/orchestrator/live_worker_adapter.py`** — `LiveWorkerAdapter` dispatches pipeline steps to real worker providers (Codex, Claude, Ollama). Contains formatter sub-calls for verify/review/summarize output parsing.
+- **`runtime/orchestrator/worker_adapter.py`** — `WorkerAdapter` protocol + `DefaultWorkerAdapter` base.
+- **`runtime/orchestrator/worktree_manager.py`** — Git worktree lifecycle (create, merge, cleanup) for task isolation.
+- **`runtime/orchestrator/plan_manager.py`** — Plan revision management and refinement job orchestration.
+- **`runtime/orchestrator/reconciler.py`** — Runtime reconciliation to repair inconsistent state after crashes.
+- **`runtime/orchestrator/dependency_manager.py`** — Task dependency graph analysis and cycle detection.
+- **`runtime/orchestrator/environment_preflight.py`** — Environment capability checks and auto-remediation before worker steps.
+- **`runtime/api/`** — FastAPI routes, split across multiple files:
+  - `router_impl.py` — Router factory and shared request/response schemas.
+  - `routes_tasks.py` — Task CRUD and lifecycle endpoints.
+  - `routes_agents.py` — Agent management endpoints.
+  - `routes_collab.py` — Collaboration timeline and HITL endpoints.
+  - `routes_projects.py` — Multi-project management endpoints.
+  - `routes_terminal.py` — Terminal PTY session endpoints.
+  - `routes_imports.py` — PRD import endpoints.
+  - `routes_misc.py` — Metrics, phases, review, orchestrator control, settings, worker health.
+  - `deps.py` — Shared FastAPI dependencies.
+  - `logs_io.py` — Log streaming I/O helpers.
 - **`runtime/domain/models.py`** — Dataclasses: `Task`, `ReviewCycle`, `RunRecord`, `PlanRevision`, `AgentRecord`, `TerminalSession`.
-- **`runtime/storage/`** — YAML-file repositories with file-locking. Each entity type has its own `.yaml` file in `.agent_orchestrator/`.
+- **`runtime/storage/`** — SQLite-backed repositories (`runtime.db`). Legacy YAML repos exist for migration only.
 - **`runtime/events/`** — `EventBus` + `WebSocketHub` for real-time pub/sub across channels (`tasks`, `queue`, `agents`, `review`, `terminal`).
+- **`runtime/terminal/service.py`** — Terminal PTY session service for interactive shell access.
 - **`server/api.py`** — FastAPI app factory with lifespan management.
-- **`workers/`** — Worker provider adapters (claude, codex, ollama). `WorkerAdapter` is the abstraction layer.
+- **`workers/`** — Worker provider configuration (`config.py`), execution (`run.py`), and diagnostics (`diagnostics.py`).
+- **`worker.py`** — Top-level worker subprocess runner and `WorkerCancelledError`.
 - **`pipelines/`** — Pipeline template registry for task execution workflows.
 - **`collaboration/`** — HITL (Human-In-The-Loop) mode configs: autopilot, supervised, collaborative, review_only.
+- **`prompts/`** — Prompt templates for worker steps and output formatters.
 - **`cli.py`** — CLI entry point (`agent-orchestrator` command).
 
 ### Frontend (`web/src/`)
 
-- **`App.tsx`** — Main component handling routing, WebSocket connection, and global state. This is a large monolithic file (~5k lines).
+- **`App.tsx`** — Main component handling routing, WebSocket connection, and global state. This is a large monolithic file (~7.7k lines).
 - **`api.ts`** — HTTP client with auth token handling and base URL construction.
 - **`components/AppPanels/`** — Panel components (ImportJobPanel, TerminalPanel, TaskExplorerPanel).
 - **`components/HITLModeSelector/`** — HITL mode selection UI.
@@ -87,7 +108,7 @@ The build script enforces API contract checks (`check:mounted-api-contracts`) be
 
 ### Data Storage
 
-All runtime state lives in `.agent_orchestrator/` within the target project directory (YAML files + JSONL event log). No external database.
+All runtime state lives in `.agent_orchestrator/` within the target project directory, stored in a SQLite database (`runtime.db`). No external database required.
 
 ### Task Lifecycle
 
