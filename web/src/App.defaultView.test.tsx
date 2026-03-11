@@ -104,7 +104,7 @@ describe('App default route', () => {
             project: {
               commands: {
                 python: {
-                  test: '/Users/gan/Documents/agent-orchestrator-dogfood/.venv/bin/pytest -n auto',
+                  test: 'pytest -n auto',
                 },
               },
               prompt_overrides: {},
@@ -171,7 +171,7 @@ describe('App default route', () => {
             project: {
               commands: {
                 python: {
-                  test: '/Users/gan/Documents/agent-orchestrator-dogfood/.venv/bin/pytest -n auto',
+                  test: 'pytest -n auto',
                 },
               },
               prompt_overrides: {},

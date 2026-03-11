@@ -42,6 +42,17 @@ node_modules/
 .prd_runner.bak-*/
 .prd_runner.bak-*
 
+# Environment and secrets
+.env
+.env.*
+.env.local
+
+# Logs
+*.log
+
+# Generated reports
+web/lighthouse/
+
 # Agent Orchestrator runtime data
 .workdoc.md
 .agent_orchestrator_archive/
