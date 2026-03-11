@@ -1795,7 +1795,7 @@ class OrchestratorService:
         """Return currently unmerged paths in the project index."""
         try:
             result = subprocess.run(
-                ["git", "ls-files", "--unmerged"],
+                ["git", "diff", "--name-only", "--diff-filter=U"],
                 cwd=self.container.project_dir,
                 capture_output=True,
                 text=True,
@@ -1806,13 +1806,7 @@ class OrchestratorService:
             return []
         if result.returncode != 0:
             return []
-        # ls-files --unmerged outputs lines like "<mode> <hash> <stage>\t<path>"
-        paths: set[str] = set()
-        for line in (result.stdout or "").splitlines():
-            parts = line.split("\t", 1)
-            if len(parts) == 2:
-                paths.add(parts[1].strip())
-        return list(paths)
+        return [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
 
     def _latest_run_commit_ref(self, task: Task) -> str | None:
         """Return newest commit SHA captured in task run steps, if present."""
