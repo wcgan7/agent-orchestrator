@@ -2419,3 +2419,67 @@ class LiveWorkerAdapter:
             run=run,
             project_dir=project_dir,
         )
+
+    def generate_recommended_action(
+        self,
+        *,
+        task: Task,
+        blocked_step: str,
+        error_message: str,
+    ) -> str:
+        """Generate an LLM-powered recommended action for a blocked task.
+
+        Uses the same worker resolution as ``generate_run_summary`` (the
+        ``summarize`` routing key) so no new worker configuration is needed.
+
+        Returns:
+            str: Recommended action text, or empty string when unavailable.
+        """
+        try:
+            cfg = self._container.config.load()
+            runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
+            spec = resolve_worker_for_step(runtime, "summarize")
+            available, reason = test_worker(spec)
+            if not available:
+                logger.debug("Recommended-action worker not available: %s", reason)
+                return ""
+        except Exception:
+            logger.debug("Cannot resolve worker for recommended-action generation")
+            return ""
+
+        def _escape_braces(s: str) -> str:
+            return s.replace("{", "{{").replace("}", "}}")
+
+        prompt = load_prompt("formatters/recommended_action.md").format(
+            task_title=_escape_braces(task.title),
+            task_type=_escape_braces(task.task_type),
+            blocked_step=_escape_braces(blocked_step),
+            error_message=_escape_braces(error_message),
+        )
+
+        fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
+        progress_path = fmt_run_dir / "progress.json"
+        try:
+            fmt_result = run_worker(
+                spec=spec,
+                prompt=prompt,
+                project_dir=self._container.project_dir,
+                run_dir=fmt_run_dir,
+                timeout_seconds=60,
+                heartbeat_seconds=30,
+                heartbeat_grace_seconds=90,
+                progress_path=progress_path,
+            )
+        except Exception:
+            logger.debug("Recommended-action LLM call failed", exc_info=True)
+            return ""
+        finally:
+            shutil.rmtree(fmt_run_dir, ignore_errors=True)
+
+        parsed = _extract_json(fmt_result.response_text or "")
+        if isinstance(parsed, dict):
+            action = parsed.get("recommended_action")
+            if action:
+                return str(action).strip()
+
+        return ""

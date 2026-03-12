@@ -66,6 +66,7 @@ type TaskRecord = {
   skip_to_precommit_reason_code?: string | null
   can_finalize_merge_conflict?: boolean
   finalize_merge_conflict_reason_code?: string | null
+  recommended_action?: string | null
   error?: string | null
   timing_summary?: TaskTimingSummary | null
   execution_summary?: ExecutionSummary | null
@@ -5192,6 +5193,12 @@ export default function App() {
                 </div>
               )
             })() : null}
+            {selectedTaskView.recommended_action?.trim() ? (
+              <div className="recommended-action-box">
+                <p className="recommended-action-label">Recommended Action</p>
+                <p className="recommended-action-text">{selectedTaskView.recommended_action}</p>
+              </div>
+            ) : null}
             {Array.isArray(selectedTaskView.human_blocking_issues) && selectedTaskView.human_blocking_issues.length > 0 ? (
               <div className="preview-box">
                 <p className="field-label">Human blocking issues</p>

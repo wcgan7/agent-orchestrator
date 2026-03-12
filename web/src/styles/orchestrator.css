@@ -1164,6 +1164,28 @@ textarea {
   overflow: auto;
 }
 
+.recommended-action-box {
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--color-border-warning, #c7a84e);
+  border-radius: 8px;
+  background: var(--color-bg-warning, #fdf8e8);
+}
+
+.recommended-action-box .recommended-action-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #7a6520;
+  margin-bottom: 0.35rem;
+}
+
+.recommended-action-box .recommended-action-text {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #4a3d10;
+  line-height: 1.5;
+}
+
 .link-button {
   background: none;
   border: none;

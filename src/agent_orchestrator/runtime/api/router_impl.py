@@ -751,6 +751,7 @@ def _task_payload(
         "status_kind": status_kind or None,
     }
     payload["human_blocking_issues"] = _normalize_human_blocking_issues(metadata.get("human_blocking_issues"))
+    payload["recommended_action"] = str(metadata.get("recommended_action") or "").strip() or None
     raw_actions = metadata.get("human_review_actions")
     payload["human_review_actions"] = list(raw_actions) if isinstance(raw_actions, list) else []
     can_skip_to_precommit = False

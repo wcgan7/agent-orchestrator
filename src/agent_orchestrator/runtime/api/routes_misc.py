@@ -319,12 +319,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
                             latest_run.summary = "Blocked due to unresolved merge conflict"
                         container.runs.upsert(latest_run)
                     container.tasks.upsert(task)
-                bus.emit(
-                    channel="tasks",
-                    event_type="task.blocked",
-                    entity_id=task.id,
-                    payload={"error": task.error, "reason_code": reason_code},
-                )
+                orchestrator._emit_task_blocked(task, payload={"error": task.error, "reason_code": reason_code})
                 return {"task": _task_payload(task, container, orchestrator)}
             # Re-fetch task after merge (approve_and_merge upserts)
             task = container.tasks.get(task_id)

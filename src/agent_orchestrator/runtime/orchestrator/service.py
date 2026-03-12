@@ -46,6 +46,78 @@ from .worker_adapter import DefaultWorkerAdapter, StepResult, WorkerAdapter
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Hardcoded fallback recommended-actions for each block-reason category.
+# ---------------------------------------------------------------------------
+_BLOCKED_RECOMMENDED_ACTIONS: dict[str, str] = {
+    "merge_conflict": "Resolve conflicts in the listed files, then click 'Finalize Manual Merge'.",
+    "scope_violation": "Review the out-of-scope files. Widen scope contract or revert, then retry.",
+    "missing_workdoc": "Click 'Retry' to regenerate the workdoc, or recreate it manually.",
+    "invalid_workdoc": "Fix the file encoding/permissions at the path shown, then retry.",
+    "verify_fix_exhausted": "Review failing tests/lint in logs, fix manually, then click 'Retry'.",
+    "review_cap_exceeded": "Review open findings on the Overview tab, address manually, then retry.",
+    "no_changes": "Review task description/plan for clarity, then click 'Retry'.",
+    "human_intervention": "Review the 'Human blocking issues' section and take the described actions.",
+    "gate_timeout": "Review task state, approve the pending gate or click 'Retry'.",
+    "precommit_context_missing": "Click 'Request Changes' to regenerate implementation context.",
+    "dirty_overlapping": "Commit or stash local integration branch changes, then retry.",
+    "git_error": "Check error details, resolve repository issues, then retry.",
+    "internal_error": "Check logs, then click 'Retry'. If persistent, cancel and recreate.",
+}
+
+
+def _classify_block_reason(task: Task) -> str:
+    """Determine the block-reason category from task metadata and error text."""
+    metadata = task.metadata if isinstance(task.metadata, dict) else {}
+    error = str(task.error or "").lower()
+
+    # 1. Deterministic metadata checks
+    if metadata.get("merge_conflict"):
+        return "merge_conflict"
+    if metadata.get("scope_violation"):
+        return "scope_violation"
+    if metadata.get("missing_workdoc_path"):
+        return "missing_workdoc"
+    if metadata.get("invalid_workdoc_path"):
+        return "invalid_workdoc"
+    if metadata.get("human_blocking_issues"):
+        issues = metadata["human_blocking_issues"]
+        if isinstance(issues, list) and len(issues) > 0:
+            return "human_intervention"
+    reason_code = str(metadata.get("merge_failure_reason_code") or "").strip()
+    if reason_code == "dirty_overlapping":
+        return "dirty_overlapping"
+    if reason_code == "git_error":
+        return "git_error"
+
+    # 2. Error text pattern matching
+    if "scope violation" in error or "out-of-scope" in error:
+        return "scope_violation"
+    if "merge conflict" in error:
+        return "merge_conflict"
+    if "missing required workdoc" in error or "missing workdoc" in error:
+        return "missing_workdoc"
+    if "invalid workdoc" in error or "unreadable workdoc" in error:
+        return "invalid_workdoc"
+    if re.search(r"could not fix .+ after \d+ attempts?", error):
+        return "verify_fix_exhausted"
+    if "review attempt cap exceeded" in error or "unresolved review findings" in error:
+        return "review_cap_exceeded"
+    if "no file changes" in error or "no changes" in error:
+        return "no_changes"
+    if "human intervention" in error or "human blocking" in error:
+        return "human_intervention"
+    if "gate" in error and ("timeout" in error or "max_wait" in error or "timed out" in error):
+        return "gate_timeout"
+    if "pre-commit context" in error or "precommit context" in error:
+        return "precommit_context_missing"
+    if "overlapping" in error and ("dirty" in error or "integration branch" in error):
+        return "dirty_overlapping"
+    if "git merge failed" in error or "git error" in error:
+        return "git_error"
+
+    return "internal_error"
+
 
 class OrchestratorService:
     """Coordinate task scheduling, execution, review, and commit flow."""
@@ -791,12 +863,7 @@ class OrchestratorService:
                         run.summary = task.error
                         self.container.runs.upsert(run)
                         break
-                self.bus.emit(
-                    channel="tasks",
-                    event_type="task.blocked",
-                    entity_id=task.id,
-                    payload={"error": task.error, "gate": gate, "policy": "gate_max_wait"},
-                )
+                self._emit_task_blocked(task, payload={"error": task.error, "gate": gate, "policy": "gate_max_wait"})
                 continue
 
             if changed:
@@ -1222,6 +1289,7 @@ class OrchestratorService:
             "review_stage",
             "worktree_dir",
             "task_context",
+            "recommended_action",
         ):
             task.metadata.pop(key, None)
         self.container.tasks.upsert(task)
@@ -1909,6 +1977,7 @@ class OrchestratorService:
                 "pending_precommit_approval",
                 "review_stage",
                 "pipeline_phase",
+                "recommended_action",
             ):
                 task.metadata.pop(key, None)
 
@@ -1982,6 +2051,7 @@ class OrchestratorService:
 
             task.metadata.pop("worktree_dir", None)
             task.metadata.pop("task_context", None)
+            task.metadata.pop("recommended_action", None)
             task.status = "in_review"
             task.pending_gate = None
             task.current_agent_id = None
@@ -2473,6 +2543,49 @@ class OrchestratorService:
             raise ValueError(f"Unreadable workdoc: {canonical} ({exc})") from exc
         return canonical
 
+    # ------------------------------------------------------------------
+    # Recommended-action generation & centralized task.blocked emission
+    # ------------------------------------------------------------------
+
+    def _generate_recommended_action(self, task: Task) -> str:
+        """Classify the block reason, try LLM, fall back to hardcoded action."""
+        category = _classify_block_reason(task)
+
+        # Try LLM generation first
+        meta = task.metadata if isinstance(task.metadata, dict) else {}
+        blocked_step = str(task.current_step or meta.get("pipeline_phase") or "unknown")
+        error_message = str(task.error or "Unknown error")
+        try:
+            llm_action = self.worker_adapter.generate_recommended_action(
+                task=task,
+                blocked_step=blocked_step,
+                error_message=error_message,
+            )
+            if isinstance(llm_action, str) and llm_action.strip():
+                return llm_action
+        except Exception:
+            logger.debug("LLM recommended-action generation failed for task %s", task.id)
+
+        # Fall back to hardcoded mapping
+        return _BLOCKED_RECOMMENDED_ACTIONS.get(category, _BLOCKED_RECOMMENDED_ACTIONS["internal_error"])
+
+    def _emit_task_blocked(self, task: Task, *, payload: dict[str, Any] | None = None) -> None:
+        """Centralized helper that enriches a blocked task with a recommended action and emits the event."""
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        if not str(task.metadata.get("recommended_action") or "").strip():
+            action = self._generate_recommended_action(task)
+            if action:
+                task.metadata["recommended_action"] = action
+                self.container.tasks.upsert(task)
+
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.blocked",
+            entity_id=task.id,
+            payload=payload or {"error": task.error},
+        )
+
     def _block_for_invalid_workdoc(self, task: Task, run: RunRecord, *, step: str, detail: str) -> None:
         """Fail fast when a task has an unreadable or invalid canonical workdoc."""
         canonical = self._workdoc_canonical_path(task.id)
@@ -2485,12 +2598,7 @@ class OrchestratorService:
         task.metadata["invalid_workdoc_error"] = detail
         self.container.tasks.upsert(task)
         self._finalize_run(task, run, status="blocked", summary=f"Blocked during {step}: invalid workdoc")
-        self.bus.emit(
-            channel="tasks",
-            event_type="task.blocked",
-            entity_id=task.id,
-            payload={"error": task.error},
-        )
+        self._emit_task_blocked(task)
 
     def _read_canonical_workdoc(self, canonical: Path, *, task_id: str) -> str:
         """Read canonical workdoc text with consistent diagnostics."""
@@ -2566,12 +2674,7 @@ class OrchestratorService:
         task.metadata["missing_workdoc_path"] = str(canonical)
         self.container.tasks.upsert(task)
         self._finalize_run(task, run, status="blocked", summary=f"Blocked during {step}: missing required workdoc")
-        self.bus.emit(
-            channel="tasks",
-            event_type="task.blocked",
-            entity_id=task.id,
-            payload={"error": task.error},
-        )
+        self._emit_task_blocked(task)
 
     def _step_project_dir(self, task: Task) -> Path:
         """Resolve task worktree directory, falling back to the main project root."""
@@ -2936,7 +3039,7 @@ class OrchestratorService:
             entity_id=task.id,
             payload={"step": step, "violations": violations},
         )
-        self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
+        self._emit_task_blocked(task)
 
     @staticmethod
     def _baseline_debt_signature(summary: str, changed_files: list[str]) -> str:
@@ -3244,7 +3347,7 @@ class OrchestratorService:
             run.finished_at = now_iso()
             run.summary = f"Blocked during {step}"
             self.container.runs.upsert(run)
-            self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
+            self._emit_task_blocked(task)
             return "blocked"
 
         self._clear_environment_recovery_tracking(task, step=step)
@@ -3573,17 +3676,12 @@ class OrchestratorService:
             entity_id=task.id,
             payload={"gate": self._HUMAN_INTERVENTION_GATE, "step": step, "issues": issues},
         )
-        self.bus.emit(
-            channel="tasks",
-            event_type="task.blocked",
-            entity_id=task.id,
-            payload={
-                "error": task.error,
-                "gate": self._HUMAN_INTERVENTION_GATE,
-                "step": step,
-                "issues": issues,
-            },
-        )
+        self._emit_task_blocked(task, payload={
+            "error": task.error,
+            "gate": self._HUMAN_INTERVENTION_GATE,
+            "step": step,
+            "issues": issues,
+        })
 
     def _wait_for_gate(
         self,

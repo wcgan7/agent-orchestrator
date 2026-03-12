@@ -313,12 +313,7 @@ class TaskExecutor:
                 task.current_step = task.current_step or None
                 svc._mark_task_context_retained(task, reason="context_attach_failed", expected_on_retry=True)
                 svc.container.tasks.upsert(task)
-                svc.bus.emit(
-                    channel="tasks",
-                    event_type="task.blocked",
-                    entity_id=task.id,
-                    payload={"error": task.error},
-                )
+                svc._emit_task_blocked(task)
                 return
 
             if worktree_dir:
@@ -552,12 +547,7 @@ class TaskExecutor:
                     task.current_step = step
                     svc.container.tasks.upsert(task)
                     svc._finalize_run(task, run, status="blocked", summary=f"Blocked: {step} failed after {max_verify_fix_attempts} fix attempts")
-                    svc.bus.emit(
-                        channel="tasks",
-                        event_type="task.blocked",
-                        entity_id=task.id,
-                        payload={"error": task.error},
-                    )
+                    svc._emit_task_blocked(task)
                     return
                 _consume_human_guidance(step)
                 last_phase1_step = step
@@ -578,12 +568,7 @@ class TaskExecutor:
                     task.metadata["pipeline_phase"] = last_phase1_step or "implement"
                     svc.container.tasks.upsert(task)
                     svc._finalize_run(task, run, status="blocked", summary="Blocked: no changes produced by implementation steps")
-                    svc.bus.emit(
-                        channel="tasks",
-                        event_type="task.blocked",
-                        entity_id=task.id,
-                        payload={"error": task.error},
-                    )
+                    svc._emit_task_blocked(task)
                     return
 
             svc._check_cancelled(task)
@@ -662,12 +647,7 @@ class TaskExecutor:
                         task.metadata["pipeline_phase"] = "review"
                         svc.container.tasks.upsert(task)
                         svc._finalize_run(task, run, status="blocked", summary="Blocked during review")
-                        svc.bus.emit(
-                            channel="tasks",
-                            event_type="task.blocked",
-                            entity_id=task.id,
-                            payload={"error": task.error},
-                        )
+                        svc._emit_task_blocked(task)
                         return
                     open_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0}
                     for finding in findings:
@@ -776,12 +756,7 @@ class TaskExecutor:
                                 task.current_step = post_fix_validation_step
                                 svc.container.tasks.upsert(task)
                                 svc._finalize_run(task, run, status="blocked", summary=f"Blocked: {post_fix_validation_step} failed after {max_verify_fix_attempts} fix attempts")
-                                svc.bus.emit(
-                                    channel="tasks",
-                                    event_type="task.blocked",
-                                    entity_id=task.id,
-                                    payload={"error": task.error},
-                                )
+                                svc._emit_task_blocked(task)
                                 return
                         else:
                             _consume_human_guidance(post_fix_validation_step)
@@ -802,12 +777,7 @@ class TaskExecutor:
                     task.metadata["pipeline_phase"] = "review"
                     svc.container.tasks.upsert(task)
                     svc._finalize_run(task, run, status="blocked", summary="Blocked due to unresolved review findings")
-                    svc.bus.emit(
-                        channel="tasks",
-                        event_type="task.blocked",
-                        entity_id=task.id,
-                        payload={"error": task.error},
-                    )
+                    svc._emit_task_blocked(task)
                     return
 
             svc._check_cancelled(task)
@@ -833,12 +803,7 @@ class TaskExecutor:
                             task.error = f"{task.error}: {detail}"
                         svc.container.tasks.upsert(task)
                         svc._finalize_run(task, run, status="blocked", summary="Blocked: pre-commit review context unavailable")
-                        svc.bus.emit(
-                            channel="tasks",
-                            event_type="task.blocked",
-                            entity_id=task.id,
-                            payload={"error": task.error},
-                        )
+                        svc._emit_task_blocked(task)
                         return
 
                     # Context is now preserved on task branch; current worktree has
@@ -897,12 +862,7 @@ class TaskExecutor:
                             task.error = "Commit failed (no changes to commit)"
                             svc.container.tasks.upsert(task)
                             svc._finalize_run(task, run, status="blocked", summary="Blocked: commit produced no changes")
-                            svc.bus.emit(
-                                channel="tasks",
-                                event_type="task.blocked",
-                                entity_id=task.id,
-                                payload={"error": task.error},
-                            )
+                            svc._emit_task_blocked(task)
                             return
                 run.steps.append(
                     {
@@ -941,12 +901,7 @@ class TaskExecutor:
                     task.error = "Merge conflict could not be resolved automatically"
                     svc.container.tasks.upsert(task)
                     svc._finalize_run(task, run, status="blocked", summary="Blocked due to unresolved merge conflict")
-                    svc.bus.emit(
-                        channel="tasks",
-                        event_type="task.blocked",
-                        entity_id=task.id,
-                        payload={"error": task.error},
-                    )
+                    svc._emit_task_blocked(task)
                     return
                 if merge_failure_reason in {"dirty_overlapping", "git_error"}:
                     task.status = "blocked"
@@ -958,12 +913,7 @@ class TaskExecutor:
                             task.error = "Git merge failed before conflict resolution"
                     svc.container.tasks.upsert(task)
                     svc._finalize_run(task, run, status="blocked", summary=f"Blocked due to merge failure ({merge_failure_reason})")
-                    svc.bus.emit(
-                        channel="tasks",
-                        event_type="task.blocked",
-                        entity_id=task.id,
-                        payload={"error": task.error, "reason_code": merge_failure_reason},
-                    )
+                    svc._emit_task_blocked(task, payload={"error": task.error, "reason_code": merge_failure_reason})
                     return
 
                 svc._run_summarize_step(task, run)
@@ -1024,6 +974,7 @@ class TaskExecutor:
             task.metadata.pop("step_outputs", None)
             task.metadata.pop("worktree_dir", None)
             task.metadata.pop("task_context", None)
+            task.metadata.pop("recommended_action", None)
             run.finished_at = now_iso()
             with svc.container.transaction():
                 svc.container.runs.upsert(run)

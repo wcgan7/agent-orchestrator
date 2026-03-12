@@ -51,6 +51,16 @@ class WorkerAdapter(Protocol):
         """
         ...
 
+    def generate_recommended_action(
+        self,
+        *,
+        task: Task,
+        blocked_step: str,
+        error_message: str,
+    ) -> str:
+        """Generate an LLM-powered recommended action for a blocked task."""
+        ...
+
 
 class DefaultWorkerAdapter:
     """Default adapter used in local-first mode.
@@ -143,5 +153,19 @@ class DefaultWorkerAdapter:
 
         Returns:
             str: Markdown-ready summary text for the run report.
+        """
+        return ""
+
+    def generate_recommended_action(
+        self,
+        *,
+        task: Task,
+        blocked_step: str,
+        error_message: str,
+    ) -> str:
+        """Generate an LLM-powered recommended action for a blocked task.
+
+        Returns:
+            str: Recommended action text, or empty string when unavailable.
         """
         return ""

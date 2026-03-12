@@ -2179,6 +2179,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.metadata.pop("workdoc_sync_mode", None)
         task.metadata.pop("workdoc_sync_step", None)
         task.metadata.pop("workdoc_sync_attempt", None)
+        task.metadata.pop("recommended_action", None)
         guidance = (body.guidance if body else None) or ""
         ts = now_iso()
         if guidance.strip() or previous_error.strip():
@@ -2309,6 +2310,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             task.wait_state = None
             task.current_agent_id = None
             task.metadata.pop("execution_checkpoint", None)
+            task.metadata.pop("recommended_action", None)
             if start_from_step:
                 task.metadata["retry_from_step"] = start_from_step
             else:
