@@ -2422,6 +2422,9 @@ class LiveWorkerAdapter:
                 if isinstance(tasks, list):
                     return StepResult(status="ok", generated_tasks=tasks)
 
+        if category == "reporting" and result.response_text:
+            return StepResult(status="ok", summary=result.response_text.strip()[:20000])
+
         # Parse remaining structured output for ollama-specific categories.
         if spec.type == "ollama" and result.response_text:
             return self._parse_ollama_output(result.response_text, step)

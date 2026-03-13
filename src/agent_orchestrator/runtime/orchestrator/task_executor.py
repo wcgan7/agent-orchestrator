@@ -462,12 +462,22 @@ class TaskExecutor:
             reached_retry_step = not retry_from
             early_complete = False
             last_phase1_step: str | None = None
+            # Steps declared *after* "review" in the pipeline must wait until
+            # the review cycle completes (e.g. "report" needs review findings).
+            _post_review_step_set: set[str] = set()
+            if has_review:
+                _saw_review = False
+                for _s in steps:
+                    if _s == "review":
+                        _saw_review = True
+                    elif _s != "commit" and _saw_review:
+                        _post_review_step_set.add(_s)
             # When resuming from the before_done gate after early completion,
             # skip the phase-1 loop entirely and go straight to finalization.
             if resume_from_done_gate and task.metadata.get("early_complete"):
                 early_complete = True
             for step in steps:
-                if step in ("review", "commit"):
+                if step in ("review", "commit") or step in _post_review_step_set:
                     continue
                 if resume_from_done_gate:
                     continue
@@ -659,6 +669,7 @@ class TaskExecutor:
 
             if not early_complete:
                 svc._check_cancelled(task)
+            review_passed = False
             if not early_complete and has_review and retry_from not in {"commit", svc._BEFORE_DONE_RESUME_STEP}:
                 post_fix_validation_step = svc._select_post_fix_validation_step(steps)
 
@@ -866,6 +877,20 @@ class TaskExecutor:
                     svc._finalize_run(task, run, status="blocked", summary="Blocked due to unresolved review findings")
                     svc._emit_task_blocked(task)
                     return
+
+            # -- Post-review steps (e.g. report after review findings exist) --
+            if not early_complete and _post_review_step_set and review_passed:
+                for step in steps:
+                    if step not in _post_review_step_set:
+                        continue
+                    svc._check_cancelled(task)
+                    task.current_step = step
+                    task.metadata["pipeline_phase"] = step
+                    svc.container.tasks.upsert(task)
+                    step_outcome = svc._run_non_review_step(task, run, step, attempt=1)
+                    if step_outcome not in ("ok", "no_action_needed"):
+                        return
+                    _consume_human_guidance(step)
 
             if not early_complete:
                 svc._check_cancelled(task)
