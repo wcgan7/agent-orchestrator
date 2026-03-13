@@ -3383,7 +3383,9 @@ class OrchestratorService:
         self._clear_wait_state(task)
 
         # Store plan output as first-class immutable plan revisions.
-        if step in {"plan", "initiative_plan"} and result.summary:
+        # commit_review output is included so supervised-mode users can
+        # view, refine, and approve the findings before implement runs.
+        if step in {"plan", "initiative_plan", "commit_review"} and result.summary:
             provider, model = self._resolve_worker_lineage(task, step)
             self.create_plan_revision(
                 task_id=task.id,
