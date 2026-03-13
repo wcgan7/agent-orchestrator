@@ -404,7 +404,15 @@ class TaskExecutor:
                     retry_from = parent_step
                     resume_implement_fix = True
                 else:
-                    retry_from = ""
+                    # Fallback: find the first verify-like step in the pipeline.
+                    # Without this, retry_from becomes "" and all phase-1 steps
+                    # may be skipped, allowing review+commit without verification.
+                    fallback = next((s for s in steps if s in _VERIFY_STEPS), None)
+                    if fallback:
+                        retry_from = fallback
+                        resume_implement_fix = True
+                    else:
+                        retry_from = ""
 
             start_step: str | None
             if retry_from in steps:
