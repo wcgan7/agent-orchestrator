@@ -460,7 +460,12 @@ class TaskExecutor:
             skip_phase1 = retry_from in ("review", "commit")
             resume_from_done_gate = retry_from == svc._BEFORE_DONE_RESUME_STEP
             reached_retry_step = not retry_from
+            early_complete = False
             last_phase1_step: str | None = None
+            # When resuming from the before_done gate after early completion,
+            # skip the phase-1 loop entirely and go straight to finalization.
+            if resume_from_done_gate and task.metadata.get("early_complete"):
+                early_complete = True
             for step in steps:
                 if step in ("review", "commit"):
                     continue
@@ -504,6 +509,10 @@ class TaskExecutor:
                     step_outcome = svc._run_non_review_step(task, run, step, attempt=1)
                     if step_outcome == "ok":
                         verify_failed = False
+                    elif step_outcome == "no_action_needed":
+                        early_complete = True
+                        last_phase1_step = step
+                        break
                     elif step_outcome == "verify_failed":
                         verify_failed = True
                     elif step_outcome == "verify_degraded":
@@ -564,12 +573,77 @@ class TaskExecutor:
                 _consume_human_guidance(step)
                 last_phase1_step = step
 
-            next_phase = "review" if has_review and retry_from != "commit" else "commit"
-            if (has_review and retry_from != "commit") or has_commit:
-                if not self._ensure_workdoc_or_block(task, run, step=next_phase):
-                    return
+            # -- Early completion: step signalled no further action needed ----
+            if early_complete:
+                # Record remaining phase-1 steps as skipped in the run log.
+                if last_phase1_step:
+                    found = False
+                    for remaining_step in steps:
+                        if remaining_step in ("review", "commit"):
+                            run.steps.append({"step": remaining_step, "status": "skipped", "ts": now_iso()})
+                            continue
+                        if not found:
+                            if remaining_step == last_phase1_step:
+                                found = True
+                            continue
+                        run.steps.append({"step": remaining_step, "status": "skipped", "ts": now_iso()})
+                    svc.container.runs.upsert(run)
 
-            if has_commit:
+                # HITL gate: supervised/review_only need approval before done.
+                requires_done_gate = svc._should_gate(mode, "before_done")
+                pipeline_id = svc._pipeline_id_for_task(task)
+                if requires_done_gate and pipeline_id not in svc._DECOMPOSITION_PIPELINES and not resume_from_done_gate:
+                    gate_resume_step = svc._BEFORE_DONE_RESUME_STEP
+                    task.current_step = last_phase1_step
+                    task.metadata["pipeline_phase"] = last_phase1_step
+                    task.metadata["early_complete"] = True
+                    svc.container.tasks.upsert(task)
+                    if not svc._wait_for_gate(task, "before_done", resume_step=gate_resume_step):
+                        return
+
+                # Clean up worktree if present (no changes to commit).
+                if worktree_dir:
+                    subprocess.run(
+                        ["git", "worktree", "remove", str(worktree_dir), "--force"],
+                        cwd=svc.container.project_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                    )
+                    subprocess.run(
+                        ["git", "branch", "-D", f"task-{task.id}"],
+                        cwd=svc.container.project_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    worktree_dir = None
+                    task.metadata.pop("worktree_dir", None)
+                    task.metadata.pop("task_context", None)
+
+                # Mark done.
+                svc._run_summarize_step(task, run)
+                task.status = "done"
+                task.wait_state = None
+                task.current_step = None
+                task.metadata.pop("pipeline_phase", None)
+                task.metadata.pop("early_complete", None)
+                run.status = "done"
+                run.summary = "Pipeline completed — no action needed"
+                svc.bus.emit(
+                    channel="tasks",
+                    event_type="task.done",
+                    entity_id=task.id,
+                    payload={"early_complete": True},
+                )
+
+            if not early_complete:
+                next_phase = "review" if has_review and retry_from != "commit" else "commit"
+                if (has_review and retry_from != "commit") or has_commit:
+                    if not self._ensure_workdoc_or_block(task, run, step=next_phase):
+                        return
+
+            if not early_complete and has_commit:
                 impl_dir = worktree_dir or svc.container.project_dir
                 svc._cleanup_workdoc_for_commit(impl_dir)
                 if not svc._has_uncommitted_changes(impl_dir) and not svc._has_commits_ahead(impl_dir):
@@ -583,8 +657,9 @@ class TaskExecutor:
                     svc._emit_task_blocked(task)
                     return
 
-            svc._check_cancelled(task)
-            if has_review and retry_from not in {"commit", svc._BEFORE_DONE_RESUME_STEP}:
+            if not early_complete:
+                svc._check_cancelled(task)
+            if not early_complete and has_review and retry_from not in {"commit", svc._BEFORE_DONE_RESUME_STEP}:
                 post_fix_validation_step = svc._select_post_fix_validation_step(steps)
 
                 review_attempt = 0
@@ -792,8 +867,9 @@ class TaskExecutor:
                     svc._emit_task_blocked(task)
                     return
 
-            svc._check_cancelled(task)
-            if has_commit:
+            if not early_complete:
+                svc._check_cancelled(task)
+            if not early_complete and has_commit:
                 # Supervised/review-only flows pause in in_review before commit so
                 # footer review actions drive final approve/request-changes.
                 precommit_review_modes = {"supervised", "review_only"}
@@ -943,7 +1019,7 @@ class TaskExecutor:
                     entity_id=task.id,
                     payload={"commit": commit_sha},
                 )
-            else:
+            elif not early_complete:
                 requires_done_gate = svc._should_before_done_gate(task=task, mode=mode, has_commit=has_commit)
                 if requires_done_gate and retry_from != svc._BEFORE_DONE_RESUME_STEP:
                     gate_resume_step = svc._BEFORE_DONE_RESUME_STEP
@@ -987,6 +1063,7 @@ class TaskExecutor:
             task.metadata.pop("worktree_dir", None)
             task.metadata.pop("task_context", None)
             task.metadata.pop("recommended_action", None)
+            task.metadata.pop("early_complete", None)
             run.finished_at = now_iso()
             with svc.container.transaction():
                 svc.container.runs.upsert(run)

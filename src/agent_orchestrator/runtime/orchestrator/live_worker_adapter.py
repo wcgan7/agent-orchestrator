@@ -417,6 +417,29 @@ def _step_category(step: str) -> str:
     return "general"
 
 
+# Steps that support early pipeline completion when no action is needed.
+_EARLY_COMPLETE_STEPS = {"commit_review"}
+
+
+def _is_no_action_needed(step: str, summary: str | None) -> bool:
+    """Detect whether a step's output indicates no further action is required.
+
+    Currently only applies to ``commit_review``. The commit_review prompt
+    instructs the worker to output "No issues found" when the commit is clean.
+
+    Args:
+        step: Pipeline step name that produced the output.
+        summary: Worker summary text to inspect.
+
+    Returns:
+        True if the step signals that no downstream work is needed.
+    """
+    if step not in _EARLY_COMPLETE_STEPS:
+        return False
+    if not summary:
+        return False
+    return "no issues found" in summary.lower()
+
 
 _WORKDOC_STEP_INSTRUCTIONS: dict[str, str] = {
     "planning": (
@@ -2039,6 +2062,10 @@ class LiveWorkerAdapter:
                 response_text=result.response_text,
                 project_dir=project_dir,
             )
+
+        # 9. Check if the step signals that no further pipeline action is needed.
+        if step_result.status == "ok" and _is_no_action_needed(step, step_result.summary):
+            step_result = replace(step_result, no_action_needed=True)
 
         return step_result
 

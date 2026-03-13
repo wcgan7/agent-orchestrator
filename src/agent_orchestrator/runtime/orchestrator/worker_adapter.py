@@ -18,6 +18,7 @@ class StepResult:
     generated_tasks: list[dict[str, Any]] | None = None
     dependency_edges: list[dict[str, str]] | None = None
     human_blocking_issues: list[dict[str, str]] | None = None
+    no_action_needed: bool = False
 
 
 class WorkerAdapter(Protocol):
@@ -96,6 +97,7 @@ class DefaultWorkerAdapter:
                         if isinstance(raw.get("human_blocking_issues"), list)
                         else None
                     ),
+                    no_action_needed=bool(raw.get("no_action_needed")),
                 )
 
         if step == "review":

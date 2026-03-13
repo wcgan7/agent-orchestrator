@@ -3286,7 +3286,7 @@ class OrchestratorService:
         run: RunRecord,
         step: str,
         attempt: int = 1,
-    ) -> Literal["ok", "verify_failed", "verify_degraded", "auto_requeued", "human_blocked", "blocked"]:
+    ) -> Literal["ok", "verify_failed", "verify_degraded", "auto_requeued", "human_blocked", "blocked", "no_action_needed"]:
         self._heartbeat_execution_lease(task)
         self.container.tasks.upsert(task)
         try:
@@ -3455,6 +3455,9 @@ class OrchestratorService:
 
         self._heartbeat_execution_lease(task)
         self.container.tasks.upsert(task)
+
+        if result.no_action_needed:
+            return "no_action_needed"
         return "ok"
 
     def _clear_environment_recovery_tracking(self, task: Task, *, step: str) -> None:
