@@ -5053,3 +5053,66 @@ def test_get_workdoc_404_for_unknown_task(tmp_path: Path) -> None:
     with TestClient(app) as client:
         resp = client.get("/api/tasks/nonexistent-id/workdoc")
         assert resp.status_code == 404
+
+
+def test_task_worker_provider_roundtrip() -> None:
+    """Task to_dict/from_dict round-trips worker_provider."""
+    t = Task(title="test", worker_provider="claude")
+    data = t.to_dict()
+    assert data["worker_provider"] == "claude"
+    restored = Task.from_dict(data)
+    assert restored.worker_provider == "claude"
+
+    t2 = Task(title="no provider")
+    assert t2.worker_provider is None
+    data2 = t2.to_dict()
+    assert data2["worker_provider"] is None
+    restored2 = Task.from_dict(data2)
+    assert restored2.worker_provider is None
+
+
+def test_create_task_with_worker_provider(tmp_path: Path) -> None:
+    """POST /tasks with worker_provider persists it."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Provider override", "worker_provider": "claude"})
+        assert created.status_code == 200
+        task = created.json()["task"]
+        assert task["worker_provider"] == "claude"
+
+        loaded = client.get(f"/api/tasks/{task['id']}")
+        assert loaded.status_code == 200
+        assert loaded.json()["task"]["worker_provider"] == "claude"
+
+
+def test_retry_task_with_worker_provider(tmp_path: Path) -> None:
+    """POST /tasks/{id}/retry with worker_provider updates task field."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Retry provider", "status": "blocked"})
+        assert created.status_code == 200
+        task_id = created.json()["task"]["id"]
+        assert created.json()["task"].get("worker_provider") is None
+
+        retried = client.post(f"/api/tasks/{task_id}/retry", json={"worker_provider": "claude"})
+        assert retried.status_code == 200
+        assert retried.json()["task"]["worker_provider"] == "claude"
+        assert retried.json()["task"]["status"] == "queued"
+
+
+def test_patch_task_worker_provider(tmp_path: Path) -> None:
+    """PATCH /tasks/{id} with worker_provider updates task field."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        created = client.post("/api/tasks", json={"title": "Patch provider"})
+        assert created.status_code == 200
+        task_id = created.json()["task"]["id"]
+        assert created.json()["task"].get("worker_provider") is None
+
+        patched = client.patch(f"/api/tasks/{task_id}", json={"worker_provider": "ollama"})
+        assert patched.status_code == 200
+        assert patched.json()["task"]["worker_provider"] == "ollama"
+
+        loaded = client.get(f"/api/tasks/{task_id}")
+        assert loaded.status_code == 200
+        assert loaded.json()["task"]["worker_provider"] == "ollama"

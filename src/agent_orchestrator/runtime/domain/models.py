@@ -182,6 +182,7 @@ class Task:
 
     source: str = "manual"
     worker_model: Optional[str] = None
+    worker_provider: Optional[str] = None
 
     created_at: str = field(default_factory=now_iso)
     updated_at: str = field(default_factory=now_iso)
@@ -252,6 +253,7 @@ class Task:
             wait_state=dict(raw_ws) if isinstance((raw_ws := data.get("wait_state")), dict) else None,
             source=str(data.get("source") or "manual"),
             worker_model=(str(data.get("worker_model")) if data.get("worker_model") else None),
+            worker_provider=(str(data.get("worker_provider")) if data.get("worker_provider") else None),
             created_at=str(data.get("created_at") or now_iso()),
             updated_at=str(data.get("updated_at") or now_iso()),
             metadata=dict(data.get("metadata") or {}),

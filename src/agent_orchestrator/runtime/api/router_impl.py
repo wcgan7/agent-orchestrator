@@ -53,6 +53,7 @@ class CreateTaskRequest(BaseModel):
     dependency_policy: str = ""
     source: str = "manual"
     worker_model: Optional[str] = None
+    worker_provider: Optional[str] = None
     step_timeout_seconds: Optional[int] = Field(None, ge=0, le=7200)
     metadata: dict[str, Any] = Field(default_factory=dict)
     project_commands: Optional[dict[str, dict[str, str]]] = None
@@ -90,6 +91,7 @@ class UpdateTaskRequest(BaseModel):
     hitl_mode: Optional[str] = None
     dependency_policy: Optional[str] = None
     worker_model: Optional[str] = None
+    worker_provider: Optional[str] = None
     step_timeout_seconds: Optional[int] = Field(None, ge=0, le=7200)
     metadata: Optional[dict[str, Any]] = None
     project_commands: Optional[dict[str, dict[str, str]]] = None
@@ -322,6 +324,7 @@ class RetryTaskRequest(BaseModel):
     """Request body for retrying execution from an optional pipeline step."""
     guidance: Optional[str] = None
     start_from_step: Optional[str] = None
+    worker_provider: Optional[str] = None
 
 
 class SkipToPrecommitRequest(BaseModel):

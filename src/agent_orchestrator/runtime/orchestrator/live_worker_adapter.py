@@ -1728,9 +1728,22 @@ class LiveWorkerAdapter:
             cfg = self._container.config.load()
             runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
             spec = resolve_worker_for_step(runtime, step)
+            # Task-level provider override: explicit user choice bypasses routing
+            task_provider = str(getattr(task, "worker_provider", "") or "").strip()
+            if not task_provider and isinstance(task.metadata, dict):
+                task_provider = str(task.metadata.get("worker_provider") or "").strip()
+            if task_provider:
+                if task_provider not in runtime.providers:
+                    available_names = ", ".join(sorted(runtime.providers.keys()))
+                    return StepResult(status="error", summary=f"Task worker_provider '{task_provider}' not found (available: {available_names})")
+                spec = runtime.providers[task_provider]
+                if spec.type in {"codex", "claude"} and not spec.command:
+                    return StepResult(status="error", summary=f"Worker '{spec.name}' missing required 'command'")
+                if spec.type == "ollama" and (not spec.endpoint or not spec.model):
+                    return StepResult(status="error", summary=f"Worker '{spec.name}' missing 'endpoint'/'model'")
             env_cfg = workers_environment_config(cfg)
             required_caps = required_capabilities_for_step(step=step, project_dir=project_dir, cfg=cfg)
-            if env_cfg.get("capability_fallback", True) and required_caps:
+            if not task_provider and env_cfg.get("capability_fallback", True) and required_caps:
                 if not provider_has_capabilities(
                     provider_capabilities=spec.capabilities,
                     required_capabilities=required_caps,

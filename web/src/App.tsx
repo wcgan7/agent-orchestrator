@@ -42,6 +42,7 @@ type TaskRecord = {
   current_step?: string | null
   current_agent_id?: string | null
   worker_model?: string | null
+  worker_provider?: string | null
   step_timeout_seconds?: number | null
   priority: string
   status: string
@@ -1942,6 +1943,7 @@ export default function App() {
   const [newTaskMetadata, setNewTaskMetadata] = useState('')
   const [newTaskProjectCommands, setNewTaskProjectCommands] = useState('')
   const [newTaskWorkerModel, setNewTaskWorkerModel] = useState('')
+  const [newTaskWorkerProvider, setNewTaskWorkerProvider] = useState('')
   const [newDependencyId, setNewDependencyId] = useState('')
   const [dependencyActionLoading, setDependencyActionLoading] = useState(false)
   const [dependencyActionMessage, setDependencyActionMessage] = useState('')
@@ -2001,6 +2003,7 @@ export default function App() {
 
   const [reviewGuidance, setReviewGuidance] = useState('')
   const [retryFromStep, setRetryFromStep] = useState('')
+  const [retryProvider, setRetryProvider] = useState('')
   const [showAllActivity, setShowAllActivity] = useState(false)
   const [logViewStep, setLogViewStep] = useState('')
   const logViewStepRef = useRef('')
@@ -2119,6 +2122,7 @@ export default function App() {
     setTaskDiffLoading(false)
     setReviewGuidance('')
     setRetryFromStep('')
+    setRetryProvider('')
     setShowAllActivity(false)
     setPlanTabMode('view')
     setSelectedTaskWorkdoc(null)
@@ -3615,6 +3619,7 @@ export default function App() {
           hitl_mode: newTaskHitlMode,
           dependency_policy: newTaskDependencyPolicy,
           worker_model: newTaskWorkerModel.trim() || undefined,
+          worker_provider: newTaskWorkerProvider.trim() || undefined,
           step_timeout_seconds: parsedStepTimeout ?? undefined,
           parent_id: newTaskParentId.trim() || undefined,
           pipeline_template: parsedPipelineTemplate.length > 0 ? parsedPipelineTemplate : undefined,
@@ -3648,6 +3653,7 @@ export default function App() {
     setNewTaskMetadata('')
     setNewTaskProjectCommands('')
     setNewTaskWorkerModel('')
+    setNewTaskWorkerProvider('')
     setWorkOpen(false)
     await reloadAll()
     } finally {
@@ -4556,10 +4562,12 @@ export default function App() {
           body: JSON.stringify({
             guidance: reviewGuidance.trim() || undefined,
             start_from_step: startFromStep || undefined,
+            worker_provider: retryProvider.trim() || undefined,
           }),
         })
         setReviewGuidance('')
         setRetryFromStep('')
+        setRetryProvider('')
         await reloadAll()
         if (selectedTaskIdRef.current === taskId) {
           await loadTaskDetail(taskId)
@@ -7347,6 +7355,17 @@ export default function App() {
                         <option value={selectedTaskView.current_step}>{humanizeLabel(selectedTaskView.current_step)}</option>
                       )}
                     </select>
+                    <select
+                      className="retry-step-select"
+                      value={retryProvider}
+                      onChange={(event) => setRetryProvider(event.target.value)}
+                      disabled={isTaskActionBusy || hasUnresolvedBlockers}
+                    >
+                      <option value="">Default provider</option>
+                      {workerHealth.filter((p) => p.configured && p.healthy).map((p) => (
+                        <option key={p.name} value={p.name}>{p.name}</option>
+                      ))}
+                    </select>
                     <button
                       className="button button-primary"
                       onClick={() => void retryTask(selectedTaskView.id, retryFromStep || undefined)}
@@ -7582,6 +7601,17 @@ export default function App() {
                         onChange={(event) => setNewTaskWorkerModel(event.target.value)}
                         placeholder="gpt-5-codex"
                       />
+                      <label className="field-label" htmlFor="task-worker-provider">Worker provider override (optional)</label>
+                      <select
+                        id="task-worker-provider"
+                        value={newTaskWorkerProvider}
+                        onChange={(event) => setNewTaskWorkerProvider(event.target.value)}
+                      >
+                        <option value="">Default provider</option>
+                        {workerHealth.filter((p) => p.configured && p.healthy).map((p) => (
+                          <option key={p.name} value={p.name}>{p.name}</option>
+                        ))}
+                      </select>
                       <label className="field-label" htmlFor="task-metadata">Metadata JSON object (optional)</label>
                       <textarea
                         id="task-metadata"

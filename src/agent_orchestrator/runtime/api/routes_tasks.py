@@ -1007,6 +1007,7 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             dependency_policy=cast(DependencyPolicy, dep_policy),
             source=body.source,
             worker_model=(str(body.worker_model).strip() if body.worker_model else None),
+            worker_provider=(str(body.worker_provider).strip() if body.worker_provider else None),
             metadata=_sanitize_client_task_metadata(body.metadata),
             project_commands=(body.project_commands if body.project_commands else None),
         )
@@ -2180,6 +2181,8 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
         task.metadata.pop("workdoc_sync_step", None)
         task.metadata.pop("workdoc_sync_attempt", None)
         task.metadata.pop("recommended_action", None)
+        if body and body.worker_provider:
+            task.worker_provider = str(body.worker_provider).strip() or None
         guidance = (body.guidance if body else None) or ""
         ts = now_iso()
         if guidance.strip() or previous_error.strip():
