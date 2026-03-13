@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from ..domain.models import Task
+from .venv_detector import detect_python_venv
 
 # ---------------------------------------------------------------------------
 # Auto-detection helpers
@@ -208,6 +209,16 @@ def resolve_env_vars(
         if v is not None and k not in merged:
             merged[k] = v
 
+    # Layer 1.5: auto-detected venv — VIRTUAL_ENV and PATH prepend
+    venv_info = detect_python_venv(project_dir)
+    if venv_info is not None:
+        if "VIRTUAL_ENV" not in merged:
+            merged["VIRTUAL_ENV"] = str(venv_info.path)
+        bin_dir_str = str(venv_info.bin_dir)
+        current_path = merged.get("PATH", "")
+        if bin_dir_str not in current_path.split(os.pathsep):
+            merged["PATH"] = bin_dir_str + os.pathsep + current_path if current_path else bin_dir_str
+
     # Layer 3: project-level config (overrides process env)
     merged.update(_extract_env_vars_from_config(cfg))
 
@@ -244,6 +255,12 @@ def resolved_env_vars_view(
             all_keys[key] = ("auto", True)
         else:
             all_keys[key] = ("required", False)
+
+    # Venv-detected VIRTUAL_ENV
+    venv_info = detect_python_venv(project_dir)
+    if venv_info is not None:
+        if "VIRTUAL_ENV" not in all_keys:
+            all_keys["VIRTUAL_ENV"] = ("venv", True)
 
     # Process env overrides auto
     for key in all_keys:

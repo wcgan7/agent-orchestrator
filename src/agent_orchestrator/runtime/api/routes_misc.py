@@ -11,6 +11,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from ...collaboration.modes import normalize_hitl_mode
 from ..orchestrator.env_resolver import resolved_env_vars_view
+from ..orchestrator.venv_detector import detect_python_venv
 from ..orchestrator.human_guidance import (
     clear_active_human_guidance,
     set_active_human_guidance,
@@ -465,6 +466,14 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             )
         except Exception:
             payload["resolved_env_vars"] = []
+        try:
+            venv = detect_python_venv(container.project_dir)
+            payload["detected_python_venv"] = (
+                {"path": str(venv.path), "bin_dir": str(venv.bin_dir), "source": venv.source}
+                if venv is not None else None
+            )
+        except Exception:
+            payload["detected_python_venv"] = None
         return payload
 
     @router.get("/workers/health")
@@ -647,4 +656,12 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             )
         except Exception:
             payload["resolved_env_vars"] = []
+        try:
+            venv = detect_python_venv(container.project_dir)
+            payload["detected_python_venv"] = (
+                {"path": str(venv.path), "bin_dir": str(venv.bin_dir), "source": venv.source}
+                if venv is not None else None
+            )
+        except Exception:
+            payload["detected_python_venv"] = None
         return payload

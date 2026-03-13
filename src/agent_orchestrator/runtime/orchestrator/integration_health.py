@@ -16,9 +16,12 @@ from typing import TYPE_CHECKING, Any
 from ..domain.models import Task, now_iso
 from .live_worker_adapter import (
     _DEFAULT_PROJECT_COMMANDS,
+    _apply_venv_to_defaults,
+    _is_subpath,
     _resolve_command_paths,
     detect_project_languages,
 )
+from .venv_detector import detect_python_venv
 
 if TYPE_CHECKING:
     from .service import OrchestratorService
@@ -244,7 +247,9 @@ class IntegrationHealthChecker:
         } or None
 
         # Fall back to language-detected defaults
-        langs = detect_project_languages(svc.container.project_dir)
+        project_dir = svc.container.project_dir
+        venv_info = detect_python_venv(project_dir)
+        langs = detect_project_languages(project_dir)
         if langs:
             if project_commands is None:
                 project_commands = {}
@@ -252,7 +257,11 @@ class IntegrationHealthChecker:
                 if lang not in project_commands:
                     defaults = _DEFAULT_PROJECT_COMMANDS.get(lang)
                     if defaults:
-                        project_commands[lang] = dict(defaults)
+                        lang_cmds = dict(defaults)
+                        if lang == "python" and venv_info is not None:
+                            rel_prefix = str(venv_info.path.relative_to(project_dir) / "bin") if _is_subpath(venv_info.path, project_dir) else str(venv_info.bin_dir)
+                            lang_cmds = _apply_venv_to_defaults(lang_cmds, venv_info.bin_dir, rel_prefix)
+                        project_commands[lang] = lang_cmds
 
         if not project_commands:
             return None

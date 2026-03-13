@@ -22,6 +22,7 @@ from ..domain.models import RunRecord, Task, now_iso
 from ..domain.scope_contract import normalize_scope_contract
 from ..storage.container import Container
 from .env_resolver import resolve_env_vars
+from .venv_detector import detect_python_venv
 from .environment_preflight import (
     provider_has_capabilities,
     required_capabilities_for_step,
@@ -250,6 +251,52 @@ def _normalize_prompt_injections(value: Any) -> dict[str, str]:
 def get_configurable_step_prompt_defaults() -> dict[str, str]:
     """Return default prompt text for settings-managed pipeline steps."""
     return {step: load_prompt(_instruction_prompt_name(step, "feature")) for step in _SETTINGS_PROMPT_STEPS}
+
+
+def _is_subpath(child: Path, parent: Path) -> bool:
+    """Return True if *child* is a descendant of *parent*."""
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _apply_venv_to_defaults(
+    defaults: dict[str, str],
+    venv_bin_dir: Path,
+    venv_rel_prefix: str,
+) -> dict[str, str]:
+    """Prefix default command executables with the venv bin path when available.
+
+    For each command, checks whether the executable (first token) exists in
+    *venv_bin_dir*.  If so, replaces it with a relative path like
+    ``.venv/bin/pytest`` so ``_resolve_command_paths`` can later resolve it
+    to an absolute path for worktree support.
+
+    Args:
+        defaults: Default commands dict (e.g. ``{"test": "pytest", ...}``).
+        venv_bin_dir: Absolute path to the venv's ``bin/`` directory.
+        venv_rel_prefix: Relative prefix from project_dir to venv bin dir
+            (e.g. ``".venv/bin"``).
+
+    Returns:
+        New dict with executables prefixed where the binary exists in the venv.
+    """
+    result: dict[str, str] = {}
+    for key, cmd in defaults.items():
+        parts = cmd.split(None, 1)
+        if not parts:
+            result[key] = cmd
+            continue
+        exe_name = parts[0]
+        # Only prefix bare command names (no path separators)
+        if "/" not in exe_name and (venv_bin_dir / exe_name).is_file():
+            prefixed = f"{venv_rel_prefix}/{exe_name}"
+            result[key] = prefixed if len(parts) == 1 else f"{prefixed} {parts[1]}"
+        else:
+            result[key] = cmd
+    return result
 
 
 def _resolve_command_paths(
@@ -1836,6 +1883,7 @@ class LiveWorkerAdapter:
                 if isinstance(cmds, dict) and cmds:
                     project_commands[lang] = dict(cmds)
         # Fill in defaults for detected languages with no configured commands
+        venv_info = detect_python_venv(project_dir)
         if langs:
             if project_commands is None:
                 project_commands = {}
@@ -1844,6 +1892,9 @@ class LiveWorkerAdapter:
                     defaults = _DEFAULT_PROJECT_COMMANDS.get(lang)
                     if defaults:
                         cmds = dict(defaults)
+                        if lang == "python" and venv_info is not None:
+                            rel_prefix = str(venv_info.path.relative_to(project_dir) / "bin") if _is_subpath(venv_info.path, project_dir) else str(venv_info.bin_dir)
+                            cmds = _apply_venv_to_defaults(cmds, venv_info.bin_dir, rel_prefix)
                         if lang in ("javascript", "typescript"):
                             cmds = _filter_npm_commands_by_scripts(cmds, project_dir)
                         if cmds:
