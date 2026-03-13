@@ -67,10 +67,35 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
                 end = datetime.now(timezone.utc)
             wall_time_seconds += max((end - start).total_seconds(), 0.0)
         api_calls = len(events)
+
+        # Aggregate token usage from persisted step logs.
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_cost_usd = 0.0
+        has_cost_data = False
+        for run in runs:
+            for step_entry in (run.steps or []):
+                if not isinstance(step_entry, dict):
+                    continue
+                tu = step_entry.get("token_usage")
+                if not isinstance(tu, dict):
+                    continue
+                inp = tu.get("input_tokens")
+                if isinstance(inp, (int, float)):
+                    total_input_tokens += int(inp)
+                out = tu.get("output_tokens")
+                if isinstance(out, (int, float)):
+                    total_output_tokens += int(out)
+                cost = tu.get("cost_usd")
+                if isinstance(cost, (int, float)):
+                    total_cost_usd += float(cost)
+                    has_cost_data = True
+
         return {
-            "tokens_used": 0,
+            "tokens_used": total_input_tokens + total_output_tokens,
             "api_calls": api_calls,
-            "estimated_cost_usd": 0.0,
+            "estimated_cost_usd": total_cost_usd,
+            "cost_available": has_cost_data,
             "wall_time_seconds": int(wall_time_seconds),
             "phases_completed": phases_completed,
             "phases_total": phases_total,

@@ -18,6 +18,7 @@ class StepResult:
     generated_tasks: list[dict[str, Any]] | None = None
     dependency_edges: list[dict[str, str]] | None = None
     human_blocking_issues: list[dict[str, str]] | None = None
+    token_usage: dict[str, Any] | None = None
 
 
 class WorkerAdapter(Protocol):
