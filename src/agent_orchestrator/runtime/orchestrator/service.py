@@ -3325,6 +3325,8 @@ class OrchestratorService:
             return "blocked"
 
         step_log: dict[str, Any] = {"step": step, "status": result.status, "ts": now_iso(), "started_at": step_started, "summary": result.summary}
+        if result.token_usage:
+            step_log["token_usage"] = result.token_usage
         if result.human_blocking_issues:
             step_log["human_blocking_issues"] = result.human_blocking_issues
         # Preserve log file paths so historical step logs can be retrieved.

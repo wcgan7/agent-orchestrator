@@ -12,7 +12,7 @@ import urllib.request
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 from loguru import logger
 
@@ -36,6 +36,7 @@ class WorkerRunResult:
     no_heartbeat: bool
     response_text: str = ""
     human_blocking_issues: list[dict[str, str]] = field(default_factory=list)
+    token_usage: dict[str, Any] = field(default_factory=dict)
 
 
 def _build_codex_command(spec: WorkerProviderSpec) -> str:
@@ -177,6 +178,48 @@ def _extract_claude_stream_json_text(stdout_text: str) -> str:
     return ""
 
 
+def _extract_claude_stream_json_usage(stdout_text: str) -> dict[str, Any]:
+    """Extract token usage from Claude CLI stream-json output.
+
+    Parses NDJSON lines looking for ``{"type": "result", ...}`` events that
+    contain ``usage`` and ``cost_usd`` fields.
+
+    Args:
+        stdout_text: Raw stdout captured from a Claude CLI invocation using
+            ``--output-format stream-json``.
+
+    Returns:
+        A dict with ``input_tokens``, ``output_tokens``, ``cost_usd``, and
+        ``provider_type`` keys when data is found; empty dict otherwise.
+    """
+    if not stdout_text.strip():
+        return {}
+    for raw_line in reversed(stdout_text.splitlines()):
+        line = raw_line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if str(obj.get("type") or "") != "result":
+            continue
+        usage: dict[str, Any] = {"provider_type": "claude"}
+        raw_usage = obj.get("usage")
+        if isinstance(raw_usage, dict):
+            for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+                val = raw_usage.get(key)
+                if isinstance(val, (int, float)):
+                    usage[key] = int(val)
+        cost = obj.get("cost_usd")
+        if isinstance(cost, (int, float)):
+            usage["cost_usd"] = float(cost)
+        return usage
+    return {}
+
+
 @lru_cache(maxsize=16)
 def _codex_supports_reasoning_effort(executable: str) -> bool:
     """Best-effort check whether the codex CLI exposes --reasoning-effort."""
@@ -293,6 +336,7 @@ def _run_ollama_generate(
     start = time.monotonic()
     timed_out = False
     response_text_parts: list[str] = []
+    ollama_token_usage: dict[str, Any] = {"provider_type": "ollama", "cost_usd": 0.0}
 
     request = urllib.request.Request(
         url,
@@ -340,6 +384,12 @@ def _run_ollama_generate(
                     out.flush()
 
                 if bool(obj.get("done")):
+                    prompt_eval = obj.get("prompt_eval_count")
+                    eval_count = obj.get("eval_count")
+                    if isinstance(prompt_eval, (int, float)):
+                        ollama_token_usage["input_tokens"] = int(prompt_eval)
+                    if isinstance(eval_count, (int, float)):
+                        ollama_token_usage["output_tokens"] = int(eval_count)
                     break
     except urllib.error.HTTPError as exc:
         stderr_path.write_text(f"[runner] Ollama HTTP error: {exc.code} {exc.reason}\n")
@@ -378,6 +428,7 @@ def _run_ollama_generate(
         timed_out=timed_out,
         no_heartbeat=False,
         response_text=response_text,
+        token_usage=ollama_token_usage,
     )
 
 
@@ -441,6 +492,12 @@ def run_worker(
             if parsed:
                 response_text = parsed
         human_blocking_issues = _extract_human_blocking_issues(progress_path)
+        # Extract token usage based on provider type
+        token_usage: dict[str, Any] = {}
+        if spec.type == "claude" and _extract_option_value(shlex.split(command), "--output-format") == "stream-json":
+            token_usage = _extract_claude_stream_json_usage(stdout_text)
+        elif spec.type == "codex":
+            token_usage = {"provider_type": "codex"}
         return WorkerRunResult(
             provider=spec.name,
             prompt_path=str(run_result.get("prompt_path") or ""),
@@ -454,6 +511,7 @@ def run_worker(
             no_heartbeat=bool(run_result.get("no_heartbeat")),
             response_text=response_text,
             human_blocking_issues=human_blocking_issues,
+            token_usage=token_usage,
         )
 
     if spec.type == "ollama":

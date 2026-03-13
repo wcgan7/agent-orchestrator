@@ -342,6 +342,21 @@ def _format_project_commands(
     return "\n".join(parts)
 
 
+def _merge_token_usage(base: dict[str, Any], additional: dict[str, Any]) -> dict[str, Any]:
+    """Sum token counts and cost from *additional* into *base*, returning a new dict."""
+    merged = dict(base)
+    for key in ("input_tokens", "output_tokens"):
+        base_val = base.get(key)
+        add_val = additional.get(key)
+        if base_val is not None or add_val is not None:
+            merged[key] = (base_val or 0) + (add_val or 0)
+    base_cost = base.get("cost_usd")
+    add_cost = additional.get("cost_usd")
+    if base_cost is not None or add_cost is not None:
+        merged["cost_usd"] = (base_cost or 0.0) + (add_cost or 0.0)
+    return merged
+
+
 def _step_category(step: str) -> str:
     if step in _PLANNING_STEPS:
         return "planning"
@@ -1942,6 +1957,11 @@ class LiveWorkerAdapter:
         raw_json = _extract_json(result.response_text) if result.response_text else None
         raw_is_json = isinstance(raw_json, dict)
 
+        # Propagate token usage from the primary worker call.
+        primary_token_usage = dict(result.token_usage) if result.token_usage else {}
+        if primary_token_usage:
+            step_result.token_usage = dict(primary_token_usage)
+
         # 6. For verification steps that fell through to default "ok"
         #    (no structured summary), run a lightweight LLM formatter to parse the
         #    freeform output into pass/fail.
@@ -1958,6 +1978,10 @@ class LiveWorkerAdapter:
                 project_dir=project_dir,
                 task=task,
             )
+            # Merge primary + formatter token usage into the step total.
+            fmt_usage = step_result.token_usage or {}
+            merged = _merge_token_usage(primary_token_usage, fmt_usage) if (primary_token_usage or fmt_usage) else None
+            step_result.token_usage = merged
 
         # 7. For review steps that fell through with no findings,
         #    run a lightweight LLM formatter to extract structured findings.
@@ -1973,6 +1997,10 @@ class LiveWorkerAdapter:
                 response_text=result.response_text,
                 project_dir=project_dir,
             )
+            # Merge primary + formatter token usage into the step total.
+            fmt_usage = step_result.token_usage or {}
+            merged = _merge_token_usage(primary_token_usage, fmt_usage) if (primary_token_usage or fmt_usage) else None
+            step_result.token_usage = merged
 
         # 8. For task generation steps that fell through with no
         #    generated_tasks, run a lightweight LLM formatter to extract them.
@@ -1988,6 +2016,10 @@ class LiveWorkerAdapter:
                 response_text=result.response_text,
                 project_dir=project_dir,
             )
+            # Merge primary + formatter token usage into the step total.
+            fmt_usage = step_result.token_usage or {}
+            merged = _merge_token_usage(primary_token_usage, fmt_usage) if (primary_token_usage or fmt_usage) else None
+            step_result.token_usage = merged
 
         return step_result
 
@@ -2027,10 +2059,12 @@ class LiveWorkerAdapter:
         finally:
             shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
+        fmt_token_usage = fmt_result.token_usage or None
+
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
             logger.debug("Verify formatter returned unparseable output")
-            return StepResult(status="error", summary="Verification output formatter returned invalid JSON")
+            return StepResult(status="error", summary="Verification output formatter returned invalid JSON", token_usage=fmt_token_usage)
 
         status_val = str(parsed.get("status", "")).lower().strip()
         if status_val not in _VERIFY_ALLOWED_STATUSES:
@@ -2040,7 +2074,7 @@ class LiveWorkerAdapter:
         if isinstance(task.metadata, dict):
             task.metadata["verify_reason_code"] = reason_code
         if status_val == "fail":
-            return StepResult(status="error", summary=str(summary) if summary else response_text[:500])
+            return StepResult(status="error", summary=str(summary) if summary else response_text[:500], token_usage=fmt_token_usage)
         if status_val == "environment":
             note = str(summary) if summary else response_text[:500]
             note, env_kind, normalized_reason = _normalize_verify_environment_note(
@@ -2057,8 +2091,8 @@ class LiveWorkerAdapter:
                     task.metadata["verify_environment_kind"] = env_kind
                 else:
                     task.metadata.pop("verify_environment_kind", None)
-            return StepResult(status="ok", summary=note)
-        return StepResult(status="ok", summary=str(summary) if summary else None)
+            return StepResult(status="ok", summary=note, token_usage=fmt_token_usage)
+        return StepResult(status="ok", summary=str(summary) if summary else None, token_usage=fmt_token_usage)
 
     # ------------------------------------------------------------------
     # Review-output formatter (codex / claude)
@@ -2095,10 +2129,12 @@ class LiveWorkerAdapter:
         finally:
             shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
+        fmt_token_usage = fmt_result.token_usage or None
+
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
             logger.debug("Review formatter returned unparseable output")
-            return StepResult(status="error", summary="Review output formatter returned invalid JSON")
+            return StepResult(status="error", summary="Review output formatter returned invalid JSON", token_usage=fmt_token_usage)
 
         findings = parsed.get("findings")
         human_issues = parsed.get("human_blocking_issues")
@@ -2110,9 +2146,9 @@ class LiveWorkerAdapter:
             ]
             human_blocking = [h for h in human_blocking if h["summary"]] or None
         if isinstance(findings, list):
-            return StepResult(status="ok", findings=_normalize_review_findings(findings), human_blocking_issues=human_blocking)
+            return StepResult(status="ok", findings=_normalize_review_findings(findings), human_blocking_issues=human_blocking, token_usage=fmt_token_usage)
 
-        return StepResult(status="error", summary="Review output formatter returned no findings field")
+        return StepResult(status="error", summary="Review output formatter returned no findings field", token_usage=fmt_token_usage)
 
     # ------------------------------------------------------------------
     # Task-generation-output formatter (codex / claude)
@@ -2149,10 +2185,12 @@ class LiveWorkerAdapter:
         finally:
             shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
+        fmt_token_usage = fmt_result.token_usage or None
+
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
             logger.debug("Task generation formatter returned unparseable output")
-            return StepResult(status="error", summary="Task generation output formatter returned invalid JSON")
+            return StepResult(status="error", summary="Task generation output formatter returned invalid JSON", token_usage=fmt_token_usage)
 
         tasks = (
             parsed.get("tasks")
@@ -2160,9 +2198,9 @@ class LiveWorkerAdapter:
             or parsed.get("items")
         )
         if isinstance(tasks, list):
-            return StepResult(status="ok", generated_tasks=tasks)
+            return StepResult(status="ok", generated_tasks=tasks, token_usage=fmt_token_usage)
 
-        return StepResult(status="error", summary="Task generation output formatter returned no tasks list")
+        return StepResult(status="error", summary="Task generation output formatter returned no tasks list", token_usage=fmt_token_usage)
 
     def _map_result(
         self,

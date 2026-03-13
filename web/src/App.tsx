@@ -332,6 +332,7 @@ type MetricsSnapshot = {
   tokens_used: number
   api_calls: number
   estimated_cost_usd: number
+  cost_available: boolean
   wall_time_seconds: number
   phases_completed: number
   phases_total: number
@@ -1272,6 +1273,7 @@ function normalizeMetrics(payload: unknown): MetricsSnapshot | null {
     tokens_used: toNumber(raw.tokens_used),
     api_calls: toNumber(raw.api_calls),
     estimated_cost_usd: toNumber(raw.estimated_cost_usd),
+    cost_available: raw.cost_available === true,
     wall_time_seconds: toNumber(raw.wall_time_seconds),
     phases_completed: toNumber(raw.phases_completed),
     phases_total: toNumber(raw.phases_total),
@@ -6112,8 +6114,8 @@ export default function App() {
               steps: {metrics?.phases_completed ?? 0}/{metrics?.phases_total ?? 0}
             </p>
             <p className="task-meta">
-              tokens: {metrics?.tokens_used ?? 0} ·
-              est cost: ${(metrics?.estimated_cost_usd ?? 0).toFixed(2)} ·
+              tokens: {(metrics?.tokens_used ?? 0).toLocaleString()} ·
+              est cost: {metrics?.cost_available ? `$${(metrics.estimated_cost_usd ?? 0).toFixed(2)}` : 'N/A'} ·
               files changed: {metrics?.files_changed ?? 0}
             </p>
           </div>
