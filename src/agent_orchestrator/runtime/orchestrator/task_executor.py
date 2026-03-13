@@ -442,8 +442,12 @@ class TaskExecutor:
 
             mode = normalize_hitl_mode(getattr(task, "hitl_mode", "autopilot"))
             # Retry flows resumed from implement/review/commit should not require
-            # re-approval of the original plan gate.
-            skip_before_implement_gate = bool(is_retry_run and retry_from and retry_from != "plan")
+            # re-approval of the original plan gate.  However, retries from
+            # pre-implement planning steps (plan, initiative_plan, commit_review)
+            # must still pause so the user can review the refreshed output.
+            skip_before_implement_gate = bool(
+                is_retry_run and retry_from and retry_from not in {"plan", "initiative_plan", "commit_review"}
+            )
 
             skip_phase1 = retry_from in ("review", "commit")
             resume_from_done_gate = retry_from == svc._BEFORE_DONE_RESUME_STEP
