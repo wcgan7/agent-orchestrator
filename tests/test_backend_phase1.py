@@ -5116,3 +5116,190 @@ def test_patch_task_worker_provider(tmp_path: Path) -> None:
         loaded = client.get(f"/api/tasks/{task_id}")
         assert loaded.status_code == 200
         assert loaded.json()["task"]["worker_provider"] == "ollama"
+
+
+# ---------------------------------------------------------------------------
+# provider_spec_to_dict / normalization consolidation tests
+# ---------------------------------------------------------------------------
+
+from agent_orchestrator.workers.config import (
+    WorkerProviderSpec,
+    provider_spec_to_dict,
+    get_workers_runtime_config,
+)
+
+
+def test_provider_spec_to_dict_codex() -> None:
+    """Codex spec serializes with command, model, reasoning_effort; omits unused fields."""
+    spec = WorkerProviderSpec(
+        name="codex",
+        type="codex",
+        command="codex exec",
+        model="o4-mini",
+        reasoning_effort="high",
+        execution_mode="sandboxed",
+        capabilities=("docker",),
+    )
+    d = provider_spec_to_dict(spec)
+    assert d == {
+        "type": "codex",
+        "execution_mode": "sandboxed",
+        "command": "codex exec",
+        "model": "o4-mini",
+        "reasoning_effort": "high",
+        "capabilities": ["docker"],
+    }
+    # Ensure ollama-specific fields are absent
+    assert "endpoint" not in d
+    assert "temperature" not in d
+    assert "num_ctx" not in d
+    # name is never in the output
+    assert "name" not in d
+
+
+def test_provider_spec_to_dict_claude() -> None:
+    """Claude spec includes execution_mode=host_access and capabilities as list."""
+    spec = WorkerProviderSpec(
+        name="claude",
+        type="claude",
+        command="claude -p",
+        model="sonnet",
+        execution_mode="host_access",
+        capabilities=("docker", "git"),
+    )
+    d = provider_spec_to_dict(spec)
+    assert d["type"] == "claude"
+    assert d["execution_mode"] == "host_access"
+    assert d["command"] == "claude -p"
+    assert d["model"] == "sonnet"
+    assert d["capabilities"] == ["docker", "git"]
+    assert isinstance(d["capabilities"], list)
+
+
+def test_provider_spec_to_dict_ollama() -> None:
+    """Ollama spec includes endpoint, model, temperature, num_ctx."""
+    spec = WorkerProviderSpec(
+        name="local-llm",
+        type="ollama",
+        endpoint="http://localhost:11434",
+        model="llama3",
+        temperature=0.7,
+        num_ctx=4096,
+    )
+    d = provider_spec_to_dict(spec)
+    assert d == {
+        "type": "ollama",
+        "execution_mode": "sandboxed",
+        "endpoint": "http://localhost:11434",
+        "model": "llama3",
+        "temperature": 0.7,
+        "num_ctx": 4096,
+    }
+    assert "command" not in d
+
+
+def test_provider_spec_to_dict_minimal() -> None:
+    """Spec with only required fields omits all optional fields from output."""
+    spec = WorkerProviderSpec(name="bare", type="codex")
+    d = provider_spec_to_dict(spec)
+    assert d == {"type": "codex", "execution_mode": "sandboxed"}
+    assert len(d) == 2
+
+
+def test_get_workers_runtime_config_local_alias() -> None:
+    """Config with type 'local' normalizes to 'ollama' through the full pipeline."""
+    config = {
+        "workers": {
+            "providers": {
+                "my-local": {
+                    "type": "local",
+                    "endpoint": "http://localhost:11434",
+                    "model": "llama3",
+                },
+            },
+        },
+    }
+    runtime = get_workers_runtime_config(config=config, codex_command_fallback="codex exec")
+    assert "my-local" in runtime.providers
+    spec = runtime.providers["my-local"]
+    assert spec.type == "ollama"
+    d = provider_spec_to_dict(spec)
+    assert d["type"] == "ollama"
+
+
+def test_get_workers_runtime_config_codex_fallback() -> None:
+    """Empty providers config still produces a codex entry with defaults."""
+    config: dict[str, object] = {"workers": {}}
+    runtime = get_workers_runtime_config(config=config, codex_command_fallback="codex exec")
+    assert "codex" in runtime.providers
+    d = provider_spec_to_dict(runtime.providers["codex"])
+    assert d["type"] == "codex"
+    assert d["command"] == "codex exec"
+    assert d["execution_mode"] == "sandboxed"
+
+
+def test_settings_payload_providers_match(tmp_path: Path) -> None:
+    """GET /api/settings returns normalized providers via provider_spec_to_dict."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    with TestClient(app) as client:
+        resp = client.get("/api/settings")
+        assert resp.status_code == 200
+        settings = resp.json()
+        providers = settings["workers"]["providers"]
+        # codex is always present
+        assert "codex" in providers
+        codex = providers["codex"]
+        assert codex["type"] == "codex"
+        assert "command" in codex
+        assert "execution_mode" in codex
+        # default worker must be in providers
+        default_worker = settings["workers"]["default"]
+        assert default_worker in providers
+
+
+def test_provider_spec_to_dict_capabilities_dedup() -> None:
+    """Capabilities are deduplicated and lowered by get_workers_runtime_config."""
+    config = {
+        "workers": {
+            "providers": {
+                "claude": {
+                    "type": "claude",
+                    "capabilities": ["docker", "DOCKER", "docker", "git"],
+                },
+            },
+        },
+    }
+    runtime = get_workers_runtime_config(config=config, codex_command_fallback="codex exec")
+    d = provider_spec_to_dict(runtime.providers["claude"])
+    assert d["capabilities"] == ["docker", "git"]
+
+
+def test_provider_spec_to_dict_invalid_reasoning_effort_omitted() -> None:
+    """Invalid reasoning_effort is dropped by get_workers_runtime_config."""
+    config = {
+        "workers": {
+            "providers": {
+                "codex": {
+                    "type": "codex",
+                    "reasoning_effort": "invalid",
+                },
+            },
+        },
+    }
+    runtime = get_workers_runtime_config(config=config, codex_command_fallback="codex exec")
+    d = provider_spec_to_dict(runtime.providers["codex"])
+    assert "reasoning_effort" not in d
+
+
+def test_settings_payload_default_worker_fallback(tmp_path: Path) -> None:
+    """Default worker falls back to codex when configured default is unknown."""
+    app = create_app(project_dir=tmp_path, worker_adapter=DefaultWorkerAdapter())
+    # Write a config with a non-existent default worker
+    config_dir = tmp_path / ".agent_orchestrator"
+    config_dir.mkdir(exist_ok=True)
+    config_file = config_dir / "config.yaml"
+    config_file.write_text("workers:\n  default: nonexistent\n")
+    with TestClient(app) as client:
+        resp = client.get("/api/settings")
+        assert resp.status_code == 200
+        assert resp.json()["workers"]["default"] == "codex"

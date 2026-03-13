@@ -58,6 +58,36 @@ class WorkersRuntimeConfig:
     cli_worker_override: Optional[str] = None
 
 
+def provider_spec_to_dict(spec: WorkerProviderSpec) -> dict[str, Any]:
+    """Serialize a WorkerProviderSpec to a plain dict for API responses.
+
+    Omits None/empty optional fields to match the established API contract.
+
+    Args:
+        spec: Normalized provider spec to serialize.
+
+    Returns:
+        dict[str, Any]: Plain dictionary with ``type`` and ``execution_mode``
+        always present, plus optional fields included only when truthy/not-None.
+    """
+    d: dict[str, Any] = {"type": spec.type, "execution_mode": spec.execution_mode}
+    if spec.command:
+        d["command"] = spec.command
+    if spec.model:
+        d["model"] = spec.model
+    if spec.reasoning_effort:
+        d["reasoning_effort"] = spec.reasoning_effort
+    if spec.capabilities:
+        d["capabilities"] = list(spec.capabilities)
+    if spec.endpoint:
+        d["endpoint"] = spec.endpoint
+    if spec.temperature is not None:
+        d["temperature"] = spec.temperature
+    if spec.num_ctx is not None:
+        d["num_ctx"] = spec.num_ctx
+    return d
+
+
 def _as_dict(value: Any) -> dict[str, Any]:
     """Return ``value`` only when it is a dictionary.
 

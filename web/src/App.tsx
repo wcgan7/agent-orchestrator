@@ -1076,45 +1076,13 @@ function normalizeWorkers(payload: Partial<SystemSettings['workers']> | null | u
     }
   }
 
+  // Backend guarantees normalized provider output — pass through as-is
+  // with only structural validation.
   const providers: Record<string, WorkerProviderSettings> = {}
   for (const [rawName, rawValue] of Object.entries(providersRaw)) {
     const name = String(rawName || '').trim()
     if (!name || !rawValue || typeof rawValue !== 'object') continue
-    const value = rawValue as Record<string, unknown>
-    let type = String(value.type || (name === 'codex' ? 'codex' : name === 'claude' ? 'claude' : '')).trim().toLowerCase()
-    if (type === 'local') type = 'ollama'
-    if (type !== 'codex' && type !== 'ollama' && type !== 'claude') continue
-    if (type === 'codex' || type === 'claude') {
-      const defaultCommand = type === 'codex' ? 'codex exec' : 'claude -p'
-      const provider: WorkerProviderSettings = {
-        type,
-        command: String(value.command || defaultCommand).trim() || defaultCommand,
-      }
-      const executionMode = String(value.execution_mode || '').trim().toLowerCase()
-      if (executionMode === 'sandboxed' || executionMode === 'host_access') {
-        provider.execution_mode = executionMode
-      } else {
-        provider.execution_mode = type === 'claude' ? 'host_access' : 'sandboxed'
-      }
-      const model = String(value.model || '').trim()
-      if (model) provider.model = model
-      const reasoningEffort = String(value.reasoning_effort || '').trim().toLowerCase()
-      if (reasoningEffort === 'low' || reasoningEffort === 'medium' || reasoningEffort === 'high') {
-        provider.reasoning_effort = reasoningEffort
-      }
-      providers[name] = provider
-      continue
-    }
-    const provider: WorkerProviderSettings = { type: 'ollama' }
-    const endpoint = String(value.endpoint || '').trim()
-    const model = String(value.model || '').trim()
-    if (endpoint) provider.endpoint = endpoint
-    if (model) provider.model = model
-    const maybeTemperature = Number(value.temperature)
-    if (Number.isFinite(maybeTemperature)) provider.temperature = maybeTemperature
-    const maybeNumCtx = Number(value.num_ctx)
-    if (Number.isFinite(maybeNumCtx) && maybeNumCtx > 0) provider.num_ctx = Math.floor(maybeNumCtx)
-    providers[name] = provider
+    providers[name] = rawValue as WorkerProviderSettings
   }
   if (!providers.codex || providers.codex.type !== 'codex') {
     providers.codex = { type: 'codex', command: 'codex exec', execution_mode: 'sandboxed' }
