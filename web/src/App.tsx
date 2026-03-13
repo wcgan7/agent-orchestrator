@@ -2400,14 +2400,16 @@ export default function App() {
     setNewTaskProjectCommands(settingsProjectCommands)
   }, [workOpen, createTab, newTaskProjectCommands, settingsProjectCommands])
 
-  async function loadTaskDetail(taskId: string): Promise<void> {
+  async function loadTaskDetail(taskId: string, quiet = false): Promise<void> {
     if (!taskId) {
       setSelectedTaskDetail(null)
       return
     }
     const requestSeq = taskDetailRequestSeqRef.current + 1
     taskDetailRequestSeqRef.current = requestSeq
-    setSelectedTaskDetailLoading(true)
+    if (!quiet) {
+      setSelectedTaskDetailLoading(true)
+    }
     try {
       const detail = await requestJson<{ task: TaskRecord }>(buildApiUrl(`/api/tasks/${taskId}`, projectDir))
       if (requestSeq !== taskDetailRequestSeqRef.current || selectedTaskIdRef.current !== taskId) {
@@ -2418,20 +2420,22 @@ export default function App() {
         hitl_mode: normalizeHitlMode(detail.task.hitl_mode),
       }
       setSelectedTaskDetail(task)
-      void loadTaskPlan(taskId)
-      void loadTaskWorkdoc(taskId)
-      setEditTaskTitle(task.title || '')
-      setEditTaskDescription(task.description || '')
-      setEditTaskType(task.task_type || 'feature')
-      setEditTaskPriority(task.priority || 'P2')
-      setEditTaskLabels((task.labels || []).join(', '))
-      setEditTaskHitlMode(normalizeHitlMode(task.hitl_mode))
-      setEditTaskDependencyPolicy(task.dependency_policy || 'prudent')
-      const perTaskTimeout = Number(task.step_timeout_seconds)
-      setEditTaskStepTimeout(Number.isFinite(perTaskTimeout) && perTaskTimeout > 0 ? String(Math.floor(perTaskTimeout)) : '')
-      setEditTaskProjectCommands(task.project_commands && Object.keys(task.project_commands).length > 0 ? serializeProjectCommandsYaml(task.project_commands) : '')
-      if (task.status === 'blocked' && task.current_step) {
-        setRetryFromStep(task.current_step)
+      if (!quiet) {
+        void loadTaskPlan(taskId)
+        void loadTaskWorkdoc(taskId)
+        setEditTaskTitle(task.title || '')
+        setEditTaskDescription(task.description || '')
+        setEditTaskType(task.task_type || 'feature')
+        setEditTaskPriority(task.priority || 'P2')
+        setEditTaskLabels((task.labels || []).join(', '))
+        setEditTaskHitlMode(normalizeHitlMode(task.hitl_mode))
+        setEditTaskDependencyPolicy(task.dependency_policy || 'prudent')
+        const perTaskTimeout = Number(task.step_timeout_seconds)
+        setEditTaskStepTimeout(Number.isFinite(perTaskTimeout) && perTaskTimeout > 0 ? String(Math.floor(perTaskTimeout)) : '')
+        setEditTaskProjectCommands(task.project_commands && Object.keys(task.project_commands).length > 0 ? serializeProjectCommandsYaml(task.project_commands) : '')
+        if (task.status === 'blocked' && task.current_step) {
+          setRetryFromStep(task.current_step)
+        }
       }
     } catch {
       if (requestSeq !== taskDetailRequestSeqRef.current || selectedTaskIdRef.current !== taskId) {
@@ -3201,8 +3205,7 @@ export default function App() {
 
       const selectedTask = String(selectedTaskIdRef.current || '').trim()
       if (selectedTask) {
-        void loadTaskDetail(selectedTask)
-        void loadTaskPlan(selectedTask)
+        void loadTaskDetail(selectedTask, true)
       }
     } catch (err) {
       if (refreshProjectDir !== projectDirRef.current) {
