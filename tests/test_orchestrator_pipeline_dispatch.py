@@ -1443,6 +1443,100 @@ def test_plan_output_stored_in_revisions(tmp_path: Path) -> None:
     assert revisions[0].content == "Plan output for plan"
 
 
+def test_diagnose_and_analyze_steps_create_plan_revisions(tmp_path: Path) -> None:
+    """bug_fix (diagnose) and docs/test (analyze) steps create plan revisions."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+
+    real_adapter = DefaultWorkerAdapter()
+
+    # -- bug_fix pipeline: diagnose step should create a plan revision --
+    def bug_fix_run_step(*, task, step, attempt):
+        if step == "diagnose":
+            return StepResult(status="ok", summary="Root cause: null pointer in auth")
+        if step == "review":
+            return StepResult(status="ok", findings=[])
+        return real_adapter.run_step(task=task, step=step, attempt=attempt)
+
+    adapter = MagicMock()
+    adapter.run_step = bug_fix_run_step
+
+    container = Container(tmp_path / "bugfix")
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+
+    bug_task = Task(title="Diagnose revision test", task_type="bug", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(bug_task)
+    result = service.run_task(bug_task.id)
+    assert result.status == "done"
+
+    revisions = container.plan_revisions.for_task(result.id)
+    assert len(revisions) == 1
+    assert revisions[0].step == "diagnose"
+    assert revisions[0].content == "Root cause: null pointer in auth"
+
+    # -- docs pipeline: analyze step should create a plan revision --
+    def docs_run_step(*, task, step, attempt):
+        if step == "analyze":
+            return StepResult(status="ok", summary="Docs analysis: missing API docs")
+        if step == "review":
+            return StepResult(status="ok", findings=[])
+        return real_adapter.run_step(task=task, step=step, attempt=attempt)
+
+    adapter2 = MagicMock()
+    adapter2.run_step = docs_run_step
+
+    container2 = Container(tmp_path / "docs")
+    bus2 = EventBus(container2.events, container2.project_id)
+    service2 = OrchestratorService(container2, bus2, worker_adapter=adapter2)
+
+    docs_task = Task(title="Analyze revision test", task_type="docs", status="queued", hitl_mode="autopilot")
+    container2.tasks.upsert(docs_task)
+    result2 = service2.run_task(docs_task.id)
+    assert result2.status == "done"
+
+    revisions2 = container2.plan_revisions.for_task(result2.id)
+    assert len(revisions2) == 1
+    assert revisions2[0].step == "analyze"
+    assert revisions2[0].content == "Docs analysis: missing API docs"
+
+
+def test_refactor_creates_revisions_for_analyze_and_plan(tmp_path: Path) -> None:
+    """Refactor pipeline creates two plan revisions: analyze + plan."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+
+    real_adapter = DefaultWorkerAdapter()
+
+    def run_step(*, task, step, attempt):
+        if step == "analyze":
+            return StepResult(status="ok", summary="Analysis: code smells in module X")
+        if step == "plan":
+            return StepResult(status="ok", summary="Plan: extract helper class")
+        if step == "review":
+            return StepResult(status="ok", findings=[])
+        return real_adapter.run_step(task=task, step=step, attempt=attempt)
+
+    adapter = MagicMock()
+    adapter.run_step = run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+
+    task = Task(title="Refactor revision test", task_type="refactor", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+    result = service.run_task(task.id)
+    assert result.status == "done"
+
+    revisions = container.plan_revisions.for_task(result.id)
+    assert len(revisions) == 2
+    assert revisions[0].step == "analyze"
+    assert revisions[1].step == "plan"
+
+
 # ---------------------------------------------------------------------------
 # 21. Generate tasks from plan
 # ---------------------------------------------------------------------------
