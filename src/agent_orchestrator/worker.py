@@ -87,6 +87,7 @@ def _run_codex_worker(
     on_spawn: Optional[Callable[[int], None]] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
     env: Optional[dict[str, str]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> dict[str, Any]:
     prompt_path = run_dir / "prompt.txt"
     prompt_path.write_text(prompt)
@@ -215,11 +216,18 @@ def _run_codex_worker(
             stderr_thread.join(timeout=5)
             raise WorkerCancelledError("Task cancelled by user")
 
-        try:
-            process.wait(timeout=poll_interval)
-            break
-        except subprocess.TimeoutExpired:
-            continue
+        if cancel_event is not None:
+            # Wait on the cancel event so that setting it from another thread
+            # unblocks us immediately instead of sleeping for poll_interval.
+            cancel_event.wait(timeout=poll_interval)
+            if process.poll() is not None:
+                break
+        else:
+            try:
+                process.wait(timeout=poll_interval)
+                break
+            except subprocess.TimeoutExpired:
+                pass
 
     exit_code = process.poll()
     if exit_code is None:

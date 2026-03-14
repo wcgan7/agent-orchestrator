@@ -6,6 +6,7 @@ import json
 import socket
 import shlex
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -446,6 +447,7 @@ def run_worker(
     on_spawn: Optional[Callable[[int], None]] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
     env: Optional[dict[str, str]] = None,
+    cancel_event: Optional["threading.Event"] = None,
 ) -> WorkerRunResult:
     """Run the selected provider and return a normalized run result.
 
@@ -463,6 +465,8 @@ def run_worker(
         is_cancelled (Optional[Callable[[], bool]]): Is cancelled for this call.
         env (Optional[dict[str, str]]): Environment variables for the subprocess.
             ``None`` inherits the parent process environment.
+        cancel_event (Optional[threading.Event]): Event that, when set, unblocks
+            the worker poll loop immediately for fast cancellation.
 
     Returns:
         WorkerRunResult: Result produced by this call.
@@ -484,6 +488,7 @@ def run_worker(
             on_spawn=on_spawn,
             is_cancelled=is_cancelled,
             env=env,
+            cancel_event=cancel_event,
         )
         stdout_text = _read_text(str(run_result.get("stdout_path") or ""))
         response_text = stdout_text
