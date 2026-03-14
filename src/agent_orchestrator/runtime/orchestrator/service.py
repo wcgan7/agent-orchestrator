@@ -772,6 +772,14 @@ class OrchestratorService:
             task.updated_at = now_iso()
             self.container.tasks.upsert(task)
 
+        # Signal the worker subprocess to terminate immediately rather than
+        # waiting for the next poll-interval check.
+        if hasattr(self.worker_adapter, "signal_cancel"):
+            try:
+                self.worker_adapter.signal_cancel(task_id)
+            except Exception:
+                pass
+
         self.bus.emit(
             channel="tasks",
             event_type="task.cancelled",

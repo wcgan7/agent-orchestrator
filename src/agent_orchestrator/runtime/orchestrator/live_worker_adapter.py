@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Sequence
@@ -1684,6 +1685,15 @@ class LiveWorkerAdapter:
                 configuration, repositories, and project paths.
         """
         self._container = container
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._cancel_events_lock = threading.Lock()
+
+    def signal_cancel(self, task_id: str) -> None:
+        """Set the cancel event for a running task to unblock its worker immediately."""
+        with self._cancel_events_lock:
+            event = self._cancel_events.get(task_id)
+        if event is not None:
+            event.set()
 
     @staticmethod
     def _coerce_timeout(value: Any, default: int = _DEFAULT_STEP_TIMEOUT_SECONDS) -> int:
@@ -1978,6 +1988,13 @@ class LiveWorkerAdapter:
         if spec.type in {"codex", "claude"}:
             worker_env = resolve_env_vars(project_dir=project_dir, cfg=cfg, task=task)
 
+        # Create a per-invocation cancel event so cancel_task() can unblock
+        # the worker poll loop immediately instead of waiting up to
+        # poll_interval seconds.
+        cancel_event = threading.Event()
+        with self._cancel_events_lock:
+            self._cancel_events[task.id] = cancel_event
+
         try:
             result = run_worker(
                 spec=spec,
@@ -1990,12 +2007,15 @@ class LiveWorkerAdapter:
                 progress_path=progress_path,
                 is_cancelled=_check_task_cancelled,
                 env=worker_env,
+                cancel_event=cancel_event,
             )
         except WorkerCancelledError:
             raise  # Let the orchestrator handle cancellation
         except Exception as exc:
             return StepResult(status="error", summary=f"Worker execution failed: {exc}")
         finally:
+            with self._cancel_events_lock:
+                self._cancel_events.pop(task.id, None)
             if not isinstance(task.metadata, dict):
                 task.metadata = {}
             task.metadata.pop("active_logs", None)
