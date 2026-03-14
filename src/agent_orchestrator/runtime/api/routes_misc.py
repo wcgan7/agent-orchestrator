@@ -571,7 +571,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             incoming_task_generation = incoming_defaults.get("task_generation")
             if isinstance(incoming_task_generation, dict):
                 task_generation_cfg = orchestrator.resolve_task_generation_policy(
-                    Task(hitl_mode=defaults_cfg.get("hitl_mode") or "autopilot"),
+                    Task(hitl_mode=defaults_cfg.get("hitl_mode") or "supervised"),
                     request_overrides=incoming_task_generation,
                 )
                 defaults_cfg["task_generation"] = {

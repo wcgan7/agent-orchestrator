@@ -493,7 +493,7 @@ class PlanManager:
         child_status = str(policy.get("child_status") or "queued").strip().lower()
         if child_status not in {"backlog", "queued"}:
             child_status = "queued"
-        child_hitl_mode = normalize_hitl_mode(str(policy.get("child_hitl_mode") or "autopilot"))
+        child_hitl_mode = normalize_hitl_mode(str(policy.get("child_hitl_mode") or "supervised"))
         created_ids: list[str] = []
         for item in task_defs:
             if not isinstance(item, dict):

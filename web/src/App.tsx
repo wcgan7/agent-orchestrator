@@ -560,7 +560,7 @@ const DEFAULT_SETTINGS: SystemSettings = {
       low: 0,
     },
     dependency_policy: 'prudent',
-    hitl_mode: 'autopilot',
+    hitl_mode: 'supervised',
     task_generation: {
       child_status: 'backlog',
       child_hitl_mode: 'inherit_parent',
@@ -651,7 +651,7 @@ function normalizeHitlMode(raw: string | null | undefined): 'autopilot' | 'super
   const value = String(raw || '').trim().toLowerCase()
   if (value === 'collaborative') return 'supervised'
   if (value === 'autopilot' || value === 'supervised' || value === 'review_only') return value
-  return 'autopilot'
+  return 'supervised'
 }
 
 function gateDisplayLabel(task: TaskRecord | null | undefined): string {
@@ -1859,7 +1859,7 @@ export default function App() {
   const [editTaskType, setEditTaskType] = useState('feature')
   const [editTaskPriority, setEditTaskPriority] = useState('P2')
   const [editTaskLabels, setEditTaskLabels] = useState('')
-  const [editTaskHitlMode, setEditTaskHitlMode] = useState('autopilot')
+  const [editTaskHitlMode, setEditTaskHitlMode] = useState('supervised')
   const [editTaskDependencyPolicy, setEditTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
   const [editTaskStepTimeout, setEditTaskStepTimeout] = useState('')
   const [editTaskProjectCommands, setEditTaskProjectCommands] = useState('')
@@ -1878,7 +1878,7 @@ export default function App() {
   const [newTaskPriority, setNewTaskPriority] = useState('P2')
   const [newTaskLabels, setNewTaskLabels] = useState('')
   const [newTaskBlockedBy, setNewTaskBlockedBy] = useState('')
-  const [newTaskHitlMode, setNewTaskHitlMode] = useState('autopilot')
+  const [newTaskHitlMode, setNewTaskHitlMode] = useState('supervised')
   const [newTaskDependencyPolicy, setNewTaskDependencyPolicy] = useState<'permissive' | 'prudent' | 'strict'>('prudent')
   const [newTaskParentId, setNewTaskParentId] = useState('')
   const [newTaskPipelineTemplate, setNewTaskPipelineTemplate] = useState('')
@@ -4764,7 +4764,7 @@ export default function App() {
   const taskDetailContent = selectedTaskView ? (
       <div className="detail-card">
         {selectedTaskDetailLoading ? <p className="field-label">Loading full task detail...</p> : null}
-        <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {humanizeLabel(normalizeHitlMode(selectedTaskView.hitl_mode || 'autopilot'))} · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}{(() => { const ch = selectedTaskView.execution_summary?.steps?.map(s => s.commit).filter(Boolean).pop(); return ch ? <>{' · '}<span className="execution-step-commit" title={`Click to copy: ${ch}`} onClick={(e) => { e.stopPropagation(); void navigator.clipboard.writeText(ch) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(ch) } }}>{ch.slice(0, 8)}</span></> : null })()}</p>
+        <p className="task-meta"><span className="task-id-chip" title={selectedTaskView.id} onClick={() => { void navigator.clipboard.writeText(selectedTaskView.id) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(selectedTaskView.id) } }}>{selectedTaskView.id.replace(/^task-/, '')}</span> · {humanizeLabel(normalizeHitlMode(selectedTaskView.hitl_mode || 'supervised'))} · {selectedTaskView.priority} · {humanizeLabel(selectedTaskView.task_type || 'feature')}{(() => { const ch = selectedTaskView.execution_summary?.steps?.map(s => s.commit).filter(Boolean).pop(); return ch ? <>{' · '}<span className="execution-step-commit" title={`Click to copy: ${ch}`} onClick={(e) => { e.stopPropagation(); void navigator.clipboard.writeText(ch) }} role="button" tabIndex={0} onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); void navigator.clipboard.writeText(ch) } }}>{ch.slice(0, 8)}</span></> : null })()}</p>
         {selectedTaskTotalSeconds != null ? (
           <p className="task-meta">
             Total time taken: {formatDuration(selectedTaskTotalSeconds) || '0s'}
@@ -5215,7 +5215,7 @@ export default function App() {
                 />
                 <label className="field-label">HITL mode</label>
                 {configLocked ? (
-                  <p className="task-meta">{humanizeLabel(normalizeHitlMode(selectedTaskView.hitl_mode || 'autopilot'))}</p>
+                  <p className="task-meta">{humanizeLabel(normalizeHitlMode(selectedTaskView.hitl_mode || 'supervised'))}</p>
                 ) : (
                   <HITLModeSelector
                     currentMode={editTaskHitlMode}

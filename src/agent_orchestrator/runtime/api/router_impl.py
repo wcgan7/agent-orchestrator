@@ -280,7 +280,7 @@ class DefaultsSettingsRequest(BaseModel):
         low=0,
     )
     dependency_policy: str = "prudent"
-    hitl_mode: str = "autopilot"
+    hitl_mode: str = "supervised"
     task_generation: TaskGenerationDefaultsRequest = TaskGenerationDefaultsRequest()
 
 
@@ -709,7 +709,7 @@ def _task_payload(
     orchestrator: Optional["OrchestratorService"] = None,
 ) -> dict[str, Any]:
     payload = task.to_dict()
-    payload["hitl_mode"] = normalize_hitl_mode(str(payload.get("hitl_mode") or "autopilot"))
+    payload["hitl_mode"] = normalize_hitl_mode(str(payload.get("hitl_mode") or "supervised"))
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
     step_timeout_seconds: int | None = None
     raw_step_timeouts = metadata.get("step_timeouts")
@@ -1003,7 +1003,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     prompt_defaults = get_configurable_step_prompt_defaults()
     prompt_overrides = _normalize_prompt_overrides(project_cfg.get("prompt_overrides"))
     prompt_injections = _normalize_prompt_injections(project_cfg.get("prompt_injections"))
-    default_hitl_mode = normalize_hitl_mode(str(defaults.get("hitl_mode") or "autopilot"))
+    default_hitl_mode = normalize_hitl_mode(str(defaults.get("hitl_mode") or "supervised"))
     task_generation_status = str(task_generation.get("child_status") or "backlog").strip().lower()
     if task_generation_status not in {"backlog", "queued"}:
         task_generation_status = "backlog"

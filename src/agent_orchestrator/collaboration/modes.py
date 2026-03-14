@@ -100,7 +100,7 @@ MODE_CONFIGS: dict[str, ModeConfig] = {
 }
 
 
-def normalize_hitl_mode(mode: str | None, *, default: str = HITLMode.AUTOPILOT.value) -> str:
+def normalize_hitl_mode(mode: str | None, *, default: str = HITLMode.SUPERVISED.value) -> str:
     """Normalize persisted/user mode values, including legacy aliases."""
     raw = str(mode or "").strip().lower()
     if raw == "collaborative":

@@ -175,7 +175,7 @@ class Task:
     error: Optional[str] = None
 
     quality_gate: dict[str, int] = field(default_factory=lambda: {"critical": 0, "high": 0, "medium": 0, "low": 0})
-    hitl_mode: str = "autopilot"
+    hitl_mode: str = "supervised"
     dependency_policy: DependencyPolicy = "prudent"
     pending_gate: Optional[str] = None
     wait_state: Optional[dict[str, Any]] = None
@@ -220,7 +220,7 @@ class Task:
             if isinstance(raw_pc, dict) and raw_pc
             else None
         )
-        hitl_mode = normalize_hitl_mode(str(data.get("hitl_mode") or "autopilot"))
+        hitl_mode = normalize_hitl_mode(str(data.get("hitl_mode") or "supervised"))
         raw_dep_policy = str(data.get("dependency_policy") or "prudent")
         dependency_policy = raw_dep_policy if raw_dep_policy in _VALID_DEPENDENCY_POLICIES else "prudent"
         raw_retry_count = data.get("retry_count")
