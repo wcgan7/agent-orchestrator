@@ -36,7 +36,7 @@ class TestPipelineTemplate:
     def test_research_pipeline_steps(self):
         """Test that research pipeline steps."""
         tmpl = BUILTIN_TEMPLATES["research"]
-        assert tmpl.step_names() == ["analyze", "report"]
+        assert tmpl.step_names() == ["analyze"]
 
     def test_docs_pipeline_steps(self):
         """Test that docs pipeline steps."""
@@ -47,7 +47,7 @@ class TestPipelineTemplate:
     def test_review_pipeline_steps(self):
         """Test that review pipeline steps."""
         tmpl = BUILTIN_TEMPLATES["review"]
-        assert tmpl.step_names() == ["analyze", "review", "report"]
+        assert tmpl.step_names() == ["analyze", "review"]
         assert tmpl.task_types == ("review",)
 
     def test_repo_review_pipeline_steps(self):

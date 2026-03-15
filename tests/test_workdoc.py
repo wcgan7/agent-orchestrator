@@ -110,7 +110,7 @@ def test_init_verify_only_uses_minimal_template(service: OrchestratorService, pr
     canonical = service._init_workdoc(task, project_dir)
     content = canonical.read_text()
     assert "## Verification Results" in content
-    assert "## Final Report" in content
+    assert "## Final Report" not in content
     assert "## Plan" not in content
     assert "## Analysis" not in content
     assert "## Implementation Log" not in content
@@ -174,7 +174,7 @@ def test_init_plan_only_uses_planning_template(service: OrchestratorService, pro
     assert "## Analysis" in content
     assert "## Plan" in content
     assert "## Generated Tasks" in content
-    assert "## Final Report" in content
+    assert "## Final Report" not in content
     assert "## Implementation Log" not in content
     assert "## Review Findings" not in content
     assert "## Fix Log" not in content
@@ -191,7 +191,7 @@ def test_init_security_audit_uses_scan_template(service: OrchestratorService, pr
     content = canonical.read_text()
     assert "## Dependency Scan Findings" in content
     assert "## Code Scan Findings" in content
-    assert "## Security Report" in content
+    assert "## Security Report" not in content
     assert "## Generated Remediation Tasks" in content
     assert "## Plan" not in content
     assert "## Implementation Log" not in content
@@ -200,7 +200,7 @@ def test_init_security_audit_uses_scan_template(service: OrchestratorService, pr
     assert "<!-- WORKDOC:SCHEMA v1 -->" in content
     assert "<!-- WORKDOC:SECTION dependency_scan_findings START -->" in content
     assert "<!-- WORKDOC:SECTION code_scan_findings START -->" in content
-    assert "<!-- WORKDOC:SECTION final_report START -->" in content
+    assert "<!-- WORKDOC:SECTION final_report START -->" not in content
     assert "<!-- WORKDOC:SECTION generated_tasks START -->" in content
 
 
@@ -232,7 +232,7 @@ def test_init_research_uses_minimal_research_template(service: OrchestratorServi
     canonical = service._init_workdoc(task, project_dir)
     content = canonical.read_text()
     assert "## Research Analysis" in content
-    assert "## Final Report" in content
+    assert "## Final Report" not in content
     assert "## Plan" not in content
     assert "## Implementation Log" not in content
     assert "## Verification Results" not in content
@@ -251,7 +251,7 @@ def test_init_review_uses_review_template(service: OrchestratorService, project_
     content = canonical.read_text()
     assert "## Review Analysis" in content
     assert "## Review Findings" in content
-    assert "## Final Report" in content
+    assert "## Final Report" not in content
     assert "## Implementation Log" not in content
     assert "## Verification Results" not in content
     assert "## Fix Log" not in content
@@ -395,7 +395,7 @@ def test_init_spike_uses_spike_template(service: OrchestratorService, project_di
     content = canonical.read_text()
     assert "## Spike Analysis" in content
     assert "## Prototype Notes" in content
-    assert "## Final Report" in content
+    assert "## Final Report" not in content
     assert "## Review Findings" not in content
     assert "## Fix Log" not in content
     assert "## Verification Results" not in content
@@ -994,16 +994,32 @@ def test_sync_implement_fix_ignores_worker_changes_and_formats_cycles(
 def test_sync_report_ignores_worker_changes_and_uses_summary(
     service: OrchestratorService, task: Task, project_dir: Path
 ) -> None:
-    """Report step should be orchestrator-managed and append into Final Report."""
+    """Report step should be orchestrator-managed and append into Final Report.
+
+    No built-in pipeline includes a report step anymore, but custom pipelines
+    may still use one.  This test validates the orchestrator-managed sync
+    behaviour by manually injecting a Final Report section into the workdoc.
+    """
     task = Task(
-        title="Research report",
-        description="Investigate DB options",
-        task_type="research",
+        title="Custom report task",
+        description="Task with custom pipeline that includes a report step",
+        task_type="feature",
         priority="P2",
     )
     service._init_workdoc(task, project_dir)
     canonical = service._workdoc_canonical_path(task.id)
     worktree = service._workdoc_worktree_path(project_dir)
+
+    # Inject a Final Report section into both canonical and worktree workdocs
+    # so the report step has a heading to append under.
+    report_section = (
+        "\n## Final Report\n\n"
+        "<!-- WORKDOC:SECTION final_report START -->\n"
+        "_Pending: will be populated by the report step._\n"
+        "<!-- WORKDOC:SECTION final_report END -->\n"
+    )
+    canonical.write_text(canonical.read_text() + report_section, encoding="utf-8")
+    worktree.write_text(worktree.read_text() + report_section, encoding="utf-8")
     before = canonical.read_text()
 
     modified = worktree.read_text().replace(

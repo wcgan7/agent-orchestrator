@@ -171,10 +171,6 @@ _Pending: will be populated by the implement step._
 
 _Pending: will be populated by the verify step._
 
-## Final Report
-
-_Pending: will be populated by the report step._
-
 ## Review Findings
 
 _Pending: will be populated by the review step._
@@ -202,10 +198,6 @@ _Pending: will be populated as needed._
 ## Verification Results
 
 _Pending: will be populated by the verify step._
-
-## Final Report
-
-_Pending: will be populated by the report step._
 """
 
     _SECURITY_AUDIT_WORKDOC_TEMPLATE = """\
@@ -230,10 +222,6 @@ _Pending: will be populated by the scan_deps step._
 ## Code Scan Findings
 
 _Pending: will be populated by the scan_code step._
-
-## Security Report
-
-_Pending: will be populated by the report step._
 
 ## Generated Remediation Tasks
 
@@ -286,10 +274,6 @@ _Pending: will be populated by the generate_tasks step._
 ## Research Analysis
 
 _Pending: will be populated by the analyze step._
-
-## Final Report
-
-_Pending: will be populated by the report step._
 """
 
     _REVIEW_WORKDOC_TEMPLATE = """\
@@ -314,10 +298,6 @@ _Pending: will be populated by the analyze step._
 ## Review Findings
 
 _Pending: will be populated by the review step._
-
-## Final Report
-
-_Pending: will be populated by the report step._
 """
 
     _COMMIT_REVIEW_WORKDOC_TEMPLATE = """\
@@ -626,10 +606,6 @@ _Pending: will be populated by the analyze step._
 ## Prototype Notes
 
 _Pending: will be populated by the implement step._
-
-## Final Report
-
-_Pending: will be populated by the report step._
 """
 
     _PLAN_ONLY_WORKDOC_TEMPLATE = """\
@@ -658,10 +634,6 @@ _Pending: will be populated by the plan step._
 ## Generated Tasks
 
 _Pending: will be populated by the generate_tasks step._
-
-## Final Report
-
-_Pending: will be populated by the report step._
 """
 
     def __init__(

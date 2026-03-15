@@ -643,7 +643,7 @@ function statusPillClass(status: string): string {
 const GATE_DISPLAY_MAP: Record<string, string> = {
   before_implement: 'Plan ready.',
   before_generate_tasks: 'Plan ready to generate tasks.',
-  before_done: 'Work complete.',
+  before_done: 'Analysis complete.',
   after_implement: 'Implementation complete; approval required',
   before_commit: 'Implementation completed.',
   human_intervention: 'Human intervention required',
@@ -4727,7 +4727,7 @@ export default function App() {
             onClick={() => setGateRequestOpen(true)}
             disabled={taskActionPending !== null}
           >
-            Request changes
+            {String(task.pending_gate || '') === 'before_done' ? 'Refine' : 'Request changes'}
           </button>
         ) : (
           <>
@@ -4735,7 +4735,7 @@ export default function App() {
               className="review-guidance-input"
               value={gateRequestGuidance}
               onChange={(event) => setGateRequestGuidance(event.target.value)}
-              placeholder="Guidance for changes..."
+              placeholder={String(task.pending_gate || '') === 'before_done' ? 'What should be refined?' : 'Guidance for changes...'}
               disabled={taskActionPending !== null}
             />
             <button

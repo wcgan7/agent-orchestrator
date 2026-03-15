@@ -114,11 +114,10 @@ REFACTOR_PIPELINE = PipelineTemplate(
 RESEARCH_PIPELINE = PipelineTemplate(
     id="research",
     display_name="Research",
-    description="Analyze findings and produce a report.",
+    description="Analyze findings and produce a research analysis.",
     task_types=("research",),
     steps=(
         StepDef(name="analyze", display_name="Analyze"),
-        StepDef(name="report", display_name="Report", required=False),
     ),
 )
 
@@ -172,7 +171,6 @@ SECURITY_AUDIT_PIPELINE = PipelineTemplate(
     steps=(
         StepDef(name="scan_deps", display_name="Scan Dependencies"),
         StepDef(name="scan_code", display_name="Scan Code"),
-        StepDef(name="report", display_name="Generate Report"),
         StepDef(name="generate_tasks", display_name="Generate Fix Tasks"),
     ),
 )
@@ -180,12 +178,11 @@ SECURITY_AUDIT_PIPELINE = PipelineTemplate(
 REVIEW_PIPELINE = PipelineTemplate(
     id="review",
     display_name="Code Review",
-    description="Analyze existing work, review changes, and produce a report.",
+    description="Analyze existing work and review changes.",
     task_types=("review",),
     steps=(
         StepDef(name="analyze", display_name="Analyze"),
         StepDef(name="review", display_name="Review"),
-        StepDef(name="report", display_name="Report", required=False),
     ),
 )
 
@@ -273,7 +270,6 @@ SPIKE_PIPELINE = PipelineTemplate(
     steps=(
         StepDef(name="analyze", display_name="Analyze Context"),
         StepDef(name="prototype", display_name="Prototype"),
-        StepDef(name="report", display_name="Report"),
     ),
 )
 
@@ -309,7 +305,6 @@ VERIFY_ONLY_PIPELINE = PipelineTemplate(
     task_types=("verify_only", "verify"),
     steps=(
         StepDef(name="verify", display_name="Run Checks"),
-        StepDef(name="report", display_name="Report Results"),
     ),
 )
 

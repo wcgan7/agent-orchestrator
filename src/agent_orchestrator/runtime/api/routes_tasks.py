@@ -146,7 +146,7 @@ def _gate_changes_requested_message(gate: str | None, *, start_from_step: str | 
     if normalized == "before_generate_tasks":
         return "Changes requested. Task resumed before task generation."
     if normalized == "before_done":
-        return "Changes requested. Task resumed from the final step."
+        return "Refinement requested. Task will re-run analysis."
     if start_from_step:
         return f"Changes requested. Task resumed from {start_from_step}."
     return "Changes requested. Task resumed."
