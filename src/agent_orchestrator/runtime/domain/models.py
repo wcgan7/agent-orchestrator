@@ -42,6 +42,19 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _parse_iso_opt(value: Optional[str]) -> Optional[datetime]:
+    """Parse an optional ISO-8601 timestamp string into a UTC datetime."""
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
 def _id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:10]}"
 
@@ -272,6 +285,42 @@ class RunRecord:
     finished_at: Optional[str] = None
     summary: Optional[str] = None
     steps: list[dict[str, Any]] = field(default_factory=list)
+    worker_seconds_accumulated: float = 0.0
+
+    def accumulate_worker_seconds(self) -> None:
+        """Add the current active segment duration to ``worker_seconds_accumulated``.
+
+        Call this whenever a run transitions from active (``in_progress``) to a
+        paused/waiting state so that only actual worker execution time is tracked.
+        After calling, update ``started_at`` to mark the start of the next segment
+        (typically done when the run resumes).
+        """
+        started = _parse_iso_opt(self.started_at)
+        if started is None:
+            return
+        now = datetime.now(timezone.utc)
+        self.worker_seconds_accumulated += max((now - started).total_seconds(), 0.0)
+
+    def effective_worker_seconds(self) -> float:
+        """Return total worker seconds including any currently-active segment.
+
+        For legacy runs that pre-date the ``worker_seconds_accumulated`` field
+        (where the value is still ``0.0``), falls back to ``finished_at - started_at``
+        for completed runs to avoid reporting zero.
+        """
+        if self.status == "in_progress" and self.started_at and not self.finished_at:
+            started = _parse_iso_opt(self.started_at)
+            if started is not None:
+                now = datetime.now(timezone.utc)
+                return self.worker_seconds_accumulated + max((now - started).total_seconds(), 0.0)
+        # Legacy fallback: if no accumulated time was ever recorded but the run
+        # has both timestamps, use the full span (old behaviour).
+        if self.worker_seconds_accumulated == 0.0 and self.started_at and self.finished_at:
+            started = _parse_iso_opt(self.started_at)
+            finished = _parse_iso_opt(self.finished_at)
+            if started is not None and finished is not None:
+                return max((finished - started).total_seconds(), 0.0)
+        return self.worker_seconds_accumulated
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize a run record.
@@ -300,6 +349,7 @@ class RunRecord:
             finished_at=data.get("finished_at"),
             summary=data.get("summary"),
             steps=list(data.get("steps") or []),
+            worker_seconds_accumulated=float(data.get("worker_seconds_accumulated") or 0.0),
         )
 
 

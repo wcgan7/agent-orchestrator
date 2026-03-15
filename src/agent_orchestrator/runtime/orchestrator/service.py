@@ -870,6 +870,8 @@ class OrchestratorService:
                     if run is None:
                         continue
                     if run.status in {"waiting_gate", "in_progress"}:
+                        if run.status == "in_progress":
+                            run.accumulate_worker_seconds()
                         run.status = "blocked"
                         run.finished_at = task.updated_at
                         run.summary = task.error
@@ -1218,6 +1220,7 @@ class OrchestratorService:
             if run.task_id in in_progress_ids and run.status == "in_progress" and not run.finished_at:
                 task = task_by_id.get(run.task_id)
                 if task and task.pending_gate:
+                    run.accumulate_worker_seconds()
                     run.status = "waiting_gate"
                     run.finished_at = now_iso()
                     run.summary = run.summary or f"Paused at gate: {task.pending_gate}"
@@ -1229,6 +1232,7 @@ class OrchestratorService:
                     self._finalize_recovered_completed_task(task, run)
                     completed_task_ids.add(task.id)
                     continue
+                run.accumulate_worker_seconds()
                 run.status = "interrupted"
                 run.finished_at = now_iso()
                 run.summary = run.summary or "Interrupted by orchestrator restart"
@@ -1281,6 +1285,7 @@ class OrchestratorService:
     def _finalize_recovered_completed_task(self, task: Task, run: RunRecord) -> None:
         """Finalize a recovered in-progress task as done when commit already succeeded."""
         finished_at = now_iso()
+        run.accumulate_worker_seconds()
         run.status = "done"
         run.finished_at = run.finished_at or finished_at
         run.summary = run.summary or "Pipeline completed"
@@ -2018,6 +2023,8 @@ class OrchestratorService:
                     if latest_run:
                         break
                 if latest_run and latest_run.status != "done":
+                    if latest_run.status == "in_progress":
+                        latest_run.accumulate_worker_seconds()
                     latest_run.status = "done"
                     latest_run.finished_at = latest_run.finished_at or ts
                     if not latest_run.summary:
@@ -3069,6 +3076,7 @@ class OrchestratorService:
             + (" ..." if len(violations) > 6 else "")
         )
         self.container.tasks.upsert(task)
+        run.accumulate_worker_seconds()
         run.status = "blocked"
         run.finished_at = now_iso()
         run.summary = f"Blocked during {step}"
@@ -3270,6 +3278,7 @@ class OrchestratorService:
         self.container.tasks.upsert(task)
         run.status = "in_progress"
         run.finished_at = None
+        run.started_at = now_iso()
         run.summary = None
         self.container.runs.upsert(run)
         self.bus.emit(
@@ -3392,6 +3401,7 @@ class OrchestratorService:
             self._clear_wait_state(task)
             task.current_step = step
             self.container.tasks.upsert(task)
+            run.accumulate_worker_seconds()
             run.status = "blocked"
             run.finished_at = now_iso()
             run.summary = f"Blocked during {step}"
@@ -3613,6 +3623,7 @@ class OrchestratorService:
         task.current_agent_id = None
         self.container.tasks.upsert(task)
 
+        run.accumulate_worker_seconds()
         run.status = "error"
         run.finished_at = now_iso()
         run.summary = f"Auto-requeue: heartbeat stall during {step}"
@@ -3731,6 +3742,7 @@ class OrchestratorService:
         task.current_agent_id = None
         self.container.tasks.upsert(task)
 
+        run.accumulate_worker_seconds()
         run.status = "error"
         run.finished_at = now_iso()
         run.summary = f"Auto-requeue: recoverable environment issue during {step}"
@@ -3904,6 +3916,7 @@ class OrchestratorService:
             run = self.container.runs.get(task.run_ids[-1])
             if run and run.status == "in_progress" and not run.finished_at:
                 self._run_summarize_step(task, run, gate_context=gate_name)
+                run.accumulate_worker_seconds()
                 run.status = "waiting_gate"
                 run.finished_at = task.updated_at
                 # Use LLM-generated summary if available, fall back to static string
@@ -3962,6 +3975,7 @@ class OrchestratorService:
     def _finalize_run(self, task: Task, run: RunRecord, *, status: str, summary: str) -> None:
         """Run the summarize step, then set run status/summary/finished_at."""
         self._run_summarize_step(task, run)
+        run.accumulate_worker_seconds()
         run.status = status
         run.finished_at = now_iso()
         run.summary = summary

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
-from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
@@ -52,20 +51,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         phases_total = sum(max(1, len(list(task.pipeline_template or []))) for task in tasks)
         wall_time_seconds = 0.0
         for run in runs:
-            if not run.started_at:
-                continue
-            try:
-                start = datetime.fromisoformat(str(run.started_at).replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if run.finished_at:
-                try:
-                    end = datetime.fromisoformat(str(run.finished_at).replace("Z", "+00:00"))
-                except ValueError:
-                    continue
-            else:
-                end = datetime.now(timezone.utc)
-            wall_time_seconds += max((end - start).total_seconds(), 0.0)
+            wall_time_seconds += run.effective_worker_seconds()
         api_calls = len(events)
 
         # Aggregate token usage from persisted step logs.

@@ -214,6 +214,7 @@ class TaskExecutor:
                 for run_id in reversed(fresh.run_ids):
                     run = svc.container.runs.get(run_id)
                     if run and run.status == "in_progress":
+                        run.accumulate_worker_seconds()
                         run.status = "cancelled"
                         run.finished_at = now_iso()
                         run.summary = "Cancelled by user"
@@ -345,6 +346,7 @@ class TaskExecutor:
                     run = existing_run
                     run.status = "in_progress"
                     run.finished_at = None
+                    run.started_at = now_iso()
                     if run.summary and str(run.summary).startswith("Paused at gate:"):
                         run.summary = None
             if run is None:
@@ -931,7 +933,9 @@ class TaskExecutor:
                     task.metadata["pending_precommit_approval"] = True
                     task.metadata["review_stage"] = "pre_commit"
                     svc.container.tasks.upsert(task)
+                    run.accumulate_worker_seconds()
                     run.status = "in_review"
+                    run.finished_at = now_iso()
                     # Use LLM-generated summary if available, fall back to static string
                     precommit_summary = None
                     if run.steps:
@@ -1096,6 +1100,7 @@ class TaskExecutor:
             task.metadata.pop("task_context", None)
             task.metadata.pop("recommended_action", None)
             task.metadata.pop("early_complete", None)
+            run.accumulate_worker_seconds()
             run.finished_at = now_iso()
             with svc.container.transaction():
                 svc.container.runs.upsert(run)

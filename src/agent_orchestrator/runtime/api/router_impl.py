@@ -602,7 +602,12 @@ def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
 
 
 def _build_task_timing_summary(task: Task, container: "Container") -> Optional[dict[str, Any]]:
-    """Build cumulative task timing data across run history."""
+    """Build cumulative task timing data across run history.
+
+    Uses ``RunRecord.worker_seconds_accumulated`` (plus any currently-active
+    segment) so that only actual worker execution time is counted — time spent
+    waiting for human intervention (gates, reviews) is excluded.
+    """
     if not task.run_ids:
         return None
 
@@ -630,10 +635,14 @@ def _build_task_timing_summary(task: Task, container: "Container") -> Optional[d
         if run.status == "in_progress" and started is not None:
             if active_run_started_at is None or started < active_run_started_at:
                 active_run_started_at = started
+            # Only include prior accumulated worker seconds for in-progress runs;
+            # the frontend adds the live segment via (now - active_run_started_at).
+            total_completed_seconds += run.worker_seconds_accumulated
             continue
 
-        if started is not None and finished is not None:
-            total_completed_seconds += max((finished - started).total_seconds(), 0.0)
+        # For completed/paused runs, use the accumulated worker time
+        # (with legacy fallback for runs that pre-date accumulation)
+        total_completed_seconds += run.effective_worker_seconds()
 
     if not seen_run:
         return None
