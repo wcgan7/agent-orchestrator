@@ -1231,11 +1231,17 @@ def build_step_prompt(
     # Inject outputs from prior pipeline steps.
     # For implement/implement_fix, rely on the workdoc as the single source of truth.
     step_outputs = task.metadata.get("step_outputs") if isinstance(task.metadata, dict) else None
+    has_plan_override = (
+        isinstance(task.metadata, dict)
+        and task.metadata.get("plan_for_generation")
+        and step == "generate_tasks"
+    )
     if (
         isinstance(step_outputs, dict)
         and step_outputs
         and category in _STEP_OUTPUT_INJECTION
         and step not in {"implement", "implement_fix", "initiative_plan"}
+        and not has_plan_override
     ):
         inject_keys = _STEP_OUTPUT_INJECTION[category]
         if step == "report" and task.task_type in {"security", "security_audit"}:
@@ -1369,7 +1375,7 @@ def build_step_prompt(
 
     # Include plan context for task generation
     plan_for_generation = task.metadata.get("plan_for_generation") if isinstance(task.metadata, dict) else None
-    if plan_for_generation and category == "task_generation" and task.task_type != "initiative_plan":
+    if plan_for_generation and category == "task_generation":
         parts.append("")
         parts.append("## Plan to decompose into subtasks")
         parts.append(str(plan_for_generation))

@@ -14,6 +14,8 @@ Task generation rules:
 - If no dependencies are required, use an empty array.
 - When the context is security-focused, generate remediation tasks tied to
   specific findings and avoid unrelated backlog items.
+- Include in each task's description a brief statement of what it contributes
+  to the overall objective.
 
 Output requirements:
 - Return JSON only; no conversational text or markdown fences.

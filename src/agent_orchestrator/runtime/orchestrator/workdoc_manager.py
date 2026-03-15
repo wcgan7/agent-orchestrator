@@ -86,6 +86,7 @@ class WorkdocManager:
         "## Final Report": "final_report",
         "## Security Report": "final_report",
         "## Review Findings": "review_findings",
+        "## Initiative Context": "initiative_context",
     }
     _WORKDOC_SCHEMA_MARKER = "<!-- WORKDOC:SCHEMA v1 -->"
     _SYNC_DIAGNOSTIC_KEYS = (
@@ -780,6 +781,17 @@ _Pending: will be populated by the report step._
             .replace("{created_at}", task.created_at)
             .replace("{description}", task.description or "(no description)")
         )
+        # Inject initiative context for child tasks spawned from initiative plans.
+        if isinstance(task.metadata, dict):
+            init_ctx = task.metadata.get("initiative_context")
+            if isinstance(init_ctx, dict) and init_ctx:
+                ctx_section = self._render_initiative_context_section(init_ctx)
+                # Insert after the --- separator following Task Description,
+                # before the first pipeline section heading.
+                desc_sep = content.find("\n---\n", content.find("## Task Description"))
+                if desc_sep != -1:
+                    insert_pos = desc_sep + len("\n---\n")
+                    content = content[:insert_pos] + "\n" + ctx_section + "\n" + content[insert_pos:]
         content = self._apply_schema_and_section_sentinels(content)
         canonical.write_text(content, encoding="utf-8")
 
@@ -790,6 +802,24 @@ _Pending: will be populated by the report step._
             task.metadata = {}
         task.metadata["workdoc_path"] = str(canonical)
         return canonical
+
+    @staticmethod
+    def _render_initiative_context_section(ctx: dict[str, str]) -> str:
+        """Render the Initiative Context workdoc section from metadata."""
+        parent_title = ctx.get("parent_title", "")
+        parent_id = ctx.get("parent_id", "")
+        objective = ctx.get("objective", "")
+        plan_excerpt = ctx.get("plan_excerpt", "")
+        lines = ["## Initiative Context", ""]
+        lines.append(f"**Parent Task:** {parent_title} (`{parent_id}`)")
+        lines.append("")
+        lines.append("**Objective:**")
+        lines.append(objective or "(none)")
+        lines.append("")
+        lines.append("**Relevant Plan:**")
+        lines.append(plan_excerpt or "(none)")
+        lines.append("")
+        return "\n".join(lines)
 
     @classmethod
     def _apply_schema_and_section_sentinels(cls, text: str) -> str:
