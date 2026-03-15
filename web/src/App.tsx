@@ -466,6 +466,8 @@ const TASK_TYPE_OPTIONS = [
   'docs',
   'review',
   'commit_review',
+  'pr_review',
+  'mr_review',
   'security',
   'performance',
   'verify_only',

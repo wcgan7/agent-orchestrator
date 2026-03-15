@@ -16,6 +16,7 @@ class TestPipelineTemplate:
         expected = {
             "feature", "bug_fix", "refactor", "research", "docs",
             "test", "repo_review", "security_audit", "review", "commit_review",
+            "pr_review", "mr_review",
             "performance", "hotfix", "spike", "chore", "plan_only", "verify_only",
         }
         assert expected == set(BUILTIN_TEMPLATES.keys())
@@ -61,6 +62,20 @@ class TestPipelineTemplate:
         assert tmpl.step_names() == ["profile", "plan", "implement", "benchmark", "review", "commit"]
         assert tmpl.task_types == ("performance",)
 
+    def test_pr_review_pipeline_steps(self):
+        """Test that PR review pipeline has the expected 5-step sequence."""
+        tmpl = BUILTIN_TEMPLATES["pr_review"]
+        assert tmpl.step_names() == ["pr_review", "implement", "verify", "review", "commit"]
+        assert tmpl.task_types == ("pr_review",)
+        assert tmpl.metadata.get("supports_skip_to_precommit") is True
+
+    def test_mr_review_pipeline_steps(self):
+        """Test that MR review pipeline has the expected 5-step sequence."""
+        tmpl = BUILTIN_TEMPLATES["mr_review"]
+        assert tmpl.step_names() == ["mr_review", "implement", "verify", "review", "commit"]
+        assert tmpl.task_types == ("mr_review",)
+        assert tmpl.metadata.get("supports_skip_to_precommit") is True
+
     def test_security_audit_maps_security_type(self):
         """Test that security audit maps security type."""
         tmpl = BUILTIN_TEMPLATES["security_audit"]
@@ -88,7 +103,7 @@ class TestPipelineRegistry:
         """Test that list templates."""
         reg = PipelineRegistry()
         templates = reg.list_templates()
-        assert len(templates) == 16
+        assert len(templates) == 18
 
     def test_get_template(self):
         """Test that get template."""
@@ -116,6 +131,8 @@ class TestPipelineRegistry:
         assert reg.resolve_for_task_type("performance").id == "performance"
         assert reg.resolve_for_task_type("initiative_plan").id == "plan_only"
         assert reg.resolve_for_task_type("decompose").id == "plan_only"
+        assert reg.resolve_for_task_type("pr_review").id == "pr_review"
+        assert reg.resolve_for_task_type("mr_review").id == "mr_review"
 
     def test_resolve_unknown_type_defaults_to_feature(self):
         """Test that resolve unknown type defaults to feature."""

@@ -204,6 +204,36 @@ COMMIT_REVIEW_PIPELINE = PipelineTemplate(
     metadata={"supports_skip_to_precommit": True},
 )
 
+PR_REVIEW_PIPELINE = PipelineTemplate(
+    id="pr_review",
+    display_name="PR Review",
+    description="Review a GitHub pull request's changes, fix issues found, and verify corrections.",
+    task_types=("pr_review",),
+    steps=(
+        StepDef(name="pr_review", display_name="Review PR"),
+        StepDef(name="implement", display_name="Implement Fixes"),
+        StepDef(name="verify", display_name="Verify"),
+        StepDef(name="review", display_name="Review"),
+        StepDef(name="commit", display_name="Commit"),
+    ),
+    metadata={"supports_skip_to_precommit": True},
+)
+
+MR_REVIEW_PIPELINE = PipelineTemplate(
+    id="mr_review",
+    display_name="MR Review",
+    description="Review a GitLab merge request's changes, fix issues found, and verify corrections.",
+    task_types=("mr_review",),
+    steps=(
+        StepDef(name="mr_review", display_name="Review MR"),
+        StepDef(name="implement", display_name="Implement Fixes"),
+        StepDef(name="verify", display_name="Verify"),
+        StepDef(name="review", display_name="Review"),
+        StepDef(name="commit", display_name="Commit"),
+    ),
+    metadata={"supports_skip_to_precommit": True},
+)
+
 PERFORMANCE_PIPELINE = PipelineTemplate(
     id="performance",
     display_name="Performance Optimization",
@@ -297,6 +327,8 @@ BUILTIN_TEMPLATES: dict[str, PipelineTemplate] = {
         SECURITY_AUDIT_PIPELINE,
         REVIEW_PIPELINE,
         COMMIT_REVIEW_PIPELINE,
+        PR_REVIEW_PIPELINE,
+        MR_REVIEW_PIPELINE,
         PERFORMANCE_PIPELINE,
         HOTFIX_PIPELINE,
         SPIKE_PIPELINE,

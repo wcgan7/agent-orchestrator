@@ -36,7 +36,7 @@ from .worker_adapter import StepResult
 logger = logging.getLogger(__name__)
 
 # Step category mapping
-_PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine", "commit_review"}
+_PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine", "commit_review", "pr_review", "mr_review"}
 _IMPL_STEPS = {"implement", "prototype"}
 _FIX_STEPS = {"implement_fix"}
 _VERIFY_STEPS = {"verify", "benchmark"}
@@ -99,6 +99,7 @@ _SETTINGS_PROMPT_STEPS: tuple[str, ...] = (
     "benchmark",
     "commit_review",
     "diagnose",
+    "mr_review",
     "generate_tasks",
     "implement",
     "implement_fix",
@@ -107,6 +108,7 @@ _SETTINGS_PROMPT_STEPS: tuple[str, ...] = (
     "pipeline_classify",
     "plan",
     "plan_refine",
+    "pr_review",
     "profile",
     "prototype",
     "report",
@@ -206,6 +208,10 @@ def _instruction_prompt_name(step: str, task_type: str) -> str:
     pipeline_id = PipelineRegistry().resolve_for_task_type(task_type).id
     if step == "commit_review":
         return "steps/commit_review.md"
+    if step == "pr_review":
+        return "steps/pr_review.md"
+    if step == "mr_review":
+        return "steps/mr_review.md"
     if step == "plan_refine":
         return "steps/plan_refine.md"
     if step == "initiative_plan_refine":
@@ -439,14 +445,16 @@ def _step_category(step: str) -> str:
 
 
 # Steps that support early pipeline completion when no action is needed.
-_EARLY_COMPLETE_STEPS = {"commit_review"}
+_EARLY_COMPLETE_STEPS = {"commit_review", "pr_review", "mr_review"}
 
 
 def _is_no_action_needed(step: str, summary: str | None) -> bool:
     """Detect whether a step's output indicates no further action is required.
 
-    Currently only applies to ``commit_review``. The commit_review prompt
-    instructs the worker to output "No issues found" when the commit is clean.
+    Applies to review steps listed in ``_EARLY_COMPLETE_STEPS``
+    (``commit_review``, ``pr_review``, ``mr_review``).  The review prompts
+    instruct the worker to output "No issues found" when the changeset is
+    clean.
 
     Args:
         step: Pipeline step name that produced the output.
@@ -1227,6 +1235,33 @@ def build_step_prompt(
             parts.append("")
             parts.append(f"## Commit diff to review ({_cr_sha[:12]})" if _cr_sha else "## Commit diff to review")
             parts.append(f"```diff\n{_cr_diff}\n```")
+
+    # Inject source context for pr_review / mr_review steps.
+    if step in ("pr_review", "mr_review") and isinstance(task.metadata, dict):
+        _pr_desc = str(task.metadata.get("source_description") or "").strip()
+        _pr_url = str(task.metadata.get("source_url") or "").strip()
+        _pr_diff = str(task.metadata.get("source_diff") or "").strip()
+        _pr_ref = str(task.metadata.get("source_ref") or "").strip()
+        _pr_base = str(task.metadata.get("source_base_ref") or "").strip()
+        _pr_stat = str(task.metadata.get("source_stat") or "").strip()
+        if _pr_desc:
+            parts.append("")
+            parts.append("## PR/MR description")
+            parts.append(_pr_desc)
+        if _pr_url:
+            parts.append("")
+            parts.append(f"## Source URL\n{_pr_url}")
+        if _pr_stat:
+            parts.append("")
+            parts.append("## Diff stat (all changed files)")
+            parts.append(f"```\n{_pr_stat}\n```")
+        if _pr_diff:
+            parts.append("")
+            ref_label = _pr_ref or "head"
+            base_label = _pr_base or "base"
+            label = f"PR/MR diff ({base_label}...{ref_label})"
+            parts.append(f"## {label}")
+            parts.append(f"```diff\n{_pr_diff}\n```")
 
     # Inject outputs from prior pipeline steps.
     # For implement/implement_fix, rely on the workdoc as the single source of truth.

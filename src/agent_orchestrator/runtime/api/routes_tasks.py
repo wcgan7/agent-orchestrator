@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import time
 from datetime import datetime, timezone
@@ -940,6 +941,17 @@ def _set_task_step_timeout(task: Task, timeout_seconds: int | None) -> None:
         return
     step_timeouts["implement"] = int(timeout_seconds)
     metadata["step_timeouts"] = step_timeouts
+
+
+_MAX_DIFF_CHARS = 100_000
+
+
+def _truncate_diff(diff_text: str) -> str:
+    """Truncate diff at line boundary with notice."""
+    if len(diff_text) <= _MAX_DIFF_CHARS:
+        return diff_text
+    truncated = diff_text[:_MAX_DIFF_CHARS].rsplit("\n", 1)[0]
+    return truncated + "\n\n[DIFF TRUNCATED — exceeded 100K character limit. Consult the --stat summary above and use `git diff` to read remaining files individually.]"
 
 
 def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
@@ -2892,17 +2904,13 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
             raise HTTPException(status_code=400, detail="No commit found on source task")
 
         # Fetch diff (truncate to ~100K characters to stay within prompt limits).
-        _MAX_DIFF_CHARS = 100_000
         git_dir = container.project_dir
         try:
             diff_result = subprocess.run(
                 ["git", "diff", f"{commit_sha}~1..{commit_sha}"],
                 cwd=git_dir, capture_output=True, text=True, check=True, timeout=15,
             )
-            diff_text = diff_result.stdout
-            if len(diff_text) > _MAX_DIFF_CHARS:
-                diff_text = diff_text[:_MAX_DIFF_CHARS].rsplit("\n", 1)[0]
-                diff_text += "\n\n[DIFF TRUNCATED — exceeded 100K character limit]"
+            diff_text = _truncate_diff(diff_result.stdout)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
             diff_text = ""
 
@@ -2934,6 +2942,223 @@ def register_task_routes(router: APIRouter, deps: RouteDeps) -> None:
                 "source_description": source_task.description or "",
                 "source_plan": plan_text,
                 "source_diff": diff_text,
+            },
+        )
+        container.tasks.upsert(review_task)
+        bus.emit(channel="tasks", event_type="task.created", entity_id=review_task.id, payload={"status": review_task.status})
+        return {"task": _task_payload(review_task, orchestrator=orchestrator)}
+
+    # ------------------------------------------------------------------
+    # POST /tasks/{task_id}/review-pr
+    # ------------------------------------------------------------------
+
+    @router.post("/tasks/{task_id}/review-pr")
+    async def review_pr(task_id: str, pr_number: int = Query(...), project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Create a PR-review task from a GitHub pull request.
+
+        Fetches the PR diff and metadata via the ``gh`` CLI and creates a
+        ``pr_review`` task pre-loaded with that context.
+
+        Args:
+            task_id: Identifier of the source task associated with this PR.
+            pr_number: GitHub pull request number.
+            project_dir: Optional project directory for runtime state resolution.
+
+        Returns:
+            A payload containing the newly created review task.
+
+        Raises:
+            HTTPException: 404 if source task missing, 400 if ``gh`` CLI
+                unavailable or PR fetch fails, 409 if duplicate review exists.
+        """
+        container, bus, orchestrator = deps.ctx(project_dir)
+        source_task = container.tasks.get(task_id)
+        if not source_task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        if not shutil.which("gh"):
+            raise HTTPException(status_code=400, detail="GitHub CLI (gh) is not installed. Install it from https://cli.github.com/")
+
+        # Idempotency: reject if a pr_review task already exists for this source + PR number.
+        for existing in container.tasks.list():
+            if (
+                existing.task_type == "pr_review"
+                and isinstance(existing.metadata, dict)
+                and existing.metadata.get("source_task_id") == task_id
+                and existing.metadata.get("source_pr_number") == pr_number
+                and existing.status not in ("failed", "cancelled")
+            ):
+                raise HTTPException(status_code=409, detail=f"A PR review task already exists: {existing.id}")
+
+        git_dir = container.project_dir
+
+        # Fetch PR metadata.
+        try:
+            meta_result = subprocess.run(
+                ["gh", "pr", "view", str(pr_number), "--json", "title,body,headRefName,baseRefName,url"],
+                cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
+            )
+            pr_meta = json.loads(meta_result.stdout)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to fetch PR metadata: {exc}")
+
+        pr_title = str(pr_meta.get("title") or "").strip()
+        pr_body = str(pr_meta.get("body") or "").strip()
+        head_ref = str(pr_meta.get("headRefName") or "").strip()
+        base_ref = str(pr_meta.get("baseRefName") or "").strip()
+        pr_url = str(pr_meta.get("url") or "").strip()
+
+        # Fetch PR diff.
+        try:
+            diff_result = subprocess.run(
+                ["gh", "pr", "diff", str(pr_number)],
+                cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
+            )
+            diff_text = _truncate_diff(diff_result.stdout)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            diff_text = ""
+
+        # Fetch diff stat.
+        stat_text = ""
+        try:
+            stat_result = subprocess.run(
+                ["gh", "pr", "diff", str(pr_number), "--stat"],
+                cwd=git_dir, capture_output=True, text=True, timeout=15,
+            )
+            if stat_result.returncode == 0:
+                stat_text = stat_result.stdout.strip()
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+        if not stat_text and base_ref and head_ref:
+            try:
+                stat_result = subprocess.run(
+                    ["git", "diff", "--stat", f"{base_ref}...{head_ref}"],
+                    cwd=git_dir, capture_output=True, text=True, timeout=15,
+                )
+                if stat_result.returncode == 0:
+                    stat_text = stat_result.stdout.strip()
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
+        review_task = Task(
+            title=f"PR Review: #{pr_number} — {pr_title}" if pr_title else f"PR Review: #{pr_number}",
+            description=f"Review pull request #{pr_number}.",
+            task_type="pr_review",
+            status="queued",
+            source="pr_review",
+            metadata={
+                "source_task_id": task_id,
+                "source_pr_number": pr_number,
+                "source_description": pr_body,
+                "source_diff": diff_text,
+                "source_stat": stat_text,
+                "source_url": pr_url,
+                "source_ref": head_ref,
+                "source_base_ref": base_ref,
+            },
+        )
+        container.tasks.upsert(review_task)
+        bus.emit(channel="tasks", event_type="task.created", entity_id=review_task.id, payload={"status": review_task.status})
+        return {"task": _task_payload(review_task, orchestrator=orchestrator)}
+
+    # ------------------------------------------------------------------
+    # POST /tasks/{task_id}/review-mr
+    # ------------------------------------------------------------------
+
+    @router.post("/tasks/{task_id}/review-mr")
+    async def review_mr(task_id: str, mr_number: int = Query(...), project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
+        """Create an MR-review task from a GitLab merge request.
+
+        Fetches the MR diff and metadata via the ``glab`` CLI and creates an
+        ``mr_review`` task pre-loaded with that context.
+
+        Args:
+            task_id: Identifier of the source task associated with this MR.
+            mr_number: GitLab merge request number.
+            project_dir: Optional project directory for runtime state resolution.
+
+        Returns:
+            A payload containing the newly created review task.
+
+        Raises:
+            HTTPException: 404 if source task missing, 400 if ``glab`` CLI
+                unavailable or MR fetch fails, 409 if duplicate review exists.
+        """
+        container, bus, orchestrator = deps.ctx(project_dir)
+        source_task = container.tasks.get(task_id)
+        if not source_task:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        if not shutil.which("glab"):
+            raise HTTPException(status_code=400, detail="GitLab CLI (glab) is not installed. Install it from https://gitlab.com/gitlab-org/cli")
+
+        # Idempotency: reject if an mr_review task already exists for this source + MR number.
+        for existing in container.tasks.list():
+            if (
+                existing.task_type == "mr_review"
+                and isinstance(existing.metadata, dict)
+                and existing.metadata.get("source_task_id") == task_id
+                and existing.metadata.get("source_mr_number") == mr_number
+                and existing.status not in ("failed", "cancelled")
+            ):
+                raise HTTPException(status_code=409, detail=f"An MR review task already exists: {existing.id}")
+
+        git_dir = container.project_dir
+
+        # Fetch MR metadata.
+        try:
+            meta_result = subprocess.run(
+                ["glab", "mr", "view", str(mr_number), "--output", "json"],
+                cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
+            )
+            mr_meta = json.loads(meta_result.stdout)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
+            raise HTTPException(status_code=400, detail=f"Failed to fetch MR metadata: {exc}")
+
+        mr_title = str(mr_meta.get("title") or "").strip()
+        mr_body = str(mr_meta.get("description") or "").strip()
+        source_branch = str(mr_meta.get("source_branch") or "").strip()
+        target_branch = str(mr_meta.get("target_branch") or "").strip()
+        mr_url = str(mr_meta.get("web_url") or "").strip()
+
+        # Fetch MR diff.
+        try:
+            diff_result = subprocess.run(
+                ["glab", "mr", "diff", str(mr_number)],
+                cwd=git_dir, capture_output=True, text=True, check=True, timeout=30,
+            )
+            diff_text = _truncate_diff(diff_result.stdout)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            diff_text = ""
+
+        # Fetch diff stat via git.
+        stat_text = ""
+        if target_branch and source_branch:
+            try:
+                stat_result = subprocess.run(
+                    ["git", "diff", "--stat", f"{target_branch}...{source_branch}"],
+                    cwd=git_dir, capture_output=True, text=True, timeout=15,
+                )
+                if stat_result.returncode == 0:
+                    stat_text = stat_result.stdout.strip()
+            except (subprocess.TimeoutExpired, OSError):
+                pass
+
+        review_task = Task(
+            title=f"MR Review: !{mr_number} — {mr_title}" if mr_title else f"MR Review: !{mr_number}",
+            description=f"Review merge request !{mr_number}.",
+            task_type="mr_review",
+            status="queued",
+            source="mr_review",
+            metadata={
+                "source_task_id": task_id,
+                "source_mr_number": mr_number,
+                "source_description": mr_body,
+                "source_diff": diff_text,
+                "source_stat": stat_text,
+                "source_url": mr_url,
+                "source_ref": source_branch,
+                "source_base_ref": target_branch,
             },
         )
         container.tasks.upsert(review_task)

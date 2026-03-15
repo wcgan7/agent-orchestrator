@@ -454,7 +454,7 @@ class TaskExecutor:
             # pre-implement planning steps (plan, initiative_plan, commit_review)
             # must still pause so the user can review the refreshed output.
             skip_before_implement_gate = bool(
-                is_retry_run and retry_from and retry_from not in {"plan", "initiative_plan", "commit_review"}
+                is_retry_run and retry_from and retry_from not in {"plan", "initiative_plan", "commit_review", "pr_review", "mr_review"}
             )
 
             skip_phase1 = retry_from in ("review", "commit")

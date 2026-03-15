@@ -3408,7 +3408,7 @@ class OrchestratorService:
         # Analysis-type steps (diagnose, analyze, commit_review) are included
         # so supervised-mode users can view, refine, and approve findings
         # before implement runs.
-        if step in {"plan", "initiative_plan", "commit_review", "diagnose", "analyze"} and result.summary:
+        if step in {"plan", "initiative_plan", "commit_review", "pr_review", "mr_review", "diagnose", "analyze"} and result.summary:
             provider, model = self._resolve_worker_lineage(task, step)
             self.create_plan_revision(
                 task_id=task.id,
@@ -3431,7 +3431,7 @@ class OrchestratorService:
             so = task.metadata.setdefault("step_outputs", {})
             # Plan text already bounded at 20KB by _normalize_planning_text.
             # Other outputs truncated to 4KB to prevent metadata bloat.
-            max_len = 20_000 if step in {"plan", "initiative_plan", "diagnose", "analyze"} else 4_000
+            max_len = 20_000 if step in {"plan", "initiative_plan", "diagnose", "analyze", "pr_review", "mr_review"} else 4_000
             so[step] = result.summary[:max_len]
 
         # Handle generate_tasks: prefer generated tasks, but avoid silent no-op by recording warning metadata.

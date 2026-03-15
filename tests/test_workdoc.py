@@ -414,6 +414,8 @@ def test_builtin_pipelines_use_dedicated_templates(service: OrchestratorService)
         "security_audit": "security",
         "review": "review",
         "commit_review": "commit_review",
+        "pr_review": "pr_review",
+        "mr_review": "mr_review",
         "performance": "performance",
         "hotfix": "hotfix",
         "spike": "spike",
