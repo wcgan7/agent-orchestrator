@@ -18,6 +18,8 @@ class StepResult:
     generated_tasks: list[dict[str, Any]] | None = None
     dependency_edges: list[dict[str, str]] | None = None
     human_blocking_issues: list[dict[str, str]] | None = None
+    token_usage: dict[str, Any] | None = None
+    no_action_needed: bool = False
 
 
 class WorkerAdapter(Protocol):
@@ -49,6 +51,16 @@ class WorkerAdapter(Protocol):
         Returns:
             StepResult: Normalized worker output for the orchestrator.
         """
+        ...
+
+    def generate_recommended_action(
+        self,
+        *,
+        task: Task,
+        blocked_step: str,
+        error_message: str,
+    ) -> str:
+        """Generate an LLM-powered recommended action for a blocked task."""
         ...
 
 
@@ -86,6 +98,7 @@ class DefaultWorkerAdapter:
                         if isinstance(raw.get("human_blocking_issues"), list)
                         else None
                     ),
+                    no_action_needed=bool(raw.get("no_action_needed")),
                 )
 
         if step == "review":
@@ -133,15 +146,31 @@ class DefaultWorkerAdapter:
         """
         return self.run_step(task=task, step=step, attempt=attempt)
 
-    def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path) -> str:
+    def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path, gate_context: str | None = None) -> str:
         """Generate a human-readable summary for a completed run.
 
         Args:
             task (Task): Task associated with the completed run.
             run (RunRecord): Run record containing outcome metadata.
             project_dir (Path): Repository directory where the run executed.
+            gate_context (str | None): Gate name when generating a gate-pause
+                summary, or ``None`` for a run-end summary.
 
         Returns:
             str: Markdown-ready summary text for the run report.
+        """
+        return ""
+
+    def generate_recommended_action(
+        self,
+        *,
+        task: Task,
+        blocked_step: str,
+        error_message: str,
+    ) -> str:
+        """Generate an LLM-powered recommended action for a blocked task.
+
+        Returns:
+            str: Recommended action text, or empty string when unavailable.
         """
         return ""

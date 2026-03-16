@@ -71,9 +71,9 @@ describe('App navigation and settings flows', () => {
       expect(screen.getByRole('heading', { name: /execution/i })).toBeInTheDocument()
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /Workers/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /workers/i })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: /settings/i })).toBeInTheDocument()
     })
   })
 
@@ -85,20 +85,21 @@ describe('App navigation and settings flows', () => {
       expect(screen.getByRole('heading', { name: /settings/i })).toBeInTheDocument()
     })
 
-    fireEvent.change(screen.getByLabelText(/Pin project by absolute path/i), {
+    fireEvent.click(screen.getByRole('tab', { name: /Advanced/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Pinned Projects/i })).toBeInTheDocument()
+    })
+
+    fireEvent.change(screen.getByPlaceholderText(/\/absolute\/path\/to\/repo/i), {
       target: { value: '/abs/path' },
     })
-    fireEvent.click(screen.getByRole('button', { name: /Pin project/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Pin/i }))
 
     await waitFor(() => {
       expect(global.fetch).toHaveBeenCalledWith(
         expect.stringContaining('/api/projects/pinned'),
         expect.objectContaining({ method: 'POST' }),
       )
-    })
-
-    await waitFor(() => {
-      expect(screen.getAllByRole('option', { name: /abs\/path/i }).length).toBeGreaterThan(0)
     })
   })
 })

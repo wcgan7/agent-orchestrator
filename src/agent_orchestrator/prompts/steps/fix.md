@@ -14,10 +14,12 @@ Non-negotiable rules:
 - Do not re-open issues already resolved in earlier cycles.
 - Do not leave stubs, TODOs, placeholders, empty bodies, or pass-through no-ops.
 
-Validation requirements:
-- Re-run relevant checks for each addressed issue/adjustment.
+Validation requirements (targeted scope only):
+- Run tests directly related to the files you changed. Do NOT run the full test suite.
+- Run lint and typecheck on changed files only.
 - Confirm each change closes the reported failure mode or requested gap.
 - Confirm no collateral regressions in touched areas.
+- The full test suite will be run in a separate verification step after this fix.
 
 Output requirements:
 - Return only a concise follow-up summary:

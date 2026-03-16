@@ -26,9 +26,9 @@ Required output format:
 - Contributing factors (if any).
 - Why this explains the observed symptom(s).
 
-## Alternative Hypotheses
-- 1-2 plausible alternatives considered.
-- Why they are less likely (or what evidence is missing).
+## Alternative Hypotheses (include only if root cause confidence < high)
+- If your primary root cause analysis has meaningful uncertainty, list 1-2 plausible alternatives.
+- If root cause is clear and well-evidenced, this section may be omitted.
 
 ## Fix Strategy for Next Step
 - Minimal, targeted change strategy for `implement`.

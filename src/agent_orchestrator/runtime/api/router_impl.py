@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 from ...collaboration.modes import MODE_CONFIGS
 from ...pipelines.registry import PipelineRegistry
-from ...workers.config import WorkerProviderSpec, get_workers_runtime_config
+from ...workers.config import WorkerProviderSpec, get_workers_runtime_config, provider_spec_to_dict
 from ...workers.diagnostics import test_worker
 from ...collaboration.modes import normalize_hitl_mode
 from ..domain.models import (
@@ -53,7 +53,8 @@ class CreateTaskRequest(BaseModel):
     dependency_policy: str = ""
     source: str = "manual"
     worker_model: Optional[str] = None
-    step_timeout_seconds: Optional[int] = Field(None, ge=1, le=7200)
+    worker_provider: Optional[str] = None
+    step_timeout_seconds: Optional[int] = Field(None, ge=0, le=7200)
     metadata: dict[str, Any] = Field(default_factory=dict)
     project_commands: Optional[dict[str, dict[str, str]]] = None
     classifier_pipeline_id: Optional[str] = None
@@ -90,7 +91,8 @@ class UpdateTaskRequest(BaseModel):
     hitl_mode: Optional[str] = None
     dependency_policy: Optional[str] = None
     worker_model: Optional[str] = None
-    step_timeout_seconds: Optional[int] = Field(None, ge=1, le=7200)
+    worker_provider: Optional[str] = None
+    step_timeout_seconds: Optional[int] = Field(None, ge=0, le=7200)
     metadata: Optional[dict[str, Any]] = None
     project_commands: Optional[dict[str, dict[str, str]]] = None
 
@@ -202,7 +204,7 @@ class OrchestratorSettingsRequest(BaseModel):
     auto_deps: bool = True
     max_review_attempts: int = Field(10, ge=1, le=50)
     max_merge_conflict_attempts: int = Field(3, ge=1, le=10)
-    step_timeout_seconds: int = Field(600, ge=1, le=7200)
+    step_timeout_seconds: int = Field(0, ge=0, le=7200)
     gate_reminder_minutes: int = Field(30, ge=0, le=10080)
     gate_stale_minutes: int = Field(0, ge=0, le=10080)
     gate_max_wait_minutes: int = Field(0, ge=0, le=43200)
@@ -240,6 +242,7 @@ class WorkerEnvironmentSettingsRequest(BaseModel):
     max_auto_retries: int = Field(3, ge=0, le=20)
     capability_fallback: bool = True
     required_capabilities_by_step: dict[str, list[str]] = Field(default_factory=dict)
+    env_vars: Optional[dict[str, str]] = None
 
 
 class WorkersSettingsRequest(BaseModel):
@@ -277,7 +280,7 @@ class DefaultsSettingsRequest(BaseModel):
         low=0,
     )
     dependency_policy: str = "prudent"
-    hitl_mode: str = "autopilot"
+    hitl_mode: str = "supervised"
     task_generation: TaskGenerationDefaultsRequest = TaskGenerationDefaultsRequest()
 
 
@@ -321,6 +324,7 @@ class RetryTaskRequest(BaseModel):
     """Request body for retrying execution from an optional pipeline step."""
     guidance: Optional[str] = None
     start_from_step: Optional[str] = None
+    worker_provider: Optional[str] = None
 
 
 class SkipToPrecommitRequest(BaseModel):
@@ -561,6 +565,8 @@ def _select_summary_run(task: Task, container: "Container") -> Any:
         "blocked": {"blocked", "interrupted", "cancelled", "error"},
         "in_review": {"in_review"},
     }.get(task.status, set())
+    if not preferred_statuses and task.pending_gate:
+        preferred_statuses = {"waiting_gate", "in_progress"}
     for run in runs:
         run_status = getattr(run, "status", None)
         run_finished_at = getattr(run, "finished_at", None)
@@ -575,6 +581,8 @@ def _reconcile_summary_run_status(task: Task, run: Any) -> str:
     stale_run_status = {"in_progress", "running"}
     run_status = str(getattr(run, "status", "") or "")
     run_finished_at = getattr(run, "finished_at", None)
+    if run_status == "waiting_gate":
+        return run_status
     if task.status in terminal_task_status and run_status in stale_run_status and not run_finished_at:
         return task.status
     return run_status
@@ -594,7 +602,12 @@ def _parse_iso_timestamp(value: Any) -> Optional[datetime]:
 
 
 def _build_task_timing_summary(task: Task, container: "Container") -> Optional[dict[str, Any]]:
-    """Build cumulative task timing data across run history."""
+    """Build cumulative task timing data across run history.
+
+    Uses ``RunRecord.worker_seconds_accumulated`` (plus any currently-active
+    segment) so that only actual worker execution time is counted — time spent
+    waiting for human intervention (gates, reviews) is excluded.
+    """
     if not task.run_ids:
         return None
 
@@ -622,10 +635,14 @@ def _build_task_timing_summary(task: Task, container: "Container") -> Optional[d
         if run.status == "in_progress" and started is not None:
             if active_run_started_at is None or started < active_run_started_at:
                 active_run_started_at = started
+            # Only include prior accumulated worker seconds for in-progress runs;
+            # the frontend adds the live segment via (now - active_run_started_at).
+            total_completed_seconds += run.worker_seconds_accumulated
             continue
 
-        if started is not None and finished is not None:
-            total_completed_seconds += max((finished - started).total_seconds(), 0.0)
+        # For completed/paused runs, use the accumulated worker time
+        # (with legacy fallback for runs that pre-date accumulation)
+        total_completed_seconds += run.effective_worker_seconds()
 
     if not seen_run:
         return None
@@ -646,7 +663,8 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
     skipping internal-only entries such as skipped steps.
     """
     if task.status not in ("in_review", "blocked", "done"):
-        return None
+        if not (task.status == "in_progress" and task.pending_gate):
+            return None
     if not task.run_ids:
         return None
     run = _select_summary_run(task, container)
@@ -685,6 +703,7 @@ def _build_execution_summary(task: Task, container: "Container") -> Optional[dic
         "interrupted": "Interrupted",
         "cancelled": "Cancelled",
         "running": "Running",
+        "waiting_gate": "Awaiting approval",
     }
     run_summary = status_labels.get(run_status) or status_labels.get(task.status) or run_status
     run_duration = _iso_delta_seconds(run.started_at, run.finished_at) if run.started_at and run.finished_at else None
@@ -705,7 +724,7 @@ def _task_payload(
     orchestrator: Optional["OrchestratorService"] = None,
 ) -> dict[str, Any]:
     payload = task.to_dict()
-    payload["hitl_mode"] = normalize_hitl_mode(str(payload.get("hitl_mode") or "autopilot"))
+    payload["hitl_mode"] = normalize_hitl_mode(str(payload.get("hitl_mode") or "supervised"))
     metadata = task.metadata if isinstance(task.metadata, dict) else {}
     step_timeout_seconds: int | None = None
     raw_step_timeouts = metadata.get("step_timeouts")
@@ -751,6 +770,7 @@ def _task_payload(
         "status_kind": status_kind or None,
     }
     payload["human_blocking_issues"] = _normalize_human_blocking_issues(metadata.get("human_blocking_issues"))
+    payload["recommended_action"] = str(metadata.get("recommended_action") or "").strip() or None
     raw_actions = metadata.get("human_review_actions")
     payload["human_review_actions"] = list(raw_actions) if isinstance(raw_actions, list) else []
     can_skip_to_precommit = False
@@ -791,6 +811,9 @@ def _task_payload(
     if isinstance(payload_meta, dict):
         for key in ("source_diff", "source_plan", "source_description"):
             payload_meta.pop(key, None)
+        # Mask env var values in task payloads (security)
+        if "env_vars" in payload_meta and isinstance(payload_meta["env_vars"], dict):
+            payload_meta["env_vars"] = {k: "***" for k in payload_meta["env_vars"]}
     return payload
 
 
@@ -933,94 +956,6 @@ def _logs_snapshot_id(logs_meta: dict[str, Any]) -> str:
     return sha256(material.encode("utf-8", errors="ignore")).hexdigest()[:16]
 
 
-def _normalize_workers_providers(value: Any) -> dict[str, dict[str, Any]]:
-    raw_providers = value if isinstance(value, dict) else {}
-    providers: dict[str, dict[str, Any]] = {}
-    for raw_name, raw_item in raw_providers.items():
-        name = str(raw_name or "").strip()
-        if not name or not isinstance(raw_item, dict):
-            continue
-        provider_type = str(raw_item.get("type") or ("codex" if name == "codex" else "")).strip().lower()
-        if provider_type == "local":
-            provider_type = "ollama"
-        if provider_type not in {"codex", "ollama", "claude"}:
-            continue
-
-        if provider_type in {"codex", "claude"}:
-            default_command = "codex exec" if provider_type == "codex" else "claude -p"
-            command = str(raw_item.get("command") or default_command).strip() or default_command
-            provider: dict[str, Any] = {"type": provider_type, "command": command}
-            raw_execution_mode = str(raw_item.get("execution_mode") or "").strip().lower()
-            if raw_execution_mode in {"sandboxed", "host_access"}:
-                provider["execution_mode"] = raw_execution_mode
-            elif provider_type == "claude":
-                provider["execution_mode"] = "host_access"
-            else:
-                provider["execution_mode"] = "sandboxed"
-            raw_capabilities = raw_item.get("capabilities")
-            if isinstance(raw_capabilities, list):
-                normalized_caps: list[str] = []
-                for cap in raw_capabilities:
-                    text = str(cap or "").strip().lower()
-                    if text and text not in normalized_caps:
-                        normalized_caps.append(text)
-                if normalized_caps:
-                    provider["capabilities"] = normalized_caps
-            model = str(raw_item.get("model") or "").strip()
-            if model:
-                provider["model"] = model
-            reasoning_effort = str(raw_item.get("reasoning_effort") or "").strip().lower()
-            if reasoning_effort in {"low", "medium", "high"}:
-                provider["reasoning_effort"] = reasoning_effort
-            providers[name] = provider
-            continue
-
-        endpoint = str(raw_item.get("endpoint") or "").strip()
-        model = str(raw_item.get("model") or "").strip()
-        ollama_provider: dict[str, Any] = {"type": "ollama"}
-        if endpoint:
-            ollama_provider["endpoint"] = endpoint
-        if model:
-            ollama_provider["model"] = model
-        temperature = raw_item.get("temperature")
-        if isinstance(temperature, (int, float)):
-            ollama_provider["temperature"] = float(temperature)
-        num_ctx = raw_item.get("num_ctx")
-        if isinstance(num_ctx, int) and num_ctx > 0:
-            ollama_provider["num_ctx"] = num_ctx
-        providers[name] = ollama_provider
-
-    codex = providers.get("codex")
-    codex_command = "codex exec"
-    codex_model = None
-    codex_reasoning = None
-    codex_execution_mode = "sandboxed"
-    if isinstance(codex, dict):
-        codex_command = str(codex.get("command") or "codex exec").strip() or "codex exec"
-        codex_model = str(codex.get("model") or "").strip() or None
-        raw_reasoning = str(codex.get("reasoning_effort") or "").strip().lower()
-        codex_reasoning = raw_reasoning if raw_reasoning in {"low", "medium", "high"} else None
-        raw_execution_mode = str(codex.get("execution_mode") or "").strip().lower()
-        if raw_execution_mode in {"sandboxed", "host_access"}:
-            codex_execution_mode = raw_execution_mode
-    providers["codex"] = {"type": "codex", "command": codex_command, "execution_mode": codex_execution_mode}
-    if isinstance(codex, dict):
-        raw_caps = codex.get("capabilities")
-        if isinstance(raw_caps, list):
-            codex_caps: list[str] = []
-            for cap in raw_caps:
-                text = str(cap or "").strip().lower()
-                if text and text not in codex_caps:
-                    codex_caps.append(text)
-            if codex_caps:
-                providers["codex"]["capabilities"] = codex_caps
-    if codex_model:
-        providers["codex"]["model"] = codex_model
-    if codex_reasoning:
-        providers["codex"]["reasoning_effort"] = codex_reasoning
-    return providers
-
-
 def _normalize_workers_environment(value: Any) -> dict[str, Any]:
     raw = value if isinstance(value, dict) else {}
     auto_prepare = _coerce_bool(raw.get("auto_prepare"), True)
@@ -1042,12 +977,23 @@ def _normalize_workers_environment(value: Any) -> dict[str, Any]:
             if caps:
                 normalized_required[step] = caps
 
-    return {
+    normalized_env_vars: dict[str, str] = {}
+    raw_env_vars = raw.get("env_vars")
+    if isinstance(raw_env_vars, dict):
+        for raw_key, raw_val in raw_env_vars.items():
+            key = str(raw_key or "").strip()
+            if key and isinstance(raw_val, str):
+                normalized_env_vars[key] = raw_val
+
+    result: dict[str, Any] = {
         "auto_prepare": auto_prepare,
         "max_auto_retries": max_auto_retries,
         "capability_fallback": capability_fallback,
         "required_capabilities_by_step": normalized_required,
     }
+    if normalized_env_vars:
+        result["env_vars"] = normalized_env_vars
+    return result
 
 
 def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -1057,9 +1003,10 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     quality_gate = dict(defaults.get("quality_gate") or {})
     task_generation = dict(defaults.get("task_generation") or {})
     workers_cfg = dict(cfg.get("workers") or {})
-    workers_providers = _normalize_workers_providers(workers_cfg.get("providers"))
+    _runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
+    workers_providers = {name: provider_spec_to_dict(spec) for name, spec in _runtime.providers.items()}
     workers_environment = _normalize_workers_environment(workers_cfg.get("environment"))
-    workers_default = str(workers_cfg.get("default") or "codex").strip() or "codex"
+    workers_default = _runtime.default_worker if _runtime.default_worker in _runtime.providers else "codex"
     workers_default_model = str(workers_cfg.get("default_model") or "").strip()
     workers_heartbeat_seconds = _coerce_int(workers_cfg.get("heartbeat_seconds"), 60, minimum=1, maximum=3600)
     workers_heartbeat_grace_seconds = _coerce_int(
@@ -1067,13 +1014,11 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
     )
     if workers_heartbeat_grace_seconds < workers_heartbeat_seconds:
         workers_heartbeat_grace_seconds = workers_heartbeat_seconds
-    if workers_default not in workers_providers:
-        workers_default = "codex"
     project_cfg = dict(cfg.get("project") or {})
     prompt_defaults = get_configurable_step_prompt_defaults()
     prompt_overrides = _normalize_prompt_overrides(project_cfg.get("prompt_overrides"))
     prompt_injections = _normalize_prompt_injections(project_cfg.get("prompt_injections"))
-    default_hitl_mode = normalize_hitl_mode(str(defaults.get("hitl_mode") or "autopilot"))
+    default_hitl_mode = normalize_hitl_mode(str(defaults.get("hitl_mode") or "supervised"))
     task_generation_status = str(task_generation.get("child_status") or "backlog").strip().lower()
     if task_generation_status not in {"backlog", "queued"}:
         task_generation_status = "backlog"
@@ -1097,7 +1042,7 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
                 orchestrator.get("max_merge_conflict_attempts"), 3, minimum=1, maximum=10
             ),
             "step_timeout_seconds": _coerce_int(
-                orchestrator.get("step_timeout_seconds"), 600, minimum=1, maximum=7200
+                orchestrator.get("step_timeout_seconds"), 0, minimum=0, maximum=7200
             ),
             "gate_reminder_minutes": _coerce_int(
                 orchestrator.get("gate_reminder_minutes"), 30, minimum=0, maximum=10080
@@ -1168,6 +1113,22 @@ def _settings_payload(cfg: dict[str, Any]) -> dict[str, Any]:
             "prompt_defaults": prompt_defaults,
         },
     }
+
+
+def _mask_settings_env_vars(payload: dict[str, Any]) -> dict[str, Any]:
+    """Mask env_vars values in a settings payload for API responses.
+
+    Must be called at the response boundary — never before persistence.
+    """
+    workers = payload.get("workers")
+    if isinstance(workers, dict):
+        env = workers.get("environment")
+        if isinstance(env, dict) and "env_vars" in env:
+            workers["environment"] = dict(env)
+            workers["environment"]["env_vars"] = {
+                k: "***" for k in env["env_vars"]
+            }
+    return payload
 
 
 def _workers_health_payload(cfg: dict[str, Any]) -> dict[str, Any]:

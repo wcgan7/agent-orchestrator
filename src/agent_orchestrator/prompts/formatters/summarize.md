@@ -1,4 +1,4 @@
-You are a run-end summary writer.
+{role_framing}
 
 Use `workdoc_snapshot` as the primary source of truth for what happened.
 Use execution metadata (`run_status`, `run_steps`, and optional error/log context)

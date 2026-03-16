@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import subprocess
-from datetime import datetime, timezone
 from typing import Any, Optional
 
 from fastapi import APIRouter, HTTPException, Query
 
 from ...collaboration.modes import normalize_hitl_mode
+from ..orchestrator.env_resolver import resolved_env_vars_view
+from ..orchestrator.venv_detector import detect_python_venv
 from ..orchestrator.human_guidance import (
     clear_active_human_guidance,
     set_active_human_guidance,
@@ -23,6 +24,7 @@ OrchestratorControlRequest = impl.OrchestratorControlRequest
 ReviewActionRequest = impl.ReviewActionRequest
 UpdateSettingsRequest = impl.UpdateSettingsRequest
 _settings_payload = impl._settings_payload
+_mask_settings_env_vars = impl._mask_settings_env_vars
 _task_payload = impl._task_payload
 _workers_health_payload = impl._workers_health_payload
 _workers_routing_payload = impl._workers_routing_payload
@@ -49,25 +51,37 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         phases_total = sum(max(1, len(list(task.pipeline_template or []))) for task in tasks)
         wall_time_seconds = 0.0
         for run in runs:
-            if not run.started_at:
-                continue
-            try:
-                start = datetime.fromisoformat(str(run.started_at).replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if run.finished_at:
-                try:
-                    end = datetime.fromisoformat(str(run.finished_at).replace("Z", "+00:00"))
-                except ValueError:
-                    continue
-            else:
-                end = datetime.now(timezone.utc)
-            wall_time_seconds += max((end - start).total_seconds(), 0.0)
+            wall_time_seconds += run.effective_worker_seconds()
         api_calls = len(events)
+
+        # Aggregate token usage from persisted step logs.
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_cost_usd = 0.0
+        has_cost_data = False
+        for run in runs:
+            for step_entry in (run.steps or []):
+                if not isinstance(step_entry, dict):
+                    continue
+                tu = step_entry.get("token_usage")
+                if not isinstance(tu, dict):
+                    continue
+                inp = tu.get("input_tokens")
+                if isinstance(inp, (int, float)):
+                    total_input_tokens += int(inp)
+                out = tu.get("output_tokens")
+                if isinstance(out, (int, float)):
+                    total_output_tokens += int(out)
+                cost = tu.get("cost_usd")
+                if isinstance(cost, (int, float)):
+                    total_cost_usd += float(cost)
+                    has_cost_data = True
+
         return {
-            "tokens_used": 0,
+            "tokens_used": total_input_tokens + total_output_tokens,
             "api_calls": api_calls,
-            "estimated_cost_usd": 0.0,
+            "estimated_cost_usd": total_cost_usd,
+            "cost_available": has_cost_data,
             "wall_time_seconds": int(wall_time_seconds),
             "phases_completed": phases_completed,
             "phases_total": phases_total,
@@ -319,12 +333,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
                             latest_run.summary = "Blocked due to unresolved merge conflict"
                         container.runs.upsert(latest_run)
                     container.tasks.upsert(task)
-                bus.emit(
-                    channel="tasks",
-                    event_type="task.blocked",
-                    entity_id=task.id,
-                    payload={"error": task.error, "reason_code": reason_code},
-                )
+                orchestrator._emit_task_blocked(task, payload={"error": task.error, "reason_code": reason_code})
                 return {"task": _task_payload(task, container, orchestrator)}
             # Re-fetch task after merge (approve_and_merge upserts)
             task = container.tasks.get(task_id)
@@ -461,7 +470,22 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
         """
         container, _, _ = deps.ctx(project_dir)
         cfg = container.config.load()
-        return _settings_payload(cfg)
+        payload = _mask_settings_env_vars(_settings_payload(cfg))
+        try:
+            payload["resolved_env_vars"] = resolved_env_vars_view(
+                project_dir=container.project_dir, cfg=cfg,
+            )
+        except Exception:
+            payload["resolved_env_vars"] = []
+        try:
+            venv = detect_python_venv(container.project_dir)
+            payload["detected_python_venv"] = (
+                {"path": str(venv.path), "bin_dir": str(venv.bin_dir), "source": venv.source}
+                if venv is not None else None
+            )
+        except Exception:
+            payload["detected_python_venv"] = None
+        return payload
 
     @router.get("/workers/health")
     async def workers_health(project_dir: Optional[str] = Query(None)) -> dict[str, Any]:
@@ -533,7 +557,7 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             incoming_task_generation = incoming_defaults.get("task_generation")
             if isinstance(incoming_task_generation, dict):
                 task_generation_cfg = orchestrator.resolve_task_generation_policy(
-                    Task(hitl_mode=defaults_cfg.get("hitl_mode") or "autopilot"),
+                    Task(hitl_mode=defaults_cfg.get("hitl_mode") or "supervised"),
                     request_overrides=incoming_task_generation,
                 )
                 defaults_cfg["task_generation"] = {
@@ -565,7 +589,9 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             if "providers" in incoming_workers:
                 workers_cfg["providers"] = dict(incoming_workers.get("providers") or {})
             if "environment" in incoming_workers:
-                workers_cfg["environment"] = dict(incoming_workers.get("environment") or {})
+                existing_env = dict(workers_cfg.get("environment") or {})
+                existing_env.update(dict(incoming_workers.get("environment") or {}))
+                workers_cfg["environment"] = existing_env
 
             normalized_workers = _settings_payload({"workers": workers_cfg})["workers"]
             cfg["workers"] = normalized_workers
@@ -634,4 +660,19 @@ def register_misc_routes(router: APIRouter, deps: RouteDeps) -> None:
             entity_id=container.project_id,
             payload={"sections": touched_sections},
         )
-        return _settings_payload(cfg)
+        payload = _mask_settings_env_vars(_settings_payload(cfg))
+        try:
+            payload["resolved_env_vars"] = resolved_env_vars_view(
+                project_dir=container.project_dir, cfg=cfg,
+            )
+        except Exception:
+            payload["resolved_env_vars"] = []
+        try:
+            venv = detect_python_venv(container.project_dir)
+            payload["detected_python_venv"] = (
+                {"path": str(venv.path), "bin_dir": str(venv.bin_dir), "source": venv.source}
+                if venv is not None else None
+            )
+        except Exception:
+            payload["detected_python_venv"] = None
+        return payload

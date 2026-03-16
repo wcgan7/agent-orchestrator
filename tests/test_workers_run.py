@@ -564,3 +564,130 @@ def test_run_worker_claude_stream_json_extracts_assistant_text(
     )
 
     assert result.response_text == "ok"
+
+
+def test_extract_claude_stream_json_usage_with_result_event() -> None:
+    from agent_orchestrator.workers.run import _extract_claude_stream_json_usage
+
+    stdout = "\n".join([
+        '{"type":"system","subtype":"init"}',
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}',
+        '{"type":"result","result":"hello","usage":{"input_tokens":150,"output_tokens":42,"cache_creation_input_tokens":10,"cache_read_input_tokens":5},"cost_usd":0.0037}',
+    ])
+    usage = _extract_claude_stream_json_usage(stdout)
+    assert usage["provider_type"] == "claude"
+    assert usage["input_tokens"] == 150
+    assert usage["output_tokens"] == 42
+    assert usage["cache_creation_input_tokens"] == 10
+    assert usage["cache_read_input_tokens"] == 5
+    assert abs(usage["cost_usd"] - 0.0037) < 1e-9
+
+
+def test_extract_claude_stream_json_usage_no_result_event() -> None:
+    from agent_orchestrator.workers.run import _extract_claude_stream_json_usage
+
+    stdout = '{"type":"system","subtype":"init"}\n{"type":"assistant","message":{"content":[]}}'
+    usage = _extract_claude_stream_json_usage(stdout)
+    assert usage == {}
+
+
+def test_extract_claude_stream_json_usage_empty_input() -> None:
+    from agent_orchestrator.workers.run import _extract_claude_stream_json_usage
+
+    assert _extract_claude_stream_json_usage("") == {}
+    assert _extract_claude_stream_json_usage("   ") == {}
+
+
+def test_run_worker_claude_extracts_token_usage(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    progress_path = run_dir / "progress.json"
+
+    def _fake_worker(**_: object) -> dict[str, object]:
+        stdout_path = run_dir / "stdout.log"
+        stdout_path.write_text(
+            "\n".join([
+                '{"type":"system","subtype":"init"}',
+                '{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}',
+                '{"type":"result","result":"done","usage":{"input_tokens":200,"output_tokens":80},"cost_usd":0.005}',
+            ]),
+            encoding="utf-8",
+        )
+        return {
+            "prompt_path": str(run_dir / "prompt.txt"),
+            "stdout_path": str(stdout_path),
+            "stderr_path": str(run_dir / "stderr.log"),
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-01T00:00:10Z",
+            "runtime_seconds": 10,
+            "exit_code": 0,
+            "timed_out": False,
+            "no_heartbeat": False,
+        }
+
+    monkeypatch.setattr("agent_orchestrator.workers.run._run_codex_worker", _fake_worker)
+
+    result = run_worker(
+        spec=WorkerProviderSpec(
+            name="claude",
+            type="claude",
+            command="claude -p --verbose --output-format stream-json",
+        ),
+        prompt="test",
+        project_dir=project_dir,
+        run_dir=run_dir,
+        timeout_seconds=60,
+        heartbeat_seconds=30,
+        heartbeat_grace_seconds=15,
+        progress_path=progress_path,
+    )
+
+    assert result.token_usage["provider_type"] == "claude"
+    assert result.token_usage["input_tokens"] == 200
+    assert result.token_usage["output_tokens"] == 80
+    assert abs(result.token_usage["cost_usd"] - 0.005) < 1e-9
+
+
+def test_run_worker_codex_sets_provider_type_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    project_dir = tmp_path / "repo"
+    project_dir.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    progress_path = run_dir / "progress.json"
+
+    def _fake_worker(**_: object) -> dict[str, object]:
+        return {
+            "prompt_path": str(run_dir / "prompt.txt"),
+            "stdout_path": str(run_dir / "stdout.log"),
+            "stderr_path": str(run_dir / "stderr.log"),
+            "start_time": "2025-01-01T00:00:00Z",
+            "end_time": "2025-01-01T00:00:10Z",
+            "runtime_seconds": 10,
+            "exit_code": 0,
+            "timed_out": False,
+            "no_heartbeat": False,
+        }
+
+    monkeypatch.setattr("agent_orchestrator.workers.run._run_codex_worker", _fake_worker)
+    monkeypatch.setattr("agent_orchestrator.workers.run._codex_supports_reasoning_effort", lambda _: False)
+
+    result = run_worker(
+        spec=WorkerProviderSpec(name="codex", type="codex", command="codex"),
+        prompt="test",
+        project_dir=project_dir,
+        run_dir=run_dir,
+        timeout_seconds=60,
+        heartbeat_seconds=30,
+        heartbeat_grace_seconds=15,
+        progress_path=progress_path,
+    )
+
+    assert result.token_usage == {"provider_type": "codex"}
+    assert result.token_usage.get("input_tokens") is None
+    assert result.token_usage.get("cost_usd") is None

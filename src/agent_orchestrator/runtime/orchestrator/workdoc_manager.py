@@ -21,6 +21,8 @@ class WorkdocManager:
         "plan": ("## Plan", "plan"),
         "initiative_plan": ("## Plan", "plan"),
         "commit_review": ("## Plan", "plan"),
+        "pr_review": ("## Plan", "plan"),
+        "mr_review": ("## Plan", "plan"),
         "analyze": ("## Analysis", "analyze"),
         "diagnose": ("## Analysis", "analyze"),
         "scan_deps": ("## Dependency Scan Findings", "scan_deps"),
@@ -38,6 +40,8 @@ class WorkdocManager:
         "plan": "plan",
         "initiative_plan": "plan",
         "commit_review": "plan",
+        "pr_review": "plan",
+        "mr_review": "plan",
         "analyze": "analysis",
         "diagnose": "analysis",
         "scan_deps": "dependency_scan_findings",
@@ -86,6 +90,7 @@ class WorkdocManager:
         "## Final Report": "final_report",
         "## Security Report": "final_report",
         "## Review Findings": "review_findings",
+        "## Initiative Context": "initiative_context",
     }
     _WORKDOC_SCHEMA_MARKER = "<!-- WORKDOC:SCHEMA v1 -->"
     _SYNC_DIAGNOSTIC_KEYS = (
@@ -166,10 +171,6 @@ _Pending: will be populated by the implement step._
 
 _Pending: will be populated by the verify step._
 
-## Final Report
-
-_Pending: will be populated by the report step._
-
 ## Review Findings
 
 _Pending: will be populated by the review step._
@@ -197,10 +198,6 @@ _Pending: will be populated as needed._
 ## Verification Results
 
 _Pending: will be populated by the verify step._
-
-## Final Report
-
-_Pending: will be populated by the report step._
 """
 
     _SECURITY_AUDIT_WORKDOC_TEMPLATE = """\
@@ -225,10 +222,6 @@ _Pending: will be populated by the scan_deps step._
 ## Code Scan Findings
 
 _Pending: will be populated by the scan_code step._
-
-## Security Report
-
-_Pending: will be populated by the report step._
 
 ## Generated Remediation Tasks
 
@@ -281,10 +274,6 @@ _Pending: will be populated by the generate_tasks step._
 ## Research Analysis
 
 _Pending: will be populated by the analyze step._
-
-## Final Report
-
-_Pending: will be populated by the report step._
 """
 
     _REVIEW_WORKDOC_TEMPLATE = """\
@@ -309,10 +298,6 @@ _Pending: will be populated by the analyze step._
 ## Review Findings
 
 _Pending: will be populated by the review step._
-
-## Final Report
-
-_Pending: will be populated by the report step._
 """
 
     _COMMIT_REVIEW_WORKDOC_TEMPLATE = """\
@@ -593,6 +578,10 @@ _Pending: will be populated by the implement step._
 ## Verification Results
 
 _Pending: will be populated by the verify step._
+
+## Fix Log
+
+_Pending: will be populated as needed._
 """
 
     _SPIKE_WORKDOC_TEMPLATE = """\
@@ -617,10 +606,6 @@ _Pending: will be populated by the analyze step._
 ## Prototype Notes
 
 _Pending: will be populated by the implement step._
-
-## Final Report
-
-_Pending: will be populated by the report step._
 """
 
     _PLAN_ONLY_WORKDOC_TEMPLATE = """\
@@ -649,10 +634,6 @@ _Pending: will be populated by the plan step._
 ## Generated Tasks
 
 _Pending: will be populated by the generate_tasks step._
-
-## Final Report
-
-_Pending: will be populated by the report step._
 """
 
     def __init__(
@@ -681,6 +662,8 @@ _Pending: will be populated by the report step._
             "security_audit": self._SECURITY_AUDIT_WORKDOC_TEMPLATE,
             "review": self._REVIEW_WORKDOC_TEMPLATE,
             "commit_review": self._COMMIT_REVIEW_WORKDOC_TEMPLATE,
+            "pr_review": self._COMMIT_REVIEW_WORKDOC_TEMPLATE,
+            "mr_review": self._COMMIT_REVIEW_WORKDOC_TEMPLATE,
             "performance": self._PERFORMANCE_WORKDOC_TEMPLATE,
             "hotfix": self._HOTFIX_WORKDOC_TEMPLATE,
             "spike": self._SPIKE_WORKDOC_TEMPLATE,
@@ -776,6 +759,17 @@ _Pending: will be populated by the report step._
             .replace("{created_at}", task.created_at)
             .replace("{description}", task.description or "(no description)")
         )
+        # Inject initiative context for child tasks spawned from initiative plans.
+        if isinstance(task.metadata, dict):
+            init_ctx = task.metadata.get("initiative_context")
+            if isinstance(init_ctx, dict) and init_ctx:
+                ctx_section = self._render_initiative_context_section(init_ctx)
+                # Insert after the --- separator following Task Description,
+                # before the first pipeline section heading.
+                desc_sep = content.find("\n---\n", content.find("## Task Description"))
+                if desc_sep != -1:
+                    insert_pos = desc_sep + len("\n---\n")
+                    content = content[:insert_pos] + "\n" + ctx_section + "\n" + content[insert_pos:]
         content = self._apply_schema_and_section_sentinels(content)
         canonical.write_text(content, encoding="utf-8")
 
@@ -786,6 +780,24 @@ _Pending: will be populated by the report step._
             task.metadata = {}
         task.metadata["workdoc_path"] = str(canonical)
         return canonical
+
+    @staticmethod
+    def _render_initiative_context_section(ctx: dict[str, str]) -> str:
+        """Render the Initiative Context workdoc section from metadata."""
+        parent_title = ctx.get("parent_title", "")
+        parent_id = ctx.get("parent_id", "")
+        objective = ctx.get("objective", "")
+        plan_excerpt = ctx.get("plan_excerpt", "")
+        lines = ["## Initiative Context", ""]
+        lines.append(f"**Parent Task:** {parent_title} (`{parent_id}`)")
+        lines.append("")
+        lines.append("**Objective:**")
+        lines.append(objective or "(none)")
+        lines.append("")
+        lines.append("**Relevant Plan:**")
+        lines.append(plan_excerpt or "(none)")
+        lines.append("")
+        return "\n".join(lines)
 
     @classmethod
     def _apply_schema_and_section_sentinels(cls, text: str) -> str:
@@ -1301,6 +1313,47 @@ _Pending: will be populated by the report step._
             insert_pos = newline_after + 1 + next_heading.start()
             return canonical_text[:insert_pos] + trimmed + "\n\n" + canonical_text[insert_pos:]
         return canonical_text.rstrip() + "\n\n" + trimmed + "\n"
+
+    def repair_missing_section(self, task: Task, step: str) -> bool:
+        """Re-inject a missing workdoc section from the pipeline template.
+
+        Returns True if the canonical workdoc was repaired, False otherwise.
+        """
+        canonical = self.workdoc_canonical_path(task.id)
+        if not canonical.exists():
+            return False
+        section = self.workdoc_section_for_step(task, step)
+        if not section:
+            return False
+        heading, placeholder_step = section
+        try:
+            canonical_text = canonical.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        # Already present — nothing to repair.
+        if heading in canonical_text:
+            return False
+        # Build the section block with sentinels.
+        section_id = self._WORKDOC_SENTINEL_ID_MAP.get(step)
+        if placeholder_step:
+            placeholder = f"_Pending: will be populated by the {placeholder_step} step._"
+        else:
+            placeholder = "_Pending: will be populated as needed._"
+        if section_id:
+            start_marker = f"<!-- WORKDOC:SECTION {section_id} START -->"
+            end_marker = f"<!-- WORKDOC:SECTION {section_id} END -->"
+            block = f"{heading}\n\n{start_marker}\n{placeholder}\n{end_marker}\n"
+        else:
+            block = f"{heading}\n\n{placeholder}\n"
+        repaired = canonical_text.rstrip() + "\n\n" + block
+        canonical.write_text(repaired, encoding="utf-8")
+        # Update worktree copy if the task has a worktree dir.
+        worktree_dir = (task.metadata or {}).get("worktree_dir")
+        if worktree_dir:
+            worktree_copy = self.workdoc_worktree_path(Path(worktree_dir))
+            if worktree_copy.parent.exists():
+                worktree_copy.write_text(repaired, encoding="utf-8")
+        return True
 
     @classmethod
     def clear_sync_diagnostics(cls, task: Task) -> None:

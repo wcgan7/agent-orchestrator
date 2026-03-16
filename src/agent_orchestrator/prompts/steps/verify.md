@@ -1,7 +1,11 @@
-Run verification commands for this task and report execution results accurately.
+Run the FULL test suite and all configured verification commands for this task.
 
 Primary objective:
-- Execute configured verification commands (tests, lint, typecheck, and other configured checks).
+- Targeted tests have already passed during the implementation step.
+- You MUST now run the FULL test suite using the exact project commands listed below.
+- Do NOT subset, scope down, or run individual test files — run everything.
+- If any test fails, fix the root cause and re-run the FULL suite.
+- Do NOT fix tests by weakening assertions or deleting tests unless the new behavior is genuinely correct per the task objective.
 - Produce reliable evidence of what passed, failed, skipped, or was blocked by environment constraints.
 
 Execution rules:

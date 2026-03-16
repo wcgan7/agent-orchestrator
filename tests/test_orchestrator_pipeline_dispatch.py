@@ -293,10 +293,11 @@ def test_research_runs_without_review_or_commit(tmp_path: Path) -> None:
 
     assert result.status == "done"
     steps = _step_names(container, task.id)
-    assert steps == ["analyze", "report"]
-    # No review or commit in steps
+    assert steps == ["analyze"]
+    # No review, commit, or report in steps
     assert "review" not in steps
     assert "commit" not in steps
+    assert "report" not in steps
 
 
 # ---------------------------------------------------------------------------
@@ -305,19 +306,16 @@ def test_research_runs_without_review_or_commit(tmp_path: Path) -> None:
 
 
 def test_research_writes_sections_to_workdoc(tmp_path: Path) -> None:
-    """research run should populate Research Analysis and Final Report sections."""
+    """research run should populate Research Analysis section in workdoc."""
     from unittest.mock import MagicMock
 
     from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 
     analyze_text = "analyze: compared options and constraints"
-    report_text = "report: recommended option B with migration notes"
 
     def mock_run_step(*, task, step, attempt):
         if step == "analyze":
             return StepResult(status="ok", summary=analyze_text)
-        if step == "report":
-            return StepResult(status="ok", summary=report_text)
         return StepResult(status="ok")
 
     adapter = MagicMock()
@@ -341,9 +339,7 @@ def test_research_writes_sections_to_workdoc(tmp_path: Path) -> None:
     workdoc = container.state_root / "workdocs" / f"{task.id}.md"
     content = workdoc.read_text(encoding="utf-8")
     assert analyze_text in content
-    assert report_text in content
     assert "_Pending: will be populated by the analyze step._" not in content
-    assert "_Pending: will be populated by the report step._" not in content
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +361,7 @@ def test_security_audit_runs_scan_steps(tmp_path: Path) -> None:
 
     assert result.status == "done"
     steps = _step_names(container, task.id)
-    assert steps == ["scan_deps", "scan_code", "report", "generate_tasks"]
+    assert steps == ["scan_deps", "scan_code", "generate_tasks"]
 
 
 # ---------------------------------------------------------------------------
@@ -374,14 +370,13 @@ def test_security_audit_runs_scan_steps(tmp_path: Path) -> None:
 
 
 def test_security_audit_writes_sections_to_workdoc(tmp_path: Path) -> None:
-    """security_audit run should populate scan/report/generate tasks sections."""
+    """security_audit run should populate scan and generate tasks sections."""
     from unittest.mock import MagicMock
 
     from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 
     deps_text = "scan_deps: found 2 vulnerable packages"
     code_text = "scan_code: found 1 high severity sink"
-    report_text = "report: prioritized remediation order documented"
     tasks_text = "generate_tasks: created remediation tasks"
 
     def mock_run_step(*, task, step, attempt):
@@ -389,8 +384,6 @@ def test_security_audit_writes_sections_to_workdoc(tmp_path: Path) -> None:
             return StepResult(status="ok", summary=deps_text)
         if step == "scan_code":
             return StepResult(status="ok", summary=code_text)
-        if step == "report":
-            return StepResult(status="ok", summary=report_text)
         if step == "generate_tasks":
             return StepResult(status="ok", summary=tasks_text)
         return StepResult(status="ok")
@@ -417,11 +410,9 @@ def test_security_audit_writes_sections_to_workdoc(tmp_path: Path) -> None:
     content = workdoc.read_text(encoding="utf-8")
     assert deps_text in content
     assert code_text in content
-    assert report_text in content
     assert tasks_text in content
     assert "_Pending: will be populated by the scan_deps step._" not in content
     assert "_Pending: will be populated by the scan_code step._" not in content
-    assert "_Pending: will be populated by the report step._" not in content
     assert "_Pending: will be populated by the generate_tasks step._" not in content
 
 
@@ -518,10 +509,10 @@ def test_review_pipeline_has_review_but_no_commit(tmp_path: Path) -> None:
 
     assert result.status == "done"
     steps = _step_names(container, task.id)
-    # review pipeline: analyze, review, report — review loop fires, then done (no commit)
+    # review pipeline: analyze, review — review loop fires, then done (no commit)
     assert "analyze" in steps
     assert "review" in steps
-    assert "report" in steps
+    assert "report" not in steps
     assert "commit" not in steps
 
 
@@ -531,13 +522,12 @@ def test_review_pipeline_has_review_but_no_commit(tmp_path: Path) -> None:
 
 
 def test_review_writes_sections_to_workdoc(tmp_path: Path) -> None:
-    """review run should populate Review Analysis, Review Findings, and Final Report."""
+    """review run should populate Review Analysis and Review Findings."""
     from unittest.mock import MagicMock
 
     from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 
     analyze_text = "analyze: baseline and scope verified"
-    report_text = "report: review complete with actionable findings"
 
     def mock_run_step(*, task, step, attempt):
         if step == "analyze":
@@ -545,8 +535,6 @@ def test_review_writes_sections_to_workdoc(tmp_path: Path) -> None:
         if step == "review":
             findings = [{"severity": "medium", "summary": "Missing null check", "file": "main.py", "line": 12}] if attempt == 1 else []
             return StepResult(status="ok", findings=findings)
-        if step == "report":
-            return StepResult(status="ok", summary=report_text)
         if step == "implement_fix":
             return StepResult(status="ok", summary="fix applied")
         return StepResult(status="ok")
@@ -574,10 +562,8 @@ def test_review_writes_sections_to_workdoc(tmp_path: Path) -> None:
     assert analyze_text in content
     assert "Review Cycle 1" in content
     assert "Missing null check" in content
-    assert report_text in content
     assert "_Pending: will be populated by the analyze step._" not in content
     assert "_Pending: will be populated by the review step._" not in content
-    assert "_Pending: will be populated by the report step._" not in content
 
 
 # ---------------------------------------------------------------------------
@@ -1100,28 +1086,26 @@ def test_spike_runs_without_commit(tmp_path: Path) -> None:
 
     assert result.status == "done"
     steps = _step_names(container, task.id)
-    assert steps == ["analyze", "prototype", "report"]
+    assert steps == ["analyze", "prototype"]
     assert "commit" not in steps
     assert "review" not in steps
+    assert "report" not in steps
 
 
 def test_spike_writes_sections_to_workdoc(tmp_path: Path) -> None:
-    """spike run should populate analysis/prototype/report sections."""
+    """spike run should populate analysis/prototype sections."""
     from unittest.mock import MagicMock
 
     from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 
     analyze_text = "analyze: compared caching candidates and constraints"
     prototype_text = "prototype: implemented throwaway Redis adapter"
-    report_text = "report: recommend Redis with bounded TTL strategy"
 
     def mock_run_step(*, task, step, attempt):
         if step == "analyze":
             return StepResult(status="ok", summary=analyze_text)
         if step == "prototype":
             return StepResult(status="ok", summary=prototype_text)
-        if step == "report":
-            return StepResult(status="ok", summary=report_text)
         return StepResult(status="ok")
 
     adapter = MagicMock()
@@ -1146,10 +1130,8 @@ def test_spike_writes_sections_to_workdoc(tmp_path: Path) -> None:
     content = workdoc.read_text(encoding="utf-8")
     assert analyze_text in content
     assert prototype_text in content
-    assert report_text in content
     assert "_Pending: will be populated by the analyze step._" not in content
     assert "_Pending: will be populated by the implement step._" not in content
-    assert "_Pending: will be populated by the report step._" not in content
 
 
 # ---------------------------------------------------------------------------
@@ -1349,9 +1331,10 @@ def test_verify_only_runs_checks_no_changes(tmp_path: Path) -> None:
 
     assert result.status == "done"
     steps = _step_names(container, task.id)
-    assert steps == ["verify", "report"]
+    assert steps == ["verify"]
     assert "implement" not in steps
     assert "commit" not in steps
+    assert "report" not in steps
 
 
 # ---------------------------------------------------------------------------
@@ -1360,19 +1343,16 @@ def test_verify_only_runs_checks_no_changes(tmp_path: Path) -> None:
 
 
 def test_verify_only_writes_verify_and_report_to_workdoc(tmp_path: Path) -> None:
-    """verify_only run should populate Verification Results and Final Report."""
+    """verify_only run should populate Verification Results."""
     from unittest.mock import MagicMock
 
     from agent_orchestrator.runtime.orchestrator.worker_adapter import StepResult
 
     verify_text = "verify: all selected checks passed"
-    report_text = "report: repository is currently healthy"
 
     def mock_run_step(*, task, step, attempt):
         if step == "verify":
             return StepResult(status="ok", summary=verify_text)
-        if step == "report":
-            return StepResult(status="ok", summary=report_text)
         return StepResult(status="ok")
 
     adapter = MagicMock()
@@ -1396,9 +1376,7 @@ def test_verify_only_writes_verify_and_report_to_workdoc(tmp_path: Path) -> None
     workdoc = container.state_root / "workdocs" / f"{task.id}.md"
     content = workdoc.read_text(encoding="utf-8")
     assert verify_text in content
-    assert report_text in content
     assert "_Pending: will be populated by the verify step._" not in content
-    assert "_Pending: will be populated by the report step._" not in content
 
 
 # ---------------------------------------------------------------------------
@@ -1441,6 +1419,100 @@ def test_plan_output_stored_in_revisions(tmp_path: Path) -> None:
     assert len(revisions) == 1  # plan (feature pipeline)
     assert revisions[0].step == "plan"
     assert revisions[0].content == "Plan output for plan"
+
+
+def test_diagnose_and_analyze_steps_create_plan_revisions(tmp_path: Path) -> None:
+    """bug_fix (diagnose) and docs/test (analyze) steps create plan revisions."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+
+    real_adapter = DefaultWorkerAdapter()
+
+    # -- bug_fix pipeline: diagnose step should create a plan revision --
+    def bug_fix_run_step(*, task, step, attempt):
+        if step == "diagnose":
+            return StepResult(status="ok", summary="Root cause: null pointer in auth")
+        if step == "review":
+            return StepResult(status="ok", findings=[])
+        return real_adapter.run_step(task=task, step=step, attempt=attempt)
+
+    adapter = MagicMock()
+    adapter.run_step = bug_fix_run_step
+
+    container = Container(tmp_path / "bugfix")
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+
+    bug_task = Task(title="Diagnose revision test", task_type="bug", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(bug_task)
+    result = service.run_task(bug_task.id)
+    assert result.status == "done"
+
+    revisions = container.plan_revisions.for_task(result.id)
+    assert len(revisions) == 1
+    assert revisions[0].step == "diagnose"
+    assert revisions[0].content == "Root cause: null pointer in auth"
+
+    # -- docs pipeline: analyze step should create a plan revision --
+    def docs_run_step(*, task, step, attempt):
+        if step == "analyze":
+            return StepResult(status="ok", summary="Docs analysis: missing API docs")
+        if step == "review":
+            return StepResult(status="ok", findings=[])
+        return real_adapter.run_step(task=task, step=step, attempt=attempt)
+
+    adapter2 = MagicMock()
+    adapter2.run_step = docs_run_step
+
+    container2 = Container(tmp_path / "docs")
+    bus2 = EventBus(container2.events, container2.project_id)
+    service2 = OrchestratorService(container2, bus2, worker_adapter=adapter2)
+
+    docs_task = Task(title="Analyze revision test", task_type="docs", status="queued", hitl_mode="autopilot")
+    container2.tasks.upsert(docs_task)
+    result2 = service2.run_task(docs_task.id)
+    assert result2.status == "done"
+
+    revisions2 = container2.plan_revisions.for_task(result2.id)
+    assert len(revisions2) == 1
+    assert revisions2[0].step == "analyze"
+    assert revisions2[0].content == "Docs analysis: missing API docs"
+
+
+def test_refactor_creates_revisions_for_analyze_and_plan(tmp_path: Path) -> None:
+    """Refactor pipeline creates two plan revisions: analyze + plan."""
+    from unittest.mock import MagicMock
+
+    from agent_orchestrator.runtime.orchestrator.worker_adapter import DefaultWorkerAdapter, StepResult
+
+    real_adapter = DefaultWorkerAdapter()
+
+    def run_step(*, task, step, attempt):
+        if step == "analyze":
+            return StepResult(status="ok", summary="Analysis: code smells in module X")
+        if step == "plan":
+            return StepResult(status="ok", summary="Plan: extract helper class")
+        if step == "review":
+            return StepResult(status="ok", findings=[])
+        return real_adapter.run_step(task=task, step=step, attempt=attempt)
+
+    adapter = MagicMock()
+    adapter.run_step = run_step
+
+    container = Container(tmp_path)
+    bus = EventBus(container.events, container.project_id)
+    service = OrchestratorService(container, bus, worker_adapter=adapter)
+
+    task = Task(title="Refactor revision test", task_type="refactor", status="queued", hitl_mode="autopilot")
+    container.tasks.upsert(task)
+    result = service.run_task(task.id)
+    assert result.status == "done"
+
+    revisions = container.plan_revisions.for_task(result.id)
+    assert len(revisions) == 2
+    assert revisions[0].step == "analyze"
+    assert revisions[1].step == "plan"
 
 
 # ---------------------------------------------------------------------------

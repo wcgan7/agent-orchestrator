@@ -52,6 +52,7 @@ h1 {
   display: flex;
   gap: 0.5rem;
   flex-wrap: wrap;
+  align-items: center;
 }
 
 button,
@@ -255,30 +256,6 @@ a:focus-visible {
   margin: 0;
 }
 
-.planning-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 2.5fr);
-  gap: 0.8rem;
-}
-
-.planning-task-list {
-  border: 1px solid var(--color-border-default);
-  border-radius: 14px;
-  padding: 0.7rem;
-  background: rgba(255, 255, 255, 0.75);
-  min-width: 0;
-  max-height: 80vh;
-  overflow-y: auto;
-}
-
-.planning-content {
-  min-width: 0;
-}
-
-.planning-worker-tabs {
-  margin-top: -0.1rem;
-}
-
 .planning-worker-output {
   margin-top: 0.2rem;
   min-height: 1.35rem;
@@ -331,48 +308,6 @@ a:focus-visible {
 
 .planning-refine-inline > input {
   min-width: 0;
-}
-
-.planning-job-history {
-  max-height: 24rem;
-  overflow: auto;
-  padding-right: 0.2rem;
-}
-
-.planning-job-history > .field-label {
-  margin: 0;
-}
-
-/* ── Refine job history cards ── */
-.refine-job-card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.3rem;
-  padding: 0.6rem 0.8rem;
-  border: 1px solid var(--color-border-default);
-  border-radius: 10px;
-  background: var(--color-bg-primary);
-}
-
-.refine-job-head {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.refine-job-feedback {
-  margin: 0;
-  font-size: 0.84rem;
-  color: var(--color-text-primary);
-}
-
-.refine-job-error {
-  margin: 0;
-  font-size: 0.82rem;
-  color: #8c2a2a;
-  background: #fdf0f0;
-  border-radius: 6px;
-  padding: 0.3rem 0.55rem;
 }
 
 /* ── Generated tasks section (task detail overview) ── */
@@ -598,20 +533,12 @@ a:focus-visible {
   margin: 0 0 0.55rem;
 }
 
-.status-grid,
-.settings-grid {
+.status-grid {
   display: grid;
   gap: 0.7rem;
   grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
 }
 
-.settings-grid {
-  grid-template-columns: minmax(320px, 1fr) minmax(380px, 1fr);
-  grid-template-areas:
-    "routing routing"
-    "projects diagnostics";
-  align-items: start;
-}
 
 .status-card,
 .row-card,
@@ -619,34 +546,6 @@ a:focus-visible {
   padding: 0.8rem;
 }
 
-.settings-card-projects {
-  grid-area: projects;
-}
-
-.settings-card-diagnostics {
-  grid-area: diagnostics;
-}
-
-.settings-card-routing {
-  grid-area: routing;
-}
-
-.settings-sticky-footer {
-  position: sticky;
-  bottom: 0;
-  z-index: 10;
-  background: var(--color-bg-primary, #fff);
-  border-top: 1px solid var(--color-border, #e0e0e0);
-  padding: 0.6rem 1rem;
-  margin: 0.5rem -1rem -1rem;
-  border-radius: 0 0 var(--radius-card, 0.6rem) var(--radius-card, 0.6rem);
-}
-
-@media (min-width: 1700px) {
-  .settings-grid {
-    grid-template-columns: minmax(760px, 1fr) minmax(420px, 0.72fr);
-  }
-}
 
 .status-card span {
   color: var(--color-text-secondary);
@@ -768,40 +667,137 @@ a:focus-visible {
   gap: 0.45rem;
 }
 
-.agents-layout {
-  display: grid;
+.settings-tab-content {
+  display: flex;
+  flex-direction: column;
   gap: 0.7rem;
-  grid-template-columns: 1fr;
-  grid-template-areas:
-    "active"
-    "presence"
-    "catalog";
-  align-items: start;
 }
 
-.agents-spawn-card {
-  grid-area: spawn;
+.settings-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.4rem;
 }
 
-.agents-active-card {
-  grid-area: active;
+.settings-card h3 {
+  margin: 0 0 0.4rem;
 }
 
-.agents-presence-card {
-  grid-area: presence;
+.settings-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.7rem;
 }
 
-.workers-recheck-actions {
-  margin-bottom: 0.8rem;
+.settings-field-group + .settings-field-group {
+  margin-top: 0.9rem;
+}
+
+.settings-field-group p {
+  margin-bottom: 0;
+}
+
+.pin-project-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.pinned-project-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.4rem;
+  padding: 0.25rem 0.4rem;
+  border-radius: var(--radius-sm, 0.3rem);
+  background: var(--color-bg-secondary, #f8f8f8);
+}
+
+.pinned-project-path {
+  font-size: 0.82rem;
+  color: var(--color-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.button-icon-danger {
+  color: #c62828;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+
+.button-icon-danger:hover {
+  color: #e53935;
+}
+
+.settings-card-head h3 {
+  margin: 0;
+}
+
+.button-icon {
+  min-width: auto;
+  min-height: auto;
+  padding: 0.2rem 0.45rem;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+.row-card-default {
+  border-left: 3px solid #e91e63;
+}
+
+.routing-table {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.routing-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  border-bottom: 1px solid var(--color-border-default);
+}
+
+.routing-row:last-child {
+  border-bottom: none;
+}
+
+.routing-step {
+  font-size: 0.85rem;
+  font-weight: 500;
+}
+
+.routing-row select {
+  flex-shrink: 0;
+  width: 200px;
+}
+
+.row-card-clickable {
+  cursor: pointer;
+}
+
+.row-card-clickable:hover {
+  background: var(--color-bg-secondary);
+}
+
+.status-pill-default {
+  background: #fce4ec;
+  color: #ad1457;
+  border-color: #f48fb1;
 }
 
 .workers-advanced {
   margin-top: 0.85rem;
 }
 
-.agents-catalog-card {
-  grid-area: catalog;
-}
 
 .quality-gate-grid {
   display: flex;
@@ -997,6 +993,7 @@ textarea {
 .button:disabled,
 .button[aria-busy='true'] {
   cursor: default;
+  opacity: 0.45;
 }
 
 .badge {
@@ -1162,6 +1159,28 @@ textarea {
   line-height: 1.5;
   max-height: 12rem;
   overflow: auto;
+}
+
+.recommended-action-box {
+  margin-top: 0.75rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--color-border-warning, #c7a84e);
+  border-radius: 8px;
+  background: var(--color-bg-warning, #fdf8e8);
+}
+
+.recommended-action-box .recommended-action-label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #7a6520;
+  margin-bottom: 0.35rem;
+}
+
+.recommended-action-box .recommended-action-text {
+  margin: 0;
+  font-size: 0.85rem;
+  color: #4a3d10;
+  line-height: 1.5;
 }
 
 .link-button {
@@ -1646,25 +1665,11 @@ textarea {
     grid-template-columns: 1fr;
   }
 
-  .settings-grid {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "routing"
-      "projects"
-      "diagnostics";
-  }
 
   .provider-grid {
     grid-template-columns: 1fr;
   }
 
-  .agents-layout {
-    grid-template-columns: 1fr;
-    grid-template-areas:
-      "active"
-      "presence"
-      "catalog";
-  }
 
   .quality-gate-row {
     grid-template-columns: 1fr;
@@ -1697,10 +1702,6 @@ textarea {
   }
 
   .dependency-graph-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .planning-layout {
     grid-template-columns: 1fr;
   }
 

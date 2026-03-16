@@ -493,7 +493,26 @@ class PlanManager:
         child_status = str(policy.get("child_status") or "queued").strip().lower()
         if child_status not in {"backlog", "queued"}:
             child_status = "queued"
-        child_hitl_mode = normalize_hitl_mode(str(policy.get("child_hitl_mode") or "autopilot"))
+        child_hitl_mode = normalize_hitl_mode(str(policy.get("child_hitl_mode") or "supervised"))
+        # Resolve initiative context once before the loop so every child
+        # carries the parent objective and relevant plan excerpt.
+        _initiative_context: dict[str, str] | None = None
+        if isinstance(parent.metadata, dict) and parent.task_type in {
+            "initiative_plan", "plan_only",
+        }:
+            _plan_text = (
+                parent.metadata.get("plan_for_generation")
+                or (parent.metadata.get("step_outputs") or {}).get("initiative_plan")
+                or (parent.metadata.get("step_outputs") or {}).get("plan")
+            )
+            if isinstance(_plan_text, str) and _plan_text.strip():
+                _initiative_context = {
+                    "parent_id": parent.id,
+                    "parent_title": getattr(parent, "title", ""),
+                    "objective": getattr(parent, "description", "") or "",
+                    "plan_excerpt": self._truncate_plan_excerpt(_plan_text.strip()),
+                }
+
         created_ids: list[str] = []
         for item in task_defs:
             if not isinstance(item, dict):
@@ -513,6 +532,8 @@ class PlanManager:
             child_metadata["deps_analyzed"] = True
             child_metadata["deps_analysis_source"] = "generate_tasks"
             child_metadata["generated_depends_on"] = generated_dep_refs
+            if _initiative_context is not None:
+                child_metadata["initiative_context"] = dict(_initiative_context)
             from ..domain.models import Task
 
             child = Task(
@@ -583,6 +604,23 @@ class PlanManager:
             parent.children_ids.extend(created_ids)
             svc.container.tasks.upsert(parent)
         return created_ids
+
+    @staticmethod
+    def _truncate_plan_excerpt(text: str, max_chars: int = 4000) -> str:
+        """Truncate plan text at a paragraph boundary within *max_chars*.
+
+        Looks for the last double-newline before the limit so the excerpt
+        ends on a complete paragraph.  Appends a truncation marker when
+        the text is shortened.
+        """
+        if len(text) <= max_chars:
+            return text
+        # Find the last paragraph break within the limit
+        candidate = text.rfind("\n\n", 0, max_chars)
+        if candidate <= 0:
+            # No paragraph boundary — fall back to hard cut
+            candidate = max_chars
+        return text[:candidate].rstrip() + "\n\n[...plan truncated...]"
 
     @staticmethod
     def _normalize_generated_task_type(raw: Any) -> str:

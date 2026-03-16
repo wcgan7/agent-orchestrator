@@ -7,9 +7,7 @@ test.beforeEach(async ({ page }) => {
 
 test('loads shell and core navigation', async ({ page }) => {
   await expect(page.getByRole('button', { name: 'Board' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Planning' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Execution' })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Workers' })).toBeVisible()
   await expect(page.getByRole('button', { name: 'Settings' })).toBeVisible()
 })
 
@@ -32,9 +30,11 @@ test('saves settings through the real API', async ({ page }) => {
   await page.getByRole('button', { name: 'Settings' }).click()
   await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
 
-  const concurrency = page.getByLabel('Orchestrator concurrency')
+  await page.getByRole('tab', { name: 'Execution' }).click()
+  const executionCard = page.locator('article', { has: page.getByRole('heading', { name: 'Execution Controls' }) })
+  const concurrency = executionCard.getByLabel('Orchestrator concurrency')
   await concurrency.fill('4')
-  await page.getByRole('button', { name: 'Save settings' }).click()
+  await executionCard.getByRole('button', { name: 'Save' }).click()
 
   await expect(page.getByText('Settings saved.')).toBeVisible({ timeout: 10_000 })
 })

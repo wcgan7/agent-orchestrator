@@ -50,7 +50,7 @@ class TestHITLModes:
     def test_get_mode_config_invalid_falls_back(self):
         """Test that get mode config invalid falls back."""
         config = get_mode_config("nonexistent")
-        assert config.mode == HITLMode.AUTOPILOT
+        assert config.mode == HITLMode.SUPERVISED
 
     def test_mode_config_to_dict(self):
         """Test that mode config to dict."""

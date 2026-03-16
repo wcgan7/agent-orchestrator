@@ -16,10 +16,11 @@ Execution requirements:
 Style:
 - Follow the style guidelines and language-specific fallback defaults provided below in this prompt.
 
-Validation:
-- Run relevant checks for touched areas (tests/lint/typecheck/build/runtime as applicable).
-- Fix failures introduced by your changes before finishing.
-- Use isolated tests where useful, but ensure behavior is also validated with realistic production-style inputs where practical.
+Validation (targeted scope only):
+- Run tests directly related to the files you changed. Do NOT run the full test suite.
+- Run lint and typecheck on changed files only.
+- Fix any failures introduced by your changes before finishing.
+- The full test suite will be run in a separate verification step after implementation.
 
 Documentation:
 - If behavior, API, CLI, configuration, or setup changes, update relevant documentation in the same step, including `README.md`.

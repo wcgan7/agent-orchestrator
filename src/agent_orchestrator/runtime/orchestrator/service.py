@@ -46,6 +46,78 @@ from .worker_adapter import DefaultWorkerAdapter, StepResult, WorkerAdapter
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Hardcoded fallback recommended-actions for each block-reason category.
+# ---------------------------------------------------------------------------
+_BLOCKED_RECOMMENDED_ACTIONS: dict[str, str] = {
+    "merge_conflict": "Resolve conflicts in the listed files, then click 'Finalize Manual Merge'.",
+    "scope_violation": "Review the out-of-scope files. Widen scope contract or revert, then retry.",
+    "missing_workdoc": "Click 'Retry' to regenerate the workdoc, or recreate it manually.",
+    "invalid_workdoc": "Fix the file encoding/permissions at the path shown, then retry.",
+    "verify_fix_exhausted": "Review failing tests/lint in logs, fix manually, then click 'Retry'.",
+    "review_cap_exceeded": "Review open findings on the Overview tab, address manually, then retry.",
+    "no_changes": "Review task description/plan for clarity, then click 'Retry'.",
+    "human_intervention": "Review the 'Human blocking issues' section and take the described actions.",
+    "gate_timeout": "Review task state, approve the pending gate or click 'Retry'.",
+    "precommit_context_missing": "Click 'Request Changes' to regenerate implementation context.",
+    "dirty_overlapping": "Commit or stash local integration branch changes, then retry.",
+    "git_error": "Check error details, resolve repository issues, then retry.",
+    "internal_error": "Check logs, then click 'Retry'. If persistent, cancel and recreate.",
+}
+
+
+def _classify_block_reason(task: Task) -> str:
+    """Determine the block-reason category from task metadata and error text."""
+    metadata = task.metadata if isinstance(task.metadata, dict) else {}
+    error = str(task.error or "").lower()
+
+    # 1. Deterministic metadata checks
+    if metadata.get("merge_conflict"):
+        return "merge_conflict"
+    if metadata.get("scope_violation"):
+        return "scope_violation"
+    if metadata.get("missing_workdoc_path"):
+        return "missing_workdoc"
+    if metadata.get("invalid_workdoc_path"):
+        return "invalid_workdoc"
+    if metadata.get("human_blocking_issues"):
+        issues = metadata["human_blocking_issues"]
+        if isinstance(issues, list) and len(issues) > 0:
+            return "human_intervention"
+    reason_code = str(metadata.get("merge_failure_reason_code") or "").strip()
+    if reason_code == "dirty_overlapping":
+        return "dirty_overlapping"
+    if reason_code == "git_error":
+        return "git_error"
+
+    # 2. Error text pattern matching
+    if "scope violation" in error or "out-of-scope" in error:
+        return "scope_violation"
+    if "merge conflict" in error:
+        return "merge_conflict"
+    if "missing required workdoc" in error or "missing workdoc" in error:
+        return "missing_workdoc"
+    if "invalid workdoc" in error or "unreadable workdoc" in error:
+        return "invalid_workdoc"
+    if re.search(r"could not fix .+ after \d+ attempts?", error):
+        return "verify_fix_exhausted"
+    if "review attempt cap exceeded" in error or "unresolved review findings" in error:
+        return "review_cap_exceeded"
+    if "no file changes" in error or "no changes" in error:
+        return "no_changes"
+    if "human intervention" in error or "human blocking" in error:
+        return "human_intervention"
+    if "gate" in error and ("timeout" in error or "max_wait" in error or "timed out" in error):
+        return "gate_timeout"
+    if "pre-commit context" in error or "precommit context" in error:
+        return "precommit_context_missing"
+    if "overlapping" in error and ("dirty" in error or "integration branch" in error):
+        return "dirty_overlapping"
+    if "git merge failed" in error or "git error" in error:
+        return "git_error"
+
+    return "internal_error"
+
 
 class OrchestratorService:
     """Coordinate task scheduling, execution, review, and commit flow."""
@@ -109,6 +181,10 @@ class OrchestratorService:
     )
     _ENVIRONMENT_RETRY_BASE_SECONDS = 15
     _ENVIRONMENT_RETRY_MAX_SECONDS = 300
+    _HEARTBEAT_STALL_SUMMARY_PATTERN = re.compile(r"worker stalled", re.IGNORECASE)
+    _HEARTBEAT_STALL_MAX_RETRIES = 2
+    _HEARTBEAT_STALL_RETRY_BASE_SECONDS = 30
+    _HEARTBEAT_STALL_RETRY_MAX_SECONDS = 300
 
     def __init__(
         self,
@@ -700,6 +776,14 @@ class OrchestratorService:
             task.updated_at = now_iso()
             self.container.tasks.upsert(task)
 
+        # Signal the worker subprocess to terminate immediately rather than
+        # waiting for the next poll-interval check.
+        if hasattr(self.worker_adapter, "signal_cancel"):
+            try:
+                self.worker_adapter.signal_cancel(task_id)
+            except Exception:
+                pass
+
         self.bus.emit(
             channel="tasks",
             event_type="task.cancelled",
@@ -786,17 +870,14 @@ class OrchestratorService:
                     if run is None:
                         continue
                     if run.status in {"waiting_gate", "in_progress"}:
+                        if run.status == "in_progress":
+                            run.accumulate_worker_seconds()
                         run.status = "blocked"
                         run.finished_at = task.updated_at
                         run.summary = task.error
                         self.container.runs.upsert(run)
                         break
-                self.bus.emit(
-                    channel="tasks",
-                    event_type="task.blocked",
-                    entity_id=task.id,
-                    payload={"error": task.error, "gate": gate, "policy": "gate_max_wait"},
-                )
+                self._emit_task_blocked(task, payload={"error": task.error, "gate": gate, "policy": "gate_max_wait"})
                 continue
 
             if changed:
@@ -1139,6 +1220,7 @@ class OrchestratorService:
             if run.task_id in in_progress_ids and run.status == "in_progress" and not run.finished_at:
                 task = task_by_id.get(run.task_id)
                 if task and task.pending_gate:
+                    run.accumulate_worker_seconds()
                     run.status = "waiting_gate"
                     run.finished_at = now_iso()
                     run.summary = run.summary or f"Paused at gate: {task.pending_gate}"
@@ -1150,6 +1232,7 @@ class OrchestratorService:
                     self._finalize_recovered_completed_task(task, run)
                     completed_task_ids.add(task.id)
                     continue
+                run.accumulate_worker_seconds()
                 run.status = "interrupted"
                 run.finished_at = now_iso()
                 run.summary = run.summary or "Interrupted by orchestrator restart"
@@ -1202,6 +1285,7 @@ class OrchestratorService:
     def _finalize_recovered_completed_task(self, task: Task, run: RunRecord) -> None:
         """Finalize a recovered in-progress task as done when commit already succeeded."""
         finished_at = now_iso()
+        run.accumulate_worker_seconds()
         run.status = "done"
         run.finished_at = run.finished_at or finished_at
         run.summary = run.summary or "Pipeline completed"
@@ -1222,6 +1306,7 @@ class OrchestratorService:
             "review_stage",
             "worktree_dir",
             "task_context",
+            "recommended_action",
         ):
             task.metadata.pop(key, None)
         self.container.tasks.upsert(task)
@@ -1909,6 +1994,7 @@ class OrchestratorService:
                 "pending_precommit_approval",
                 "review_stage",
                 "pipeline_phase",
+                "recommended_action",
             ):
                 task.metadata.pop(key, None)
 
@@ -1937,6 +2023,8 @@ class OrchestratorService:
                     if latest_run:
                         break
                 if latest_run and latest_run.status != "done":
+                    if latest_run.status == "in_progress":
+                        latest_run.accumulate_worker_seconds()
                     latest_run.status = "done"
                     latest_run.finished_at = latest_run.finished_at or ts
                     if not latest_run.summary:
@@ -1982,6 +2070,7 @@ class OrchestratorService:
 
             task.metadata.pop("worktree_dir", None)
             task.metadata.pop("task_context", None)
+            task.metadata.pop("recommended_action", None)
             task.status = "in_review"
             task.pending_gate = None
             task.current_agent_id = None
@@ -2303,6 +2392,21 @@ class OrchestratorService:
                     context["initial_head_sha"] = head_result.stdout.strip()
             except Exception:
                 pass
+        # Capture base branch HEAD so we can detect divergence at merge time.
+        if worktree_dir is not None and not context.get("base_branch_sha"):
+            try:
+                base_result = subprocess.run(
+                    ["git", "rev-parse", "--verify", "HEAD"],
+                    cwd=self.container.project_dir,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                    timeout=10,
+                )
+                if base_result.returncode == 0 and base_result.stdout.strip():
+                    context["base_branch_sha"] = base_result.stdout.strip()
+            except Exception:
+                pass
         context["retained"] = False
         context["retained_reason"] = None
         context["retained_at"] = None
@@ -2473,6 +2577,49 @@ class OrchestratorService:
             raise ValueError(f"Unreadable workdoc: {canonical} ({exc})") from exc
         return canonical
 
+    # ------------------------------------------------------------------
+    # Recommended-action generation & centralized task.blocked emission
+    # ------------------------------------------------------------------
+
+    def _generate_recommended_action(self, task: Task) -> str:
+        """Classify the block reason, try LLM, fall back to hardcoded action."""
+        category = _classify_block_reason(task)
+
+        # Try LLM generation first
+        meta = task.metadata if isinstance(task.metadata, dict) else {}
+        blocked_step = str(task.current_step or meta.get("pipeline_phase") or "unknown")
+        error_message = str(task.error or "Unknown error")
+        try:
+            llm_action = self.worker_adapter.generate_recommended_action(
+                task=task,
+                blocked_step=blocked_step,
+                error_message=error_message,
+            )
+            if isinstance(llm_action, str) and llm_action.strip():
+                return llm_action
+        except Exception:
+            logger.debug("LLM recommended-action generation failed for task %s", task.id)
+
+        # Fall back to hardcoded mapping
+        return _BLOCKED_RECOMMENDED_ACTIONS.get(category, _BLOCKED_RECOMMENDED_ACTIONS["internal_error"])
+
+    def _emit_task_blocked(self, task: Task, *, payload: dict[str, Any] | None = None) -> None:
+        """Centralized helper that enriches a blocked task with a recommended action and emits the event."""
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        if not str(task.metadata.get("recommended_action") or "").strip():
+            action = self._generate_recommended_action(task)
+            if action:
+                task.metadata["recommended_action"] = action
+                self.container.tasks.upsert(task)
+
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.blocked",
+            entity_id=task.id,
+            payload=payload or {"error": task.error},
+        )
+
     def _block_for_invalid_workdoc(self, task: Task, run: RunRecord, *, step: str, detail: str) -> None:
         """Fail fast when a task has an unreadable or invalid canonical workdoc."""
         canonical = self._workdoc_canonical_path(task.id)
@@ -2485,12 +2632,7 @@ class OrchestratorService:
         task.metadata["invalid_workdoc_error"] = detail
         self.container.tasks.upsert(task)
         self._finalize_run(task, run, status="blocked", summary=f"Blocked during {step}: invalid workdoc")
-        self.bus.emit(
-            channel="tasks",
-            event_type="task.blocked",
-            entity_id=task.id,
-            payload={"error": task.error},
-        )
+        self._emit_task_blocked(task)
 
     def _read_canonical_workdoc(self, canonical: Path, *, task_id: str) -> str:
         """Read canonical workdoc text with consistent diagnostics."""
@@ -2533,15 +2675,43 @@ class OrchestratorService:
     def _sync_workdoc_with_diagnostics(
         self, task: Task, step: str, project_dir: Path, summary: str | None, attempt: int | None = None
     ) -> None:
-        """Sync workdoc and surface invalid/unreadable file diagnostics as ValueError."""
-        self._workdoc_manager.sync_workdoc(
-            task,
-            step,
-            project_dir,
-            summary,
-            attempt,
-            read_workdoc_pair=lambda: self._read_workdoc_pair(task, project_dir),
+        """Sync workdoc with repair-and-retry on structural failures.
+
+        Layer 1: normal sync (sentinel merge / heading fallback).
+        Layer 2: if sync fails, repair the workdoc by re-injecting the
+                 missing section from the pipeline template, then retry.
+        Layer 3: if repair-retry also fails, store the summary in task
+                 metadata and continue the pipeline instead of blocking.
+        """
+        read_pair = lambda: self._read_workdoc_pair(task, project_dir)
+        try:
+            self._workdoc_manager.sync_workdoc(task, step, project_dir, summary, attempt, read_workdoc_pair=read_pair)
+            return
+        except ValueError:
+            pass
+
+        # Layer 2: attempt structural repair and retry.
+        repaired = self._workdoc_manager.repair_missing_section(task, step)
+        if repaired:
+            logger.warning("Repaired missing workdoc section for step '%s' on task %s", step, task.id)
+            try:
+                self._workdoc_manager.sync_workdoc(task, step, project_dir, summary, attempt, read_workdoc_pair=read_pair)
+                self._workdoc_manager.clear_sync_diagnostics(task)
+                return
+            except ValueError:
+                pass
+
+        # Layer 3: graceful degradation — store summary in metadata and continue.
+        logger.warning(
+            "Workdoc sync failed for step '%s' on task %s after repair attempt; "
+            "storing summary in metadata and continuing pipeline",
+            step, task.id,
         )
+        if summary and summary.strip() and isinstance(task.metadata, dict):
+            orphaned = task.metadata.setdefault("orphaned_step_summaries", {})
+            if isinstance(orphaned, dict):
+                orphaned[step] = summary.strip()
+        self._workdoc_manager.clear_sync_diagnostics(task)
 
     def _refresh_workdoc_with_diagnostics(self, task: Task, project_dir: Path) -> None:
         """Refresh workdoc and surface invalid/unreadable file diagnostics as ValueError.
@@ -2566,12 +2736,7 @@ class OrchestratorService:
         task.metadata["missing_workdoc_path"] = str(canonical)
         self.container.tasks.upsert(task)
         self._finalize_run(task, run, status="blocked", summary=f"Blocked during {step}: missing required workdoc")
-        self.bus.emit(
-            channel="tasks",
-            event_type="task.blocked",
-            entity_id=task.id,
-            payload={"error": task.error},
-        )
+        self._emit_task_blocked(task)
 
     def _step_project_dir(self, task: Task) -> Path:
         """Resolve task worktree directory, falling back to the main project root."""
@@ -2926,6 +3091,7 @@ class OrchestratorService:
             + (" ..." if len(violations) > 6 else "")
         )
         self.container.tasks.upsert(task)
+        run.accumulate_worker_seconds()
         run.status = "blocked"
         run.finished_at = now_iso()
         run.summary = f"Blocked during {step}"
@@ -2936,7 +3102,7 @@ class OrchestratorService:
             entity_id=task.id,
             payload={"step": step, "violations": violations},
         )
-        self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
+        self._emit_task_blocked(task)
 
     @staticmethod
     def _baseline_debt_signature(summary: str, changed_files: list[str]) -> str:
@@ -3127,6 +3293,7 @@ class OrchestratorService:
         self.container.tasks.upsert(task)
         run.status = "in_progress"
         run.finished_at = None
+        run.started_at = now_iso()
         run.summary = None
         self.container.runs.upsert(run)
         self.bus.emit(
@@ -3155,7 +3322,7 @@ class OrchestratorService:
         run: RunRecord,
         step: str,
         attempt: int = 1,
-    ) -> Literal["ok", "verify_failed", "verify_degraded", "auto_requeued", "human_blocked", "blocked"]:
+    ) -> Literal["ok", "verify_failed", "verify_degraded", "auto_requeued", "human_blocked", "blocked", "no_action_needed"]:
         self._heartbeat_execution_lease(task)
         self.container.tasks.upsert(task)
         try:
@@ -3194,6 +3361,8 @@ class OrchestratorService:
             return "blocked"
 
         step_log: dict[str, Any] = {"step": step, "status": result.status, "ts": now_iso(), "started_at": step_started, "summary": result.summary}
+        if result.token_usage:
+            step_log["token_usage"] = result.token_usage
         if result.human_blocking_issues:
             step_log["human_blocking_issues"] = result.human_blocking_issues
         # Preserve log file paths so historical step logs can be retrieved.
@@ -3226,6 +3395,13 @@ class OrchestratorService:
                 summary=result.summary,
             ):
                 return "auto_requeued"
+            if step not in _VERIFY_STEPS and self._handle_recoverable_heartbeat_stall(
+                task,
+                run,
+                step=step,
+                summary=result.summary,
+            ):
+                return "auto_requeued"
             if step in _VERIFY_STEPS:
                 task.status = "in_progress"
                 task.error = result.summary or f"{step} failed"
@@ -3240,19 +3416,24 @@ class OrchestratorService:
             self._clear_wait_state(task)
             task.current_step = step
             self.container.tasks.upsert(task)
+            run.accumulate_worker_seconds()
             run.status = "blocked"
             run.finished_at = now_iso()
             run.summary = f"Blocked during {step}"
             self.container.runs.upsert(run)
-            self.bus.emit(channel="tasks", event_type="task.blocked", entity_id=task.id, payload={"error": task.error})
+            self._emit_task_blocked(task)
             return "blocked"
 
         self._clear_environment_recovery_tracking(task, step=step)
+        self._clear_heartbeat_stall_recovery_tracking(task, step=step)
         task.metadata.pop("human_blocking_issues", None)
         self._clear_wait_state(task)
 
         # Store plan output as first-class immutable plan revisions.
-        if step in {"plan", "initiative_plan"} and result.summary:
+        # Analysis-type steps (diagnose, analyze, commit_review) are included
+        # so supervised-mode users can view, refine, and approve findings
+        # before implement runs.
+        if step in {"plan", "initiative_plan", "commit_review", "pr_review", "mr_review", "diagnose", "analyze"} and result.summary:
             provider, model = self._resolve_worker_lineage(task, step)
             self.create_plan_revision(
                 task_id=task.id,
@@ -3275,7 +3456,7 @@ class OrchestratorService:
             so = task.metadata.setdefault("step_outputs", {})
             # Plan text already bounded at 20KB by _normalize_planning_text.
             # Other outputs truncated to 4KB to prevent metadata bloat.
-            max_len = 20_000 if step in {"plan", "initiative_plan"} else 4_000
+            max_len = 20_000 if step in {"plan", "initiative_plan", "diagnose", "analyze", "pr_review", "mr_review"} else 4_000
             so[step] = result.summary[:max_len]
 
         # Handle generate_tasks: prefer generated tasks, but avoid silent no-op by recording warning metadata.
@@ -3322,6 +3503,9 @@ class OrchestratorService:
 
         self._heartbeat_execution_lease(task)
         self.container.tasks.upsert(task)
+
+        if result.no_action_needed:
+            return "no_action_needed"
         return "ok"
 
     def _clear_environment_recovery_tracking(self, task: Task, *, step: str) -> None:
@@ -3343,6 +3527,144 @@ class OrchestratorService:
                 wait_step = str(task.wait_state.get("step") or "").strip()
                 if not wait_step or wait_step == step:
                     self._clear_wait_state(task)
+
+    def _clear_heartbeat_stall_recovery_tracking(self, task: Task, *, step: str) -> None:
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        task.metadata.pop("heartbeat_stall_auto_requeue_pending", None)
+        task.metadata.pop("heartbeat_stall_next_retry_at", None)
+        task.metadata.pop("heartbeat_stall_recovery_backoff_seconds", None)
+        attempts_raw = task.metadata.get("heartbeat_stall_recovery_attempts_by_step")
+        if isinstance(attempts_raw, dict):
+            attempts = dict(attempts_raw)
+            attempts.pop(step, None)
+            if attempts:
+                task.metadata["heartbeat_stall_recovery_attempts_by_step"] = attempts
+            else:
+                task.metadata.pop("heartbeat_stall_recovery_attempts_by_step", None)
+        if isinstance(task.wait_state, dict):
+            if str(task.wait_state.get("kind") or "").strip() == self._WAIT_KIND_AUTO_RECOVERY:
+                reason = str(task.wait_state.get("reason_code") or "").strip()
+                wait_step = str(task.wait_state.get("step") or "").strip()
+                if reason == "heartbeat_stall" and (not wait_step or wait_step == step):
+                    self._clear_wait_state(task)
+
+    def _is_heartbeat_stall(self, summary: str | None) -> bool:
+        if not summary:
+            return False
+        return bool(self._HEARTBEAT_STALL_SUMMARY_PATTERN.search(summary))
+
+    def _heartbeat_stall_max_retries(self) -> int:
+        cfg = self.container.config.load()
+        workers_cfg = cfg.get("workers") if isinstance(cfg, dict) else {}
+        workers_cfg = workers_cfg if isinstance(workers_cfg, dict) else {}
+        env_cfg = workers_cfg.get("environment", {})
+        env_cfg = env_cfg if isinstance(env_cfg, dict) else {}
+        max_retries = int(env_cfg.get("max_heartbeat_stall_retries", self._HEARTBEAT_STALL_MAX_RETRIES) or 0)
+        if max_retries < 0:
+            max_retries = 0
+        return max_retries
+
+    def _handle_recoverable_heartbeat_stall(
+        self,
+        task: Task,
+        run: RunRecord,
+        *,
+        step: str,
+        summary: str | None,
+    ) -> bool:
+        if not self._is_heartbeat_stall(summary):
+            return False
+
+        max_retries = self._heartbeat_stall_max_retries()
+        if max_retries == 0:
+            return False
+
+        if not isinstance(task.metadata, dict):
+            task.metadata = {}
+        attempts_map_raw = task.metadata.get("heartbeat_stall_recovery_attempts_by_step")
+        attempts_map = dict(attempts_map_raw) if isinstance(attempts_map_raw, dict) else {}
+        current_attempts = int(attempts_map.get(step) or 0)
+
+        if current_attempts >= max_retries:
+            self._clear_heartbeat_stall_recovery_tracking(task, step=step)
+            escalation_summary = str(
+                summary or f"Heartbeat stall retry limit reached for step '{step}'."
+            ).strip()
+            self._block_for_human_issues(
+                task,
+                run,
+                step,
+                escalation_summary,
+                [{"summary": f"Heartbeat stall retry limit reached for step '{step}' "
+                  f"after {max_retries} retries."}],
+            )
+            return True
+
+        attempts_map[step] = current_attempts + 1
+        attempt_number = attempts_map[step]
+        backoff_seconds = min(
+            self._HEARTBEAT_STALL_RETRY_MAX_SECONDS,
+            self._HEARTBEAT_STALL_RETRY_BASE_SECONDS * (2 ** max(0, attempt_number - 1)),
+        )
+        next_retry_at = (datetime.now(timezone.utc) + timedelta(seconds=backoff_seconds)).isoformat()
+        task.metadata["heartbeat_stall_recovery_attempts_by_step"] = attempts_map
+        task.metadata["heartbeat_stall_auto_requeue_pending"] = True
+        task.metadata["heartbeat_stall_next_retry_at"] = next_retry_at
+        task.metadata["heartbeat_stall_recovery_backoff_seconds"] = backoff_seconds
+        task.metadata["heartbeat_stall_last_auto_recovery"] = {
+            "step": step,
+            "attempt": attempt_number,
+            "max_retries": max_retries,
+            "backoff_seconds": backoff_seconds,
+            "next_retry_at": next_retry_at,
+            "summary": str(summary or "").strip(),
+            "ts": now_iso(),
+        }
+        task.pending_gate = None
+        self._set_wait_state(
+            task,
+            kind=self._WAIT_KIND_AUTO_RECOVERY,
+            step=step,
+            reason_code="heartbeat_stall",
+            recoverable=True,
+            attempt=attempt_number,
+            max_attempts=max_retries,
+            next_retry_at=next_retry_at,
+        )
+        task.current_step = step
+        task.error = str(summary or f"Worker stalled during {step}. Auto-requeue scheduled.")
+        task.status = "queued"
+        task.current_agent_id = None
+        self.container.tasks.upsert(task)
+
+        run.accumulate_worker_seconds()
+        run.status = "error"
+        run.finished_at = now_iso()
+        run.summary = f"Auto-requeue: heartbeat stall during {step}"
+        self.container.runs.upsert(run)
+
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.auto_recovering",
+            entity_id=task.id,
+            payload={
+                "step": step,
+                "recovery_type": "heartbeat_stall",
+                "attempt": attempt_number,
+                "max_retries": max_retries,
+                "backoff_seconds": backoff_seconds,
+                "next_retry_at": next_retry_at,
+                "error": task.error,
+            },
+        )
+        self.bus.emit(
+            channel="tasks",
+            event_type="task.queued",
+            entity_id=task.id,
+            payload={"reason": "heartbeat_stall_auto_recovery", "step": step},
+        )
+        return True
 
     def _environment_recovery_settings(self) -> tuple[int, bool]:
         cfg = self.container.config.load()
@@ -3435,6 +3757,7 @@ class OrchestratorService:
         task.current_agent_id = None
         self.container.tasks.upsert(task)
 
+        run.accumulate_worker_seconds()
         run.status = "error"
         run.finished_at = now_iso()
         run.summary = f"Auto-requeue: recoverable environment issue during {step}"
@@ -3573,17 +3896,12 @@ class OrchestratorService:
             entity_id=task.id,
             payload={"gate": self._HUMAN_INTERVENTION_GATE, "step": step, "issues": issues},
         )
-        self.bus.emit(
-            channel="tasks",
-            event_type="task.blocked",
-            entity_id=task.id,
-            payload={
-                "error": task.error,
-                "gate": self._HUMAN_INTERVENTION_GATE,
-                "step": step,
-                "issues": issues,
-            },
-        )
+        self._emit_task_blocked(task, payload={
+            "error": task.error,
+            "gate": self._HUMAN_INTERVENTION_GATE,
+            "step": step,
+            "issues": issues,
+        })
 
     def _wait_for_gate(
         self,
@@ -3612,9 +3930,17 @@ class OrchestratorService:
         if task.run_ids:
             run = self.container.runs.get(task.run_ids[-1])
             if run and run.status == "in_progress" and not run.finished_at:
+                self._run_summarize_step(task, run, gate_context=gate_name)
+                run.accumulate_worker_seconds()
                 run.status = "waiting_gate"
                 run.finished_at = task.updated_at
-                run.summary = f"Paused at gate: {gate_name}"
+                # Use LLM-generated summary if available, fall back to static string
+                gate_summary = None
+                if run.steps:
+                    last = run.steps[-1]
+                    if isinstance(last, dict) and last.get("step") == "summary":
+                        gate_summary = last.get("summary")
+                run.summary = gate_summary or f"Paused at gate: {gate_name}"
                 self.container.runs.upsert(run)
         self.bus.emit(
             channel="tasks",
@@ -3624,18 +3950,31 @@ class OrchestratorService:
         )
         return False
 
-    def _run_summarize_step(self, task: Task, run: RunRecord) -> None:
-        """Auto-inject a summarize step using a lightweight LLM call."""
+    def _run_summarize_step(self, task: Task, run: RunRecord, gate_context: str | None = None) -> None:
+        """Auto-inject a summarize step using a lightweight LLM call.
+
+        Args:
+            task: Task that owns the run.
+            run: Run record to append the summary step to.
+            gate_context: If set, generates a gate-aware summary. If ``None``
+                (run-end call), skips generation when the last step is already
+                a summary (no new work since the gate).
+        """
         fn = getattr(self.worker_adapter, "generate_run_summary", None)
         if fn is None:
             return
+        # Skip redundant run-end summary when a gate summary is already current
+        if gate_context is None and run.steps:
+            last = run.steps[-1]
+            if isinstance(last, dict) and last.get("step") == "summary":
+                return
         try:
             worktree_path = task.metadata.get("worktree_dir") if isinstance(task.metadata, dict) else None
             project_dir = Path(worktree_path) if worktree_path else self.container.project_dir
             if not project_dir.is_dir():
                 project_dir = self.container.project_dir
             summary_started = now_iso()
-            summary_text = fn(task=task, run=run, project_dir=project_dir)
+            summary_text = fn(task=task, run=run, project_dir=project_dir, gate_context=gate_context)
             if isinstance(summary_text, str) and summary_text.strip():
                 run.steps.append({
                     "step": "summary",
@@ -3651,6 +3990,7 @@ class OrchestratorService:
     def _finalize_run(self, task: Task, run: RunRecord, *, status: str, summary: str) -> None:
         """Run the summarize step, then set run status/summary/finished_at."""
         self._run_summarize_step(task, run)
+        run.accumulate_worker_seconds()
         run.status = status
         run.finished_at = now_iso()
         run.summary = summary

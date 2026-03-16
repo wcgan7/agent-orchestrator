@@ -114,11 +114,10 @@ REFACTOR_PIPELINE = PipelineTemplate(
 RESEARCH_PIPELINE = PipelineTemplate(
     id="research",
     display_name="Research",
-    description="Analyze findings and produce a report.",
+    description="Analyze findings and produce a research analysis.",
     task_types=("research",),
     steps=(
         StepDef(name="analyze", display_name="Analyze"),
-        StepDef(name="report", display_name="Report", required=False),
     ),
 )
 
@@ -172,7 +171,6 @@ SECURITY_AUDIT_PIPELINE = PipelineTemplate(
     steps=(
         StepDef(name="scan_deps", display_name="Scan Dependencies"),
         StepDef(name="scan_code", display_name="Scan Code"),
-        StepDef(name="report", display_name="Generate Report"),
         StepDef(name="generate_tasks", display_name="Generate Fix Tasks"),
     ),
 )
@@ -180,12 +178,11 @@ SECURITY_AUDIT_PIPELINE = PipelineTemplate(
 REVIEW_PIPELINE = PipelineTemplate(
     id="review",
     display_name="Code Review",
-    description="Analyze existing work, review changes, and produce a report.",
+    description="Analyze existing work and review changes.",
     task_types=("review",),
     steps=(
         StepDef(name="analyze", display_name="Analyze"),
         StepDef(name="review", display_name="Review"),
-        StepDef(name="report", display_name="Report", required=False),
     ),
 )
 
@@ -196,6 +193,36 @@ COMMIT_REVIEW_PIPELINE = PipelineTemplate(
     task_types=("commit_review",),
     steps=(
         StepDef(name="commit_review", display_name="Review Commit"),
+        StepDef(name="implement", display_name="Implement Fixes"),
+        StepDef(name="verify", display_name="Verify"),
+        StepDef(name="review", display_name="Review"),
+        StepDef(name="commit", display_name="Commit"),
+    ),
+    metadata={"supports_skip_to_precommit": True},
+)
+
+PR_REVIEW_PIPELINE = PipelineTemplate(
+    id="pr_review",
+    display_name="PR Review",
+    description="Review a GitHub pull request's changes, fix issues found, and verify corrections.",
+    task_types=("pr_review",),
+    steps=(
+        StepDef(name="pr_review", display_name="Review PR"),
+        StepDef(name="implement", display_name="Implement Fixes"),
+        StepDef(name="verify", display_name="Verify"),
+        StepDef(name="review", display_name="Review"),
+        StepDef(name="commit", display_name="Commit"),
+    ),
+    metadata={"supports_skip_to_precommit": True},
+)
+
+MR_REVIEW_PIPELINE = PipelineTemplate(
+    id="mr_review",
+    display_name="MR Review",
+    description="Review a GitLab merge request's changes, fix issues found, and verify corrections.",
+    task_types=("mr_review",),
+    steps=(
+        StepDef(name="mr_review", display_name="Review MR"),
         StepDef(name="implement", display_name="Implement Fixes"),
         StepDef(name="verify", display_name="Verify"),
         StepDef(name="review", display_name="Review"),
@@ -243,7 +270,6 @@ SPIKE_PIPELINE = PipelineTemplate(
     steps=(
         StepDef(name="analyze", display_name="Analyze Context"),
         StepDef(name="prototype", display_name="Prototype"),
-        StepDef(name="report", display_name="Report"),
     ),
 )
 
@@ -279,7 +305,6 @@ VERIFY_ONLY_PIPELINE = PipelineTemplate(
     task_types=("verify_only", "verify"),
     steps=(
         StepDef(name="verify", display_name="Run Checks"),
-        StepDef(name="report", display_name="Report Results"),
     ),
 )
 
@@ -297,6 +322,8 @@ BUILTIN_TEMPLATES: dict[str, PipelineTemplate] = {
         SECURITY_AUDIT_PIPELINE,
         REVIEW_PIPELINE,
         COMMIT_REVIEW_PIPELINE,
+        PR_REVIEW_PIPELINE,
+        MR_REVIEW_PIPELINE,
         PERFORMANCE_PIPELINE,
         HOTFIX_PIPELINE,
         SPIKE_PIPELINE,

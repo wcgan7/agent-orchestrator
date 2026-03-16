@@ -302,6 +302,36 @@ Behavior:
 Response:
 - `task` — the newly created review task payload.
 
+### `POST /api/tasks/{task_id}/review-mr`
+Create an MR-review task from a GitLab merge request.
+
+Query parameters:
+- `mr_number` (required) — GitLab merge request number.
+
+Behavior:
+- Validates source task exists and `glab` CLI is installed.
+- Fetches MR metadata, diff, and diff stat via `glab` / `git`.
+- Creates a new `mr_review` task pre-loaded with MR context.
+- Returns 409 if a non-failed/cancelled review already exists for the same task + MR.
+
+Response:
+- `task` — the newly created review task payload.
+
+### `POST /api/tasks/{task_id}/review-pr`
+Create a PR-review task from a GitHub pull request.
+
+Query parameters:
+- `pr_number` (required) — GitHub pull request number.
+
+Behavior:
+- Validates source task exists and `gh` CLI is installed.
+- Fetches PR metadata, diff, and diff stat via `gh` / `git`.
+- Creates a new `pr_review` task pre-loaded with PR context.
+- Returns 409 if a non-failed/cancelled review already exists for the same task + PR.
+
+Response:
+- `task` — the newly created review task payload.
+
 ### `GET /api/tasks/{task_id}/workdoc`
 Return task work document payload.
 

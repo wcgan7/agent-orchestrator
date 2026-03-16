@@ -6,7 +6,7 @@ select = ["D"]
 ignore = ["D105", "D107", "D203", "D213"]
 
 [lint.per-file-ignores]
-"tests/**/*.py" = ["D100", "D103", "D104", "D205", "D209", "D403"]
+"tests/**/*.py" = ["D100", "D101", "D102", "D103", "D104", "D205", "D209", "D403"]
 
 [lint.pydocstyle]
 convention = "google"

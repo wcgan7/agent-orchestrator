@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Sequence
@@ -21,6 +22,8 @@ from ...workers.run import WorkerRunResult, run_worker
 from ..domain.models import RunRecord, Task, now_iso
 from ..domain.scope_contract import normalize_scope_contract
 from ..storage.container import Container
+from .env_resolver import resolve_env_vars
+from .venv_detector import detect_python_venv
 from .environment_preflight import (
     provider_has_capabilities,
     required_capabilities_for_step,
@@ -33,7 +36,7 @@ from .worker_adapter import StepResult
 logger = logging.getLogger(__name__)
 
 # Step category mapping
-_PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine", "commit_review"}
+_PLANNING_STEPS = {"plan", "analyze", "plan_refine", "initiative_plan", "initiative_plan_refine", "commit_review", "pr_review", "mr_review"}
 _IMPL_STEPS = {"implement", "prototype"}
 _FIX_STEPS = {"implement_fix"}
 _VERIFY_STEPS = {"verify", "benchmark"}
@@ -63,6 +66,11 @@ _STEP_TIMEOUT_ALIASES = {"implement_fix": "implement"}
 _DEFAULT_STEP_TIMEOUT_SECONDS = 0  # 0 = no timeout
 _DEFAULT_HEARTBEAT_SECONDS = 60
 _DEFAULT_HEARTBEAT_GRACE_SECONDS = 240
+_DEFAULT_HEARTBEAT_GRACE_BY_STEP: dict[str, int] = {
+    "implement": 600,
+    "implement_fix": 600,
+}
+_HEARTBEAT_STALL_RETRY_GRACE_MULTIPLIER = 1.5
 
 # ---------------------------------------------------------------------------
 # Prompt layers
@@ -91,6 +99,7 @@ _SETTINGS_PROMPT_STEPS: tuple[str, ...] = (
     "benchmark",
     "commit_review",
     "diagnose",
+    "mr_review",
     "generate_tasks",
     "implement",
     "implement_fix",
@@ -99,6 +108,7 @@ _SETTINGS_PROMPT_STEPS: tuple[str, ...] = (
     "pipeline_classify",
     "plan",
     "plan_refine",
+    "pr_review",
     "profile",
     "prototype",
     "report",
@@ -198,6 +208,10 @@ def _instruction_prompt_name(step: str, task_type: str) -> str:
     pipeline_id = PipelineRegistry().resolve_for_task_type(task_type).id
     if step == "commit_review":
         return "steps/commit_review.md"
+    if step == "pr_review":
+        return "steps/pr_review.md"
+    if step == "mr_review":
+        return "steps/mr_review.md"
     if step == "plan_refine":
         return "steps/plan_refine.md"
     if step == "initiative_plan_refine":
@@ -249,6 +263,52 @@ def _normalize_prompt_injections(value: Any) -> dict[str, str]:
 def get_configurable_step_prompt_defaults() -> dict[str, str]:
     """Return default prompt text for settings-managed pipeline steps."""
     return {step: load_prompt(_instruction_prompt_name(step, "feature")) for step in _SETTINGS_PROMPT_STEPS}
+
+
+def _is_subpath(child: Path, parent: Path) -> bool:
+    """Return True if *child* is a descendant of *parent*."""
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _apply_venv_to_defaults(
+    defaults: dict[str, str],
+    venv_bin_dir: Path,
+    venv_rel_prefix: str,
+) -> dict[str, str]:
+    """Prefix default command executables with the venv bin path when available.
+
+    For each command, checks whether the executable (first token) exists in
+    *venv_bin_dir*.  If so, replaces it with a relative path like
+    ``.venv/bin/pytest`` so ``_resolve_command_paths`` can later resolve it
+    to an absolute path for worktree support.
+
+    Args:
+        defaults: Default commands dict (e.g. ``{"test": "pytest", ...}``).
+        venv_bin_dir: Absolute path to the venv's ``bin/`` directory.
+        venv_rel_prefix: Relative prefix from project_dir to venv bin dir
+            (e.g. ``".venv/bin"``).
+
+    Returns:
+        New dict with executables prefixed where the binary exists in the venv.
+    """
+    result: dict[str, str] = {}
+    for key, cmd in defaults.items():
+        parts = cmd.split(None, 1)
+        if not parts:
+            result[key] = cmd
+            continue
+        exe_name = parts[0]
+        # Only prefix bare command names (no path separators)
+        if "/" not in exe_name and (venv_bin_dir / exe_name).is_file():
+            prefixed = f"{venv_rel_prefix}/{exe_name}"
+            result[key] = prefixed if len(parts) == 1 else f"{prefixed} {parts[1]}"
+        else:
+            result[key] = cmd
+    return result
 
 
 def _resolve_command_paths(
@@ -341,6 +401,21 @@ def _format_project_commands(
     return "\n".join(parts)
 
 
+def _merge_token_usage(base: dict[str, Any], additional: dict[str, Any]) -> dict[str, Any]:
+    """Sum token counts and cost from *additional* into *base*, returning a new dict."""
+    merged = dict(base)
+    for key in ("input_tokens", "output_tokens"):
+        base_val = base.get(key)
+        add_val = additional.get(key)
+        if base_val is not None or add_val is not None:
+            merged[key] = (base_val or 0) + (add_val or 0)
+    base_cost = base.get("cost_usd")
+    add_cost = additional.get("cost_usd")
+    if base_cost is not None or add_cost is not None:
+        merged["cost_usd"] = (base_cost or 0.0) + (add_cost or 0.0)
+    return merged
+
+
 def _step_category(step: str) -> str:
     if step in _PLANNING_STEPS:
         return "planning"
@@ -368,6 +443,31 @@ def _step_category(step: str) -> str:
         return "pipeline_classification"
     return "general"
 
+
+# Steps that support early pipeline completion when no action is needed.
+_EARLY_COMPLETE_STEPS = {"commit_review", "pr_review", "mr_review"}
+
+
+def _is_no_action_needed(step: str, summary: str | None) -> bool:
+    """Detect whether a step's output indicates no further action is required.
+
+    Applies to review steps listed in ``_EARLY_COMPLETE_STEPS``
+    (``commit_review``, ``pr_review``, ``mr_review``).  The review prompts
+    instruct the worker to output "No issues found" when the changeset is
+    clean.
+
+    Args:
+        step: Pipeline step name that produced the output.
+        summary: Worker summary text to inspect.
+
+    Returns:
+        True if the step signals that no downstream work is needed.
+    """
+    if step not in _EARLY_COMPLETE_STEPS:
+        return False
+    if not summary:
+        return False
+    return "no issues found" in summary.lower()
 
 
 _WORKDOC_STEP_INSTRUCTIONS: dict[str, str] = {
@@ -780,6 +880,32 @@ def _inject_required_verify_commands(
     return merged
 
 
+_NPM_PRIMARY_COMMAND_RE = re.compile(r"^\s*npm\s+(?:run\s+)?(\w[\w-]*)")
+
+
+def _filter_npm_commands_by_scripts(
+    commands: dict[str, str],
+    project_dir: Path,
+) -> dict[str, str]:
+    """Remove commands whose primary npm script is absent from package.json.
+
+    Only filters when ``npm`` is the first command in the string.  Compound
+    commands where ``npm`` appears as a fallback (e.g. after ``||``) are kept
+    because the primary command works independently.
+    """
+    pkg_path = project_dir / "package.json"
+    scripts = _load_package_scripts(pkg_path)
+    filtered: dict[str, str] = {}
+    for key, cmd in commands.items():
+        match = _NPM_PRIMARY_COMMAND_RE.match(cmd)
+        if match:
+            script_name = match.group(1)
+            if script_name not in scripts:
+                continue
+        filtered[key] = cmd
+    return filtered
+
+
 def _has_prisma_schema(project_dir: Path) -> bool:
     """Return whether this task worktree contains a Prisma schema."""
     return (project_dir / "prisma" / "schema.prisma").exists()
@@ -1110,14 +1236,47 @@ def build_step_prompt(
             parts.append(f"## Commit diff to review ({_cr_sha[:12]})" if _cr_sha else "## Commit diff to review")
             parts.append(f"```diff\n{_cr_diff}\n```")
 
+    # Inject source context for pr_review / mr_review steps.
+    if step in ("pr_review", "mr_review") and isinstance(task.metadata, dict):
+        _pr_desc = str(task.metadata.get("source_description") or "").strip()
+        _pr_url = str(task.metadata.get("source_url") or "").strip()
+        _pr_diff = str(task.metadata.get("source_diff") or "").strip()
+        _pr_ref = str(task.metadata.get("source_ref") or "").strip()
+        _pr_base = str(task.metadata.get("source_base_ref") or "").strip()
+        _pr_stat = str(task.metadata.get("source_stat") or "").strip()
+        if _pr_desc:
+            parts.append("")
+            parts.append("## PR/MR description")
+            parts.append(_pr_desc)
+        if _pr_url:
+            parts.append("")
+            parts.append(f"## Source URL\n{_pr_url}")
+        if _pr_stat:
+            parts.append("")
+            parts.append("## Diff stat (all changed files)")
+            parts.append(f"```\n{_pr_stat}\n```")
+        if _pr_diff:
+            parts.append("")
+            ref_label = _pr_ref or "head"
+            base_label = _pr_base or "base"
+            label = f"PR/MR diff ({base_label}...{ref_label})"
+            parts.append(f"## {label}")
+            parts.append(f"```diff\n{_pr_diff}\n```")
+
     # Inject outputs from prior pipeline steps.
     # For implement/implement_fix, rely on the workdoc as the single source of truth.
     step_outputs = task.metadata.get("step_outputs") if isinstance(task.metadata, dict) else None
+    has_plan_override = (
+        isinstance(task.metadata, dict)
+        and task.metadata.get("plan_for_generation")
+        and step == "generate_tasks"
+    )
     if (
         isinstance(step_outputs, dict)
         and step_outputs
         and category in _STEP_OUTPUT_INJECTION
         and step not in {"implement", "implement_fix", "initiative_plan"}
+        and not has_plan_override
     ):
         inject_keys = _STEP_OUTPUT_INJECTION[category]
         if step == "report" and task.task_type in {"security", "security_audit"}:
@@ -1251,7 +1410,7 @@ def build_step_prompt(
 
     # Include plan context for task generation
     plan_for_generation = task.metadata.get("plan_for_generation") if isinstance(task.metadata, dict) else None
-    if plan_for_generation and category == "task_generation" and task.task_type != "initiative_plan":
+    if plan_for_generation and category == "task_generation":
         parts.append("")
         parts.append("## Plan to decompose into subtasks")
         parts.append(str(plan_for_generation))
@@ -1595,6 +1754,15 @@ class LiveWorkerAdapter:
                 configuration, repositories, and project paths.
         """
         self._container = container
+        self._cancel_events: dict[str, threading.Event] = {}
+        self._cancel_events_lock = threading.Lock()
+
+    def signal_cancel(self, task_id: str) -> None:
+        """Set the cancel event for a running task to unblock its worker immediately."""
+        with self._cancel_events_lock:
+            event = self._cancel_events.get(task_id)
+        if event is not None:
+            event.set()
 
     @staticmethod
     def _coerce_timeout(value: Any, default: int = _DEFAULT_STEP_TIMEOUT_SECONDS) -> int:
@@ -1640,15 +1808,35 @@ class LiveWorkerAdapter:
         return default_timeout
 
     @staticmethod
-    def _heartbeat_settings(cfg: dict[str, Any]) -> tuple[int, int]:
+    def _heartbeat_settings(
+        cfg: dict[str, Any],
+        *,
+        step: str = "",
+        is_heartbeat_stall_retry: bool = False,
+    ) -> tuple[int, int]:
         workers_cfg = cfg.get("workers") if isinstance(cfg, dict) else {}
         workers_cfg = workers_cfg if isinstance(workers_cfg, dict) else {}
         heartbeat_seconds = LiveWorkerAdapter._coerce_timeout(
             workers_cfg.get("heartbeat_seconds"), _DEFAULT_HEARTBEAT_SECONDS
         )
-        heartbeat_grace_seconds = LiveWorkerAdapter._coerce_timeout(
-            workers_cfg.get("heartbeat_grace_seconds"), _DEFAULT_HEARTBEAT_GRACE_SECONDS
-        )
+        # Resolve grace: per-step config → global config → built-in per-step default → 240s
+        grace_by_step = workers_cfg.get("heartbeat_grace_by_step")
+        grace_by_step = grace_by_step if isinstance(grace_by_step, dict) else {}
+        global_grace_raw = workers_cfg.get("heartbeat_grace_seconds")
+        if step and step in grace_by_step:
+            heartbeat_grace_seconds = LiveWorkerAdapter._coerce_timeout(
+                grace_by_step[step], _DEFAULT_HEARTBEAT_GRACE_SECONDS
+            )
+        elif global_grace_raw is not None:
+            heartbeat_grace_seconds = LiveWorkerAdapter._coerce_timeout(
+                global_grace_raw, _DEFAULT_HEARTBEAT_GRACE_SECONDS
+            )
+        elif step and step in _DEFAULT_HEARTBEAT_GRACE_BY_STEP:
+            heartbeat_grace_seconds = _DEFAULT_HEARTBEAT_GRACE_BY_STEP[step]
+        else:
+            heartbeat_grace_seconds = _DEFAULT_HEARTBEAT_GRACE_SECONDS
+        if is_heartbeat_stall_retry:
+            heartbeat_grace_seconds = int(heartbeat_grace_seconds * _HEARTBEAT_STALL_RETRY_GRACE_MULTIPLIER)
         if heartbeat_grace_seconds < heartbeat_seconds:
             heartbeat_grace_seconds = heartbeat_seconds
         return heartbeat_seconds, heartbeat_grace_seconds
@@ -1701,9 +1889,22 @@ class LiveWorkerAdapter:
             cfg = self._container.config.load()
             runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
             spec = resolve_worker_for_step(runtime, step)
+            # Task-level provider override: explicit user choice bypasses routing
+            task_provider = str(getattr(task, "worker_provider", "") or "").strip()
+            if not task_provider and isinstance(task.metadata, dict):
+                task_provider = str(task.metadata.get("worker_provider") or "").strip()
+            if task_provider:
+                if task_provider not in runtime.providers:
+                    available_names = ", ".join(sorted(runtime.providers.keys()))
+                    return StepResult(status="error", summary=f"Task worker_provider '{task_provider}' not found (available: {available_names})")
+                spec = runtime.providers[task_provider]
+                if spec.type in {"codex", "claude"} and not spec.command:
+                    return StepResult(status="error", summary=f"Worker '{spec.name}' missing required 'command'")
+                if spec.type == "ollama" and (not spec.endpoint or not spec.model):
+                    return StepResult(status="error", summary=f"Worker '{spec.name}' missing 'endpoint'/'model'")
             env_cfg = workers_environment_config(cfg)
             required_caps = required_capabilities_for_step(step=step, project_dir=project_dir, cfg=cfg)
-            if env_cfg.get("capability_fallback", True) and required_caps:
+            if not task_provider and env_cfg.get("capability_fallback", True) and required_caps:
                 if not provider_has_capabilities(
                     provider_capabilities=spec.capabilities,
                     required_capabilities=required_caps,
@@ -1796,6 +1997,7 @@ class LiveWorkerAdapter:
                 if isinstance(cmds, dict) and cmds:
                     project_commands[lang] = dict(cmds)
         # Fill in defaults for detected languages with no configured commands
+        venv_info = detect_python_venv(project_dir)
         if langs:
             if project_commands is None:
                 project_commands = {}
@@ -1803,7 +2005,14 @@ class LiveWorkerAdapter:
                 if lang not in project_commands:
                     defaults = _DEFAULT_PROJECT_COMMANDS.get(lang)
                     if defaults:
-                        project_commands[lang] = dict(defaults)
+                        cmds = dict(defaults)
+                        if lang == "python" and venv_info is not None:
+                            rel_prefix = str(venv_info.path.relative_to(project_dir) / "bin") if _is_subpath(venv_info.path, project_dir) else str(venv_info.bin_dir)
+                            cmds = _apply_venv_to_defaults(cmds, venv_info.bin_dir, rel_prefix)
+                        if lang in ("javascript", "typescript"):
+                            cmds = _filter_npm_commands_by_scripts(cmds, project_dir)
+                        if cmds:
+                            project_commands[lang] = cmds
             if not project_commands:
                 project_commands = None
         # Resolve relative executable paths against the *original* project dir
@@ -1840,7 +2049,13 @@ class LiveWorkerAdapter:
         stdout_path = run_dir / "stdout.log"
         stderr_path = run_dir / "stderr.log"
         timeout_seconds = self._timeout_for_step(task, step)
-        heartbeat_seconds, heartbeat_grace_seconds = self._heartbeat_settings(cfg)
+        is_stall_retry = bool(
+            isinstance(task.metadata, dict)
+            and task.metadata.get("heartbeat_stall_recovery_attempts_by_step", {}).get(step)
+        )
+        heartbeat_seconds, heartbeat_grace_seconds = self._heartbeat_settings(
+            cfg, step=step, is_heartbeat_stall_retry=is_stall_retry,
+        )
         if not isinstance(task.metadata, dict):
             task.metadata = {}
         log_meta = {
@@ -1861,6 +2076,20 @@ class LiveWorkerAdapter:
             fresh = self._container.tasks.get(task.id)
             return fresh is not None and fresh.status == "cancelled"
 
+        # Build merged env vars for subprocess workers (codex/claude only).
+        # Always pass the resolved dict so auto-detected, config, and task
+        # env vars reach the subprocess.
+        worker_env: dict[str, str] | None = None
+        if spec.type in {"codex", "claude"}:
+            worker_env = resolve_env_vars(project_dir=project_dir, cfg=cfg, task=task)
+
+        # Create a per-invocation cancel event so cancel_task() can unblock
+        # the worker poll loop immediately instead of waiting up to
+        # poll_interval seconds.
+        cancel_event = threading.Event()
+        with self._cancel_events_lock:
+            self._cancel_events[task.id] = cancel_event
+
         try:
             result = run_worker(
                 spec=spec,
@@ -1872,12 +2101,16 @@ class LiveWorkerAdapter:
                 heartbeat_grace_seconds=heartbeat_grace_seconds,
                 progress_path=progress_path,
                 is_cancelled=_check_task_cancelled,
+                env=worker_env,
+                cancel_event=cancel_event,
             )
         except WorkerCancelledError:
             raise  # Let the orchestrator handle cancellation
         except Exception as exc:
             return StepResult(status="error", summary=f"Worker execution failed: {exc}")
         finally:
+            with self._cancel_events_lock:
+                self._cancel_events.pop(task.id, None)
             if not isinstance(task.metadata, dict):
                 task.metadata = {}
             task.metadata.pop("active_logs", None)
@@ -1889,6 +2122,11 @@ class LiveWorkerAdapter:
         step_result = self._map_result(result, spec, step, task, project_dir)
         raw_json = _extract_json(result.response_text) if result.response_text else None
         raw_is_json = isinstance(raw_json, dict)
+
+        # Propagate token usage from the primary worker call.
+        primary_token_usage = dict(result.token_usage) if result.token_usage else {}
+        if primary_token_usage:
+            step_result.token_usage = dict(primary_token_usage)
 
         # 6. For verification steps that fell through to default "ok"
         #    (no structured summary), run a lightweight LLM formatter to parse the
@@ -1906,6 +2144,10 @@ class LiveWorkerAdapter:
                 project_dir=project_dir,
                 task=task,
             )
+            # Merge primary + formatter token usage into the step total.
+            fmt_usage = step_result.token_usage or {}
+            merged = _merge_token_usage(primary_token_usage, fmt_usage) if (primary_token_usage or fmt_usage) else None
+            step_result.token_usage = merged
 
         # 7. For review steps that fell through with no findings,
         #    run a lightweight LLM formatter to extract structured findings.
@@ -1921,6 +2163,10 @@ class LiveWorkerAdapter:
                 response_text=result.response_text,
                 project_dir=project_dir,
             )
+            # Merge primary + formatter token usage into the step total.
+            fmt_usage = step_result.token_usage or {}
+            merged = _merge_token_usage(primary_token_usage, fmt_usage) if (primary_token_usage or fmt_usage) else None
+            step_result.token_usage = merged
 
         # 8. For task generation steps that fell through with no
         #    generated_tasks, run a lightweight LLM formatter to extract them.
@@ -1936,6 +2182,14 @@ class LiveWorkerAdapter:
                 response_text=result.response_text,
                 project_dir=project_dir,
             )
+            # Merge primary + formatter token usage into the step total.
+            fmt_usage = step_result.token_usage or {}
+            merged = _merge_token_usage(primary_token_usage, fmt_usage) if (primary_token_usage or fmt_usage) else None
+            step_result.token_usage = merged
+
+        # 9. Check if the step signals that no further pipeline action is needed.
+        if step_result.status == "ok" and _is_no_action_needed(step, step_result.summary):
+            step_result = replace(step_result, no_action_needed=True)
 
         return step_result
 
@@ -1964,7 +2218,7 @@ class LiveWorkerAdapter:
                 prompt=formatter_prompt,
                 project_dir=project_dir,
                 run_dir=fmt_run_dir,
-                timeout_seconds=60,
+                timeout_seconds=0,
                 heartbeat_seconds=30,
                 heartbeat_grace_seconds=60,
                 progress_path=progress_path,
@@ -1975,10 +2229,12 @@ class LiveWorkerAdapter:
         finally:
             shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
+        fmt_token_usage = fmt_result.token_usage or None
+
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
             logger.debug("Verify formatter returned unparseable output")
-            return StepResult(status="error", summary="Verification output formatter returned invalid JSON")
+            return StepResult(status="error", summary="Verification output formatter returned invalid JSON", token_usage=fmt_token_usage)
 
         status_val = str(parsed.get("status", "")).lower().strip()
         if status_val not in _VERIFY_ALLOWED_STATUSES:
@@ -1988,7 +2244,7 @@ class LiveWorkerAdapter:
         if isinstance(task.metadata, dict):
             task.metadata["verify_reason_code"] = reason_code
         if status_val == "fail":
-            return StepResult(status="error", summary=str(summary) if summary else response_text[:500])
+            return StepResult(status="error", summary=str(summary) if summary else response_text[:500], token_usage=fmt_token_usage)
         if status_val == "environment":
             note = str(summary) if summary else response_text[:500]
             note, env_kind, normalized_reason = _normalize_verify_environment_note(
@@ -2005,8 +2261,8 @@ class LiveWorkerAdapter:
                     task.metadata["verify_environment_kind"] = env_kind
                 else:
                     task.metadata.pop("verify_environment_kind", None)
-            return StepResult(status="ok", summary=note)
-        return StepResult(status="ok", summary=str(summary) if summary else None)
+            return StepResult(status="ok", summary=note, token_usage=fmt_token_usage)
+        return StepResult(status="ok", summary=str(summary) if summary else None, token_usage=fmt_token_usage)
 
     # ------------------------------------------------------------------
     # Review-output formatter (codex / claude)
@@ -2032,7 +2288,7 @@ class LiveWorkerAdapter:
                 prompt=formatter_prompt,
                 project_dir=project_dir,
                 run_dir=fmt_run_dir,
-                timeout_seconds=60,
+                timeout_seconds=0,
                 heartbeat_seconds=30,
                 heartbeat_grace_seconds=60,
                 progress_path=progress_path,
@@ -2043,10 +2299,12 @@ class LiveWorkerAdapter:
         finally:
             shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
+        fmt_token_usage = fmt_result.token_usage or None
+
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
             logger.debug("Review formatter returned unparseable output")
-            return StepResult(status="error", summary="Review output formatter returned invalid JSON")
+            return StepResult(status="error", summary="Review output formatter returned invalid JSON", token_usage=fmt_token_usage)
 
         findings = parsed.get("findings")
         human_issues = parsed.get("human_blocking_issues")
@@ -2058,9 +2316,9 @@ class LiveWorkerAdapter:
             ]
             human_blocking = [h for h in human_blocking if h["summary"]] or None
         if isinstance(findings, list):
-            return StepResult(status="ok", findings=_normalize_review_findings(findings), human_blocking_issues=human_blocking)
+            return StepResult(status="ok", findings=_normalize_review_findings(findings), human_blocking_issues=human_blocking, token_usage=fmt_token_usage)
 
-        return StepResult(status="error", summary="Review output formatter returned no findings field")
+        return StepResult(status="error", summary="Review output formatter returned no findings field", token_usage=fmt_token_usage)
 
     # ------------------------------------------------------------------
     # Task-generation-output formatter (codex / claude)
@@ -2086,7 +2344,7 @@ class LiveWorkerAdapter:
                 prompt=formatter_prompt,
                 project_dir=project_dir,
                 run_dir=fmt_run_dir,
-                timeout_seconds=90,
+                timeout_seconds=0,
                 heartbeat_seconds=30,
                 heartbeat_grace_seconds=60,
                 progress_path=progress_path,
@@ -2097,10 +2355,12 @@ class LiveWorkerAdapter:
         finally:
             shutil.rmtree(fmt_run_dir, ignore_errors=True)
 
+        fmt_token_usage = fmt_result.token_usage or None
+
         parsed = _extract_json(fmt_result.response_text or "")
         if not isinstance(parsed, dict):
             logger.debug("Task generation formatter returned unparseable output")
-            return StepResult(status="error", summary="Task generation output formatter returned invalid JSON")
+            return StepResult(status="error", summary="Task generation output formatter returned invalid JSON", token_usage=fmt_token_usage)
 
         tasks = (
             parsed.get("tasks")
@@ -2108,9 +2368,9 @@ class LiveWorkerAdapter:
             or parsed.get("items")
         )
         if isinstance(tasks, list):
-            return StepResult(status="ok", generated_tasks=tasks)
+            return StepResult(status="ok", generated_tasks=tasks, token_usage=fmt_token_usage)
 
-        return StepResult(status="error", summary="Task generation output formatter returned no tasks list")
+        return StepResult(status="error", summary="Task generation output formatter returned no tasks list", token_usage=fmt_token_usage)
 
     def _map_result(
         self,
@@ -2254,6 +2514,9 @@ class LiveWorkerAdapter:
                 if isinstance(tasks, list):
                     return StepResult(status="ok", generated_tasks=tasks)
 
+        if category == "reporting" and result.response_text:
+            return StepResult(status="ok", summary=result.response_text.strip()[:20000])
+
         # Parse remaining structured output for ollama-specific categories.
         if spec.type == "ollama" and result.response_text:
             return self._parse_ollama_output(result.response_text, step)
@@ -2309,6 +2572,7 @@ class LiveWorkerAdapter:
         task: Task,
         run: RunRecord,
         project_dir: Path,
+        gate_context: str | None = None,
     ) -> str:
         """Use a short LLM call to produce a human-readable execution summary."""
         # Build step log section
@@ -2349,7 +2613,17 @@ class LiveWorkerAdapter:
         workdoc_snapshot = _load_workdoc_snapshot(task, project_dir)
         run_status = str(run.status or "unknown")
 
+        if gate_context:
+            role_framing = (
+                f"You are writing a progress summary. The pipeline is paused at "
+                f"a human approval gate ({gate_context}). Focus on what has been "
+                f"accomplished so far and what decision the human needs to make to proceed."
+            )
+        else:
+            role_framing = "You are a run-end summary writer."
+
         prompt = load_prompt("formatters/summarize.md").format(
+            role_framing=role_framing,
             task_title=task.title,
             description_section=description_section,
             task_type=task.task_type,
@@ -2368,7 +2642,7 @@ class LiveWorkerAdapter:
                 prompt=prompt,
                 project_dir=project_dir,
                 run_dir=fmt_run_dir,
-                timeout_seconds=120,
+                timeout_seconds=0,
                 heartbeat_seconds=30,
                 heartbeat_grace_seconds=90,
                 progress_path=progress_path,
@@ -2389,13 +2663,15 @@ class LiveWorkerAdapter:
         raw = (fmt_result.response_text or "").strip()
         return raw[:2000] if raw else "Summary generation failed"
 
-    def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path) -> str:
+    def generate_run_summary(self, *, task: Task, run: RunRecord, project_dir: Path, gate_context: str | None = None) -> str:
         """Produce a worker-generated summary for a completed run.
 
         Args:
             task (Task): Task that owns the completed run.
             run (RunRecord): Completed run record to summarize.
             project_dir (Path): Project root used to resolve workdoc context.
+            gate_context (str | None): Gate name when generating a gate-pause
+                summary, or ``None`` for a run-end summary.
 
         Returns:
             str: Worker-produced summary text, or an empty string when summary
@@ -2418,4 +2694,69 @@ class LiveWorkerAdapter:
             task=task,
             run=run,
             project_dir=project_dir,
+            gate_context=gate_context,
         )
+
+    def generate_recommended_action(
+        self,
+        *,
+        task: Task,
+        blocked_step: str,
+        error_message: str,
+    ) -> str:
+        """Generate an LLM-powered recommended action for a blocked task.
+
+        Uses the same worker resolution as ``generate_run_summary`` (the
+        ``summarize`` routing key) so no new worker configuration is needed.
+
+        Returns:
+            str: Recommended action text, or empty string when unavailable.
+        """
+        try:
+            cfg = self._container.config.load()
+            runtime = get_workers_runtime_config(config=cfg, codex_command_fallback="codex exec")
+            spec = resolve_worker_for_step(runtime, "summarize")
+            available, reason = test_worker(spec)
+            if not available:
+                logger.debug("Recommended-action worker not available: %s", reason)
+                return ""
+        except Exception:
+            logger.debug("Cannot resolve worker for recommended-action generation")
+            return ""
+
+        def _escape_braces(s: str) -> str:
+            return s.replace("{", "{{").replace("}", "}}")
+
+        prompt = load_prompt("formatters/recommended_action.md").format(
+            task_title=_escape_braces(task.title),
+            task_type=_escape_braces(task.task_type),
+            blocked_step=_escape_braces(blocked_step),
+            error_message=_escape_braces(error_message),
+        )
+
+        fmt_run_dir = Path(tempfile.mkdtemp(dir=str(self._container.state_root)))
+        progress_path = fmt_run_dir / "progress.json"
+        try:
+            fmt_result = run_worker(
+                spec=spec,
+                prompt=prompt,
+                project_dir=self._container.project_dir,
+                run_dir=fmt_run_dir,
+                timeout_seconds=0,
+                heartbeat_seconds=30,
+                heartbeat_grace_seconds=90,
+                progress_path=progress_path,
+            )
+        except Exception:
+            logger.debug("Recommended-action LLM call failed", exc_info=True)
+            return ""
+        finally:
+            shutil.rmtree(fmt_run_dir, ignore_errors=True)
+
+        parsed = _extract_json(fmt_result.response_text or "")
+        if isinstance(parsed, dict):
+            action = parsed.get("recommended_action")
+            if action:
+                return str(action).strip()
+
+        return ""

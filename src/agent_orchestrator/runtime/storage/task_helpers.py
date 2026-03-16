@@ -34,12 +34,19 @@ def is_retry_backoff_elapsed(task: Task) -> bool:
     """
     if task.status != "queued" or not isinstance(task.metadata, dict):
         return True
-    raw_not_before = str(task.metadata.get("environment_next_retry_at") or "").strip()
-    if not raw_not_before:
-        return True
-    try:
-        not_before = datetime.fromisoformat(raw_not_before.replace("Z", "+00:00"))
-    except Exception:
+    # Check all backoff timestamps and use the latest (most restrictive).
+    not_before: datetime | None = None
+    for key in ("environment_next_retry_at", "heartbeat_stall_next_retry_at"):
+        raw = str(task.metadata.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        if not_before is None or parsed > not_before:
+            not_before = parsed
+    if not_before is None:
         return True
     return datetime.now(timezone.utc) >= not_before
 

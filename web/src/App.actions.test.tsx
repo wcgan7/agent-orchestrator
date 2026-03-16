@@ -551,9 +551,9 @@ describe('App action coverage', () => {
       expect(body.guidance).toBe('Looks solid.')
     })
 
-    fireEvent.click(screen.getByRole('button', { name: /Workers/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
-      expect(screen.getByRole('heading', { name: /^Workers$/i })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: /^Settings$/i })).toBeInTheDocument()
     })
     await waitFor(() => {
       expect(
@@ -578,16 +578,13 @@ describe('App action coverage', () => {
     fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: /Settings/i })).toBeInTheDocument()
-      expect(screen.getByLabelText(/Orchestrator concurrency/i)).toBeInTheDocument()
     })
 
-    fireEvent.change(screen.getByLabelText(/Orchestrator concurrency/i), { target: { value: '4' } })
-    fireEvent.click(screen.getByLabelText(/Auto dependency analysis/i))
-    fireEvent.change(screen.getByLabelText(/Max review attempts/i), { target: { value: '5' } })
-    fireEvent.change(screen.getByLabelText(/Default role/i), { target: { value: 'reviewer' } })
-    fireEvent.change(screen.getByLabelText(/Task type role map/i), { target: { value: '{"bug":"debugger"}' } })
-    fireEvent.change(screen.getByLabelText(/Role provider overrides/i), { target: { value: '{"reviewer":"codex"}' } })
-    fireEvent.change(screen.getByLabelText(/Default worker provider/i), { target: { value: 'claude' } })
+    // Providers tab (default) — click Claude row to set as default
+    await waitFor(() => {
+      expect(screen.getByText('Claude')).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByText('Claude').closest('[role="button"]')!)
     fireEvent.change(screen.getByLabelText(/Configure provider/i), { target: { value: 'codex' } })
     fireEvent.change(screen.getByLabelText(/Codex command/i), { target: { value: 'codex exec' } })
     fireEvent.change(screen.getByLabelText(/Codex model/i), { target: { value: 'gpt-5-codex' } })
@@ -601,21 +598,43 @@ describe('App action coverage', () => {
     fireEvent.change(screen.getByLabelText(/Claude model/i), { target: { value: 'sonnet' } })
     fireEvent.change(screen.getByLabelText(/Claude execution mode/i), { target: { value: 'sandboxed' } })
     fireEvent.change(screen.getByLabelText(/Claude effort/i), { target: { value: 'high' } })
-    fireEvent.change(
-      screen.getByLabelText(/Project commands by language/i),
-      { target: { value: '{"python":{"test":"pytest -n auto","lint":"ruff check ."}}' } }
-    )
-    fireEvent.change(screen.getByLabelText(/Pipeline step/i), { target: { value: 'implement' } })
-    fireEvent.change(screen.getByLabelText(/Override prompt \(optional\)/i), { target: { value: 'Custom implement prompt' } })
+
+    // Execution tab
+    fireEvent.click(screen.getByRole('tab', { name: /Execution/i }))
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Orchestrator concurrency/i)).toBeInTheDocument()
+    })
+    fireEvent.change(screen.getByLabelText(/Orchestrator concurrency/i), { target: { value: '4' } })
+    fireEvent.click(screen.getByLabelText(/Auto dependency analysis/i))
+    fireEvent.change(screen.getByLabelText(/Max review attempts/i), { target: { value: '5' } })
     fireEvent.change(screen.getByLabelText(/Quality gate critical/i), { target: { value: '1' } })
     fireEvent.change(screen.getByLabelText(/Quality gate high/i), { target: { value: '2' } })
     fireEvent.change(screen.getByLabelText(/Quality gate medium/i), { target: { value: '3' } })
     fireEvent.change(screen.getByLabelText(/Quality gate low/i), { target: { value: '4' } })
-    fireEvent.click(screen.getByRole('button', { name: /Save settings/i }))
+
+    // Project commands (on Execution tab)
+    fireEvent.change(
+      screen.getByLabelText(/Project commands by language/i),
+      { target: { value: '{"python":{"test":"pytest -n auto","lint":"ruff check ."}}' } }
+    )
+
+    // Advanced tab
+    fireEvent.click(screen.getByRole('tab', { name: /Advanced/i }))
+    await waitFor(() => {
+      expect(screen.getByLabelText(/Default role/i)).toBeInTheDocument()
+    })
+    fireEvent.change(screen.getByLabelText(/Default role/i), { target: { value: 'reviewer' } })
+    fireEvent.change(screen.getByLabelText(/Task type role map/i), { target: { value: '{"bug":"debugger"}' } })
+    fireEvent.change(screen.getByLabelText(/Role provider overrides/i), { target: { value: '{"reviewer":"codex"}' } })
+    fireEvent.change(screen.getByLabelText(/Pipeline step/i), { target: { value: 'implement' } })
+    fireEvent.change(screen.getByLabelText(/Override prompt \(optional\)/i), { target: { value: 'Custom implement prompt' } })
+
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/i }))
 
     await waitFor(() => {
-      const settingsCall = mockedFetch.mock.calls.find(([url, init]) =>
+      const settingsCall = [...mockedFetch.mock.calls].reverse().find(([url, init]) =>
         String(url).includes('/api/settings') && (init as RequestInit | undefined)?.method === 'PATCH'
+        && String((init as RequestInit | undefined)?.body ?? '').includes('orchestrator')
       )
       expect(settingsCall).toBeTruthy()
       const body = JSON.parse(String((settingsCall?.[1] as RequestInit).body))
@@ -653,6 +672,11 @@ describe('App action coverage', () => {
       expect(body.project.prompt_injections).toEqual({})
     })
 
+    fireEvent.click(screen.getByRole('tab', { name: /Advanced/i }))
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { name: /Pinned Projects/i })).toBeInTheDocument()
+    })
+
     fireEvent.click(screen.getByRole('button', { name: /Unpin/i }))
     await waitFor(() => {
       expect(
@@ -670,13 +694,16 @@ describe('App action coverage', () => {
     fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: /Settings/i })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('tab', { name: /Advanced/i }))
+    await waitFor(() => {
       expect(screen.getByLabelText(/Pipeline step/i)).toBeInTheDocument()
       expect(screen.getByLabelText(/Override prompt \(optional\)/i)).toBeInTheDocument()
     })
 
     fireEvent.change(screen.getByLabelText(/Pipeline step/i), { target: { value: 'implement' } })
     fireEvent.click(screen.getByRole('button', { name: /Clear override/i }))
-    fireEvent.click(screen.getByRole('button', { name: /Save settings/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/i }))
 
     await waitFor(() => {
       const settingsCall = mockedFetch.mock.calls.find(([url, init]) =>
@@ -695,13 +722,16 @@ describe('App action coverage', () => {
     fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: /Settings/i })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('tab', { name: /Advanced/i }))
+    await waitFor(() => {
       expect(screen.getByLabelText(/Pipeline step/i)).toBeInTheDocument()
       expect(screen.getByLabelText(/Override prompt \(optional\)/i)).toBeInTheDocument()
     })
 
     fireEvent.change(screen.getByLabelText(/Pipeline step/i), { target: { value: 'implement' } })
     fireEvent.change(screen.getByLabelText(/Override prompt \(optional\)/i), { target: { value: '' } })
-    fireEvent.click(screen.getByRole('button', { name: /Save settings/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/i }))
 
     await waitFor(() => {
       const settingsCall = mockedFetch.mock.calls.find(([url, init]) =>
@@ -720,12 +750,15 @@ describe('App action coverage', () => {
     fireEvent.click(screen.getByRole('button', { name: /Settings/i }))
     await waitFor(() => {
       expect(screen.getByRole('heading', { name: /Settings/i })).toBeInTheDocument()
+    })
+    fireEvent.click(screen.getByRole('tab', { name: /Advanced/i }))
+    await waitFor(() => {
       expect(screen.getByLabelText(/Pipeline step/i)).toBeInTheDocument()
       expect(screen.getByLabelText(/Override prompt \(optional\)/i)).toBeInTheDocument()
     })
 
     fireEvent.change(screen.getByLabelText(/Pipeline step/i), { target: { value: 'implement' } })
-    fireEvent.click(screen.getByRole('button', { name: /Save settings/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^Save$/i }))
 
     await waitFor(() => {
       const settingsCall = mockedFetch.mock.calls.find(([url, init]) =>

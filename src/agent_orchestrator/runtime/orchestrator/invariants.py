@@ -174,8 +174,12 @@ def apply_runtime_invariants(
             task.status = "blocked"
             task.error = f"Invalid queued gate state detected ({gate_name})."
             task.pending_gate = None
-            if isinstance(task.metadata, dict):
-                task.metadata.pop("execution_checkpoint", None)
+            if not isinstance(task.metadata, dict):
+                task.metadata = {}
+            task.metadata.pop("execution_checkpoint", None)
+            action = service._generate_recommended_action(task)
+            if action:
+                task.metadata["recommended_action"] = action
             changed = True
             _record(
                 task,
@@ -194,6 +198,11 @@ def apply_runtime_invariants(
                     task.current_agent_id = None
                     metadata.pop("pending_precommit_approval", None)
                     metadata.pop("review_stage", None)
+                    if not isinstance(task.metadata, dict):
+                        task.metadata = {}
+                    action = service._generate_recommended_action(task)
+                    if action:
+                        task.metadata["recommended_action"] = action
                     changed = True
                     _record(
                         task,

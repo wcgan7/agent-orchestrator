@@ -12,6 +12,7 @@ from agent_orchestrator.runtime.domain.models import RunRecord, Task
 from agent_orchestrator.runtime.orchestrator.live_worker_adapter import (
     LiveWorkerAdapter,
     _detect_required_verify_commands,
+    _filter_npm_commands_by_scripts,
     _inject_required_verify_commands,
     _extract_json,
     _extract_json_value,
@@ -495,7 +496,8 @@ def test_heartbeat_defaults_are_forwarded(adapter: LiveWorkerAdapter) -> None:
 
     assert result.status == "ok"
     assert run_worker_mock.call_args.kwargs["heartbeat_seconds"] == 60
-    assert run_worker_mock.call_args.kwargs["heartbeat_grace_seconds"] == 240
+    # No global config set, so implement step uses built-in per-step default of 600s
+    assert run_worker_mock.call_args.kwargs["heartbeat_grace_seconds"] == 600
 
 
 def test_heartbeat_settings_from_workers_config(container: Container, adapter: LiveWorkerAdapter) -> None:
@@ -521,7 +523,8 @@ def test_heartbeat_settings_from_workers_config(container: Container, adapter: L
             return_value=run_result,
         ) as run_worker_mock,
     ):
-        result = adapter.run_step(task=_make_task(), step="implement", attempt=1)
+        # Use "plan" step which has no per-step default, so global config applies
+        result = adapter.run_step(task=_make_task(), step="plan", attempt=1)
 
     assert result.status == "ok"
     assert run_worker_mock.call_args.kwargs["heartbeat_seconds"] == 75
@@ -1367,6 +1370,10 @@ def test_verify_environment_note_normalizes_prisma_missing_database_url(
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.test_worker",
             return_value=(True, "ok"),
+        ),
+        patch(
+            "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_environment_preflight",
+            return_value=EnvironmentPreflightResult(ok=True, issues=()),
         ),
         patch(
             "agent_orchestrator.runtime.orchestrator.live_worker_adapter.run_worker",
@@ -2624,3 +2631,60 @@ def test_generate_run_summary_prompt_prefers_workdoc_snapshot(
     assert "## Workdoc snapshot" in prompt
     assert "Implemented API" in prompt
     assert "Execution log" in prompt
+
+
+# ------------------------------------------------------------------
+# _filter_npm_commands_by_scripts
+# ------------------------------------------------------------------
+
+
+def test_filter_npm_commands_removes_missing_script(tmp_path: Path) -> None:
+    """npm test is removed when package.json has no test script."""
+    (tmp_path / "package.json").write_text('{"scripts": {"build": "tsc"}}')
+    commands = {"test": "npm test", "lint": "npx eslint . 2>/dev/null || true"}
+    filtered = _filter_npm_commands_by_scripts(commands, tmp_path)
+    assert "test" not in filtered
+    # eslint via npx is not an npm script reference — should be kept.
+    assert "lint" in filtered
+
+
+def test_filter_npm_commands_keeps_existing_script(tmp_path: Path) -> None:
+    """npm test is kept when package.json has the test script."""
+    (tmp_path / "package.json").write_text('{"scripts": {"test": "vitest run"}}')
+    commands = {"test": "npm test", "lint": "npx eslint . 2>/dev/null || true"}
+    filtered = _filter_npm_commands_by_scripts(commands, tmp_path)
+    assert "test" in filtered
+    assert "lint" in filtered
+
+
+def test_filter_npm_commands_no_package_json(tmp_path: Path) -> None:
+    """All npm commands removed when package.json is missing."""
+    commands = {"test": "npm test"}
+    filtered = _filter_npm_commands_by_scripts(commands, tmp_path)
+    assert "test" not in filtered
+
+
+def test_filter_npm_commands_preserves_non_npm(tmp_path: Path) -> None:
+    """Non-npm commands are always preserved."""
+    (tmp_path / "package.json").write_text('{"scripts": {}}')
+    commands = {"test": "pytest", "typecheck": "mypy ."}
+    filtered = _filter_npm_commands_by_scripts(commands, tmp_path)
+    assert filtered == commands
+
+
+def test_filter_npm_commands_npm_run_variant(tmp_path: Path) -> None:
+    """npm run <script> is correctly parsed."""
+    (tmp_path / "package.json").write_text('{"scripts": {"lint": "eslint ."}}')
+    commands = {"lint": "npm run lint", "test": "npm run test"}
+    filtered = _filter_npm_commands_by_scripts(commands, tmp_path)
+    assert "lint" in filtered
+    assert "test" not in filtered
+
+
+def test_filter_npm_commands_keeps_compound_with_npm_fallback(tmp_path: Path) -> None:
+    """Compound commands where npm is a fallback (after ||) are kept."""
+    (tmp_path / "package.json").write_text('{"scripts": {}}')
+    commands = {"test": "npx vitest run 2>/dev/null || npm test"}
+    filtered = _filter_npm_commands_by_scripts(commands, tmp_path)
+    # npm test is a fallback after ||, not the primary command — should be kept.
+    assert "test" in filtered

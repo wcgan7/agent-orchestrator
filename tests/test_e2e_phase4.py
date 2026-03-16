@@ -89,12 +89,16 @@ def test_pin_create_run_review_approve_done(tmp_path: Path) -> None:
 def test_import_dependency_execution_order(tmp_path: Path) -> None:
     app = create_app(project_dir=tmp_path, worker_adapter=_PrdImportWorkerAdapter())
     with TestClient(app) as client:
-        settings = client.patch('/api/settings', json={'defaults': {'hitl_mode': 'review_only'}})
+        settings = client.patch('/api/settings', json={'defaults': {'hitl_mode': 'autopilot', 'task_generation': {'child_hitl_mode': 'autopilot', 'child_status': 'queued'}}})
         assert settings.status_code == 200
 
         preview = client.post('/api/import/prd/preview', json={'content': '- Step A\n- Step B'}).json()
         commit = client.post('/api/import/prd/commit', json={'job_id': preview['job_id']}).json()
         first_id, second_id = commit['created_task_ids']
+
+        # Ensure children use autopilot so gates don't block execution
+        for tid in (first_id, second_id):
+            client.patch(f'/api/tasks/{tid}', json={'hitl_mode': 'autopilot'})
 
         first_run = client.post(f'/api/tasks/{first_id}/run')
         assert first_run.status_code == 200

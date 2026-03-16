@@ -68,6 +68,7 @@ The build script enforces API contract checks (`check:mounted-api-contracts`) be
 - **`runtime/orchestrator/plan_manager.py`** — Plan revision management and refinement job orchestration.
 - **`runtime/orchestrator/reconciler.py`** — Runtime reconciliation to repair inconsistent state after crashes.
 - **`runtime/orchestrator/dependency_manager.py`** — Task dependency graph analysis and cycle detection.
+- **`runtime/orchestrator/env_resolver.py`** — Worker environment variable resolution: auto-detection from project files, 4-layer merge (auto/process/config/task), and API display view.
 - **`runtime/orchestrator/environment_preflight.py`** — Environment capability checks and auto-remediation before worker steps.
 - **`runtime/api/`** — FastAPI routes, split across multiple files:
   - `router_impl.py` — Router factory and shared request/response schemas.

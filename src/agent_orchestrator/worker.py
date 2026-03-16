@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import shlex
 import subprocess
 import sys
@@ -13,6 +14,8 @@ from typing import Any, Callable, Optional
 
 from .io_utils import _heartbeat_from_progress
 from .utils import _now_iso
+
+logger = logging.getLogger(__name__)
 
 
 def _stream_pipe(pipe: Any, file_path: Path, label: str, to_stderr: bool, quiet: bool = True) -> None:
@@ -48,6 +51,25 @@ def _latest_mtime(paths: list[Path]) -> Optional[datetime]:
     return latest
 
 
+def _has_live_children(pid: int) -> bool:
+    """Check if process has active child processes (macOS + Linux).
+
+    Uses ``pgrep -P`` which works on both macOS and Linux.  Falls back to
+    ``False`` when ``pgrep`` is unavailable (e.g. Windows) or times out.
+    """
+    try:
+        result = subprocess.run(
+            ["pgrep", "-P", str(pid)],
+            capture_output=True,
+            timeout=2,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return True
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return False
+
+
 class WorkerCancelledError(Exception):
     """Raised when a worker is cancelled mid-execution."""
 
@@ -64,6 +86,8 @@ def _run_codex_worker(
     expected_run_id: Optional[str] = None,
     on_spawn: Optional[Callable[[int], None]] = None,
     is_cancelled: Optional[Callable[[], bool]] = None,
+    env: Optional[dict[str, str]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> dict[str, Any]:
     prompt_path = run_dir / "prompt.txt"
     prompt_path.write_text(prompt)
@@ -98,6 +122,7 @@ def _run_codex_worker(
     process = subprocess.Popen(
         command_parts,
         cwd=project_dir,
+        env=env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -164,6 +189,15 @@ def _run_codex_worker(
 
         age = (now - last_activity).total_seconds()
         if age > heartbeat_grace_seconds:
+            if _has_live_children(process.pid):
+                logger.warning(
+                    "Heartbeat grace exceeded (%.0fs) but worker PID %d has "
+                    "active child processes — extending grace period.",
+                    age,
+                    process.pid,
+                )
+                last_activity = now
+                continue
             no_heartbeat = True
             process.terminate()
             try:
@@ -182,11 +216,18 @@ def _run_codex_worker(
             stderr_thread.join(timeout=5)
             raise WorkerCancelledError("Task cancelled by user")
 
-        try:
-            process.wait(timeout=poll_interval)
-            break
-        except subprocess.TimeoutExpired:
-            continue
+        if cancel_event is not None:
+            # Wait on the cancel event so that setting it from another thread
+            # unblocks us immediately instead of sleeping for poll_interval.
+            cancel_event.wait(timeout=poll_interval)
+            if process.poll() is not None:
+                break
+        else:
+            try:
+                process.wait(timeout=poll_interval)
+                break
+            except subprocess.TimeoutExpired:
+                pass
 
     exit_code = process.poll()
     if exit_code is None:
