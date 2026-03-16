@@ -31,9 +31,10 @@ test('saves settings through the real API', async ({ page }) => {
   await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
 
   await page.getByRole('tab', { name: 'Execution' }).click()
-  const concurrency = page.getByLabel('Orchestrator concurrency')
+  const executionCard = page.locator('article', { has: page.getByRole('heading', { name: 'Execution Controls' }) })
+  const concurrency = executionCard.getByLabel('Orchestrator concurrency')
   await concurrency.fill('4')
-  await page.getByRole('button', { name: 'Save' }).click()
+  await executionCard.getByRole('button', { name: 'Save' }).click()
 
   await expect(page.getByText('Settings saved.')).toBeVisible({ timeout: 10_000 })
 })
